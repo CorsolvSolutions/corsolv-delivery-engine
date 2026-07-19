@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1653,6 +1654,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				meta[namedSessionMetadataKey] = boolMetadata(true)
 				meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
 				meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
+				// Only seed the kickoff backstop's state when we have a
+				// concrete bound step to track progress against (AC4): an
+				// always-mode session awake on default demand alone has no
+				// per-turn signal yet, so it stays out of scope for v1.
+				if tp.BoundStepID != "" {
+					meta[beadmeta.BoundStepIDMetadataKey] = tp.BoundStepID
+					meta[startupKickoffStateKey] = startupKickoffStatePending
+					meta[startupKickoffStartedAtKey] = now.UTC().Format(time.RFC3339)
+					meta[startupKickoffAttemptsKey] = "0"
+				}
 			}
 			// Store the qualified template name so the API can derive the
 			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
