@@ -508,6 +508,34 @@ func reopenClosedConfiguredNamedSessionBead(
 	return reopened, strings.TrimSpace(reopened.Metadata["session_name"]), true
 }
 
+// startupKickoffReopenMetadata builds the extraMeta batch that
+// reopenClosedConfiguredNamedSessionBead merges into a reopened bead's
+// startup-kickoff keys. A closed bead can carry a prior binding's state
+// (e.g. startup_kickoff_state=confirmed against an old bound step): when
+// boundStepID is set, this seeds the same 4 keys the fresh-create path seeds
+// so the backstop starts clean against the new step; when boundStepID is
+// empty, it clears all 5 keys — including startupKickoffLastNudgeAtKey,
+// which the create path deliberately leaves unseeded but a reopen can still
+// be carrying a stale value for — so no stale progress/give-up state survives
+// onto a session with nothing bound.
+func startupKickoffReopenMetadata(boundStepID string, now time.Time) map[string]string {
+	if boundStepID == "" {
+		return map[string]string{
+			beadmeta.BoundStepIDMetadataKey: "",
+			startupKickoffStateKey:          "",
+			startupKickoffStartedAtKey:      "",
+			startupKickoffAttemptsKey:       "",
+			startupKickoffLastNudgeAtKey:    "",
+		}
+	}
+	return map[string]string{
+		beadmeta.BoundStepIDMetadataKey: boundStepID,
+		startupKickoffStateKey:          startupKickoffStatePending,
+		startupKickoffStartedAtKey:      now.UTC().Format(time.RFC3339),
+		startupKickoffAttemptsKey:       "0",
+	}
+}
+
 func retireDuplicateConfiguredNamedSessionBeads(
 	store beads.Store,
 	rigStores map[string]beads.Store,
@@ -1580,7 +1608,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
-			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
+			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
+			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, extraMeta, stderr); ok {
 				b = reopened
 				exists = true
 				state = syncSessionCachedState(sn, b, exists, sp)
