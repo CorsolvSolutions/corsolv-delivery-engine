@@ -38,6 +38,13 @@ func TestDecideMaxSessionAgeLadder(t *testing.T) {
 			outcome: "deferred_quarantine",
 		},
 		{
+			name:    "pinned blocks before anything else",
+			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes, AssignedWork: AssignedWorkHas},
+			action:  TimerActionDefer,
+			reason:  "pinned",
+			outcome: "deferred_pinned",
+		},
+		{
 			name:   "unknown pending interaction must be gathered",
 			facts:  TimerFacts{Triggered: true},
 			action: TimerActionGatherPending,
@@ -126,6 +133,13 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			action:  TimerActionDefer,
 			reason:  "quarantine",
 			outcome: "deferred_quarantine",
+		},
+		{
+			name:    "pinned blocks",
+			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes},
+			action:  TimerActionDefer,
+			reason:  "pinned",
+			outcome: "deferred_pinned",
 		},
 		{
 			name:   "unknown pending interaction must be gathered",
@@ -251,7 +265,7 @@ func TestDecideAssignedWorkExhausted(t *testing.T) {
 func TestTimerDecisionsTerminate(t *testing.T) {
 	pendings := []PendingFact{PendingNo, PendingYes}
 	works := []AssignedWorkFact{AssignedWorkNone, AssignedWorkHas}
-	blockers := []string{"", "user_hold", "quarantine"}
+	blockers := []string{"", "user_hold", "quarantine", "pinned"}
 	for _, b := range blockers {
 		for _, p := range pendings {
 			for _, w := range works {

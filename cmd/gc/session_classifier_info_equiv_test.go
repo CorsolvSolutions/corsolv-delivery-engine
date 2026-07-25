@@ -1715,6 +1715,10 @@ func TestLifecycleTimerBlockerInfo(t *testing.T) {
 		{"hold wins", map[string]string{"held_until": future, "quarantined_until": future}, "user_hold"},
 		{"expired hold", map[string]string{"held_until": past}, ""},
 		{"expired quarantine", map[string]string{"quarantined_until": past}, ""},
+		{"pinned", map[string]string{"pin_awake": "true"}, "pinned"},
+		{"pinned whitespace", map[string]string{"pin_awake": " true "}, "pinned"},
+		{"hold wins over pinned", map[string]string{"held_until": future, "pin_awake": "true"}, "user_hold"},
+		{"quarantine wins over pinned", map[string]string{"quarantined_until": future, "pin_awake": "true"}, "quarantine"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
