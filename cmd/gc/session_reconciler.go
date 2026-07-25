@@ -45,14 +45,18 @@ type wakeTarget struct {
 }
 
 // lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
-// quarantine) from the typed Info.HeldUntil / Info.QuarantinedUntil mirrors, using
-// the metadataTimeInFuture rule.
+// quarantine / pinned) from the typed Info.HeldUntil / Info.QuarantinedUntil /
+// Info.PinAwake mirrors, using the metadataTimeInFuture rule for the timed
+// blockers and an exact "true" compare for the pin (matching the wake-pass
+// suppression check elsewhere in this file).
 func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	switch {
 	case metadataTimeInFuture(info.HeldUntil, now):
 		return "user_hold"
 	case metadataTimeInFuture(info.QuarantinedUntil, now):
 		return "quarantine"
+	case strings.TrimSpace(info.PinAwake) == "true":
+		return "pinned"
 	default:
 		return ""
 	}
@@ -78,6 +82,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonUserHold
 	case string(TraceReasonQuarantine):
 		reason = TraceReasonQuarantine
+	case string(TraceReasonPinned):
+		reason = TraceReasonPinned
 	case string(TraceReasonPending):
 		reason = TraceReasonPending
 	case string(TraceReasonAssignedWork):
@@ -96,6 +102,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredUserHold
 	case string(TraceOutcomeDeferredQuarantine):
 		outcome = TraceOutcomeDeferredQuarantine
+	case string(TraceOutcomeDeferredPinned):
+		outcome = TraceOutcomeDeferredPinned
 	case string(TraceOutcomeDeferredPending):
 		outcome = TraceOutcomeDeferredPending
 	case string(TraceOutcomeDeferredBusy):
