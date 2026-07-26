@@ -71,7 +71,7 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no unpushed commits, no stashes.
+//  6. Git state: no uncommitted changes, no unpushed commits.
 //
 // When dryRun is true the reaper performs all discovery and classification and
 // emits bead.worktree.reap_skipped events describing what it would reap and
@@ -260,9 +260,8 @@ func reapClosedBeadWorktrees(
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnpushed, _ := wg.HasUnpushedCommitsResult()
-				hasStashes, _ := wg.HasStashesResult()
-				if hasUncommitted || hasUnpushed || hasStashes {
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
+				if hasUncommitted || hasUnpushed {
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v", hasUncommitted, hasUnpushed)
 				}
 			}
 
