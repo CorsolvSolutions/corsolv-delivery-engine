@@ -117,8 +117,8 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
-	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info):
-		fmt.Fprintf(stderr, "gc session wake: session %s is in state %q with no live runtime; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState) //nolint:errcheck
+	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info):
+		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, stuckCreatingSinceInfo(res.Info).UTC().Format(time.RFC3339)) //nolint:errcheck
 		return 1
 	}
 	if deps.cityResolved {
@@ -175,4 +175,15 @@ func sessionWakeRequestedCreateInfo(info session.Info) bool {
 func sessionWakeStuckInFlightInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	return state == session.StateCreating || state == session.StateStartPending
+}
+
+// stuckCreatingSinceInfo returns the timestamp isStaleCreatingInfo measures
+// staleness from (the per-attempt pending_create_started_at marker, falling
+// back to CreatedAt), so the CLI's rejection message names exactly what was
+// checked instead of duplicating the staleness decision itself.
+func stuckCreatingSinceInfo(info session.Info) time.Time {
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		return started
+	}
+	return info.CreatedAt
 }
