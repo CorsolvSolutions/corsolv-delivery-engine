@@ -311,6 +311,65 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 	}
 }
 
+// TestDoSessionWake_StuckInFlightAgeGate pins the age-gate on the
+// hasRunnableTemplate/stuck-in-flight CLI arm: a session that is still
+// healthily mid-create (fresh pending_create_started_at) must wake
+// successfully, and only a create that has sat past
+// staleCreatingStateTimeout should be rejected. Before the age gate, ANY
+// creating/start-pending session with a runnable template failed wake with
+// exit 1, even one a provider had just legitimately started.
+func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
+	freshStart := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	staleStart := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+
+	tests := []struct {
+		name      string
+		state     string
+		startedAt string
+		wantCode  int
+	}{
+		{name: "fresh creating wakes normally", state: "creating", startedAt: freshStart, wantCode: 0},
+		{name: "fresh start-pending wakes normally", state: "start-pending", startedAt: freshStart, wantCode: 0},
+		{name: "stale creating rejects wake", state: "creating", startedAt: staleStart, wantCode: 1},
+		{name: "stale start-pending rejects wake", state: "start-pending", startedAt: staleStart, wantCode: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"template":                  "worker",
+					"state":                     tt.state,
+					"pending_create_started_at": tt.startedAt,
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(): %v", err)
+			}
+
+			deps := sessionWakeDeps{store: store, cityPath: "/city", now: time.Now}
+
+			var stdout, stderr bytes.Buffer
+			code := doSessionWake(b.ID, &stdout, &stderr, false, deps)
+			if code != tt.wantCode {
+				t.Fatalf("doSessionWake() = %d, want %d; stderr=%s", code, tt.wantCode, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "no live runtime") {
+				t.Fatalf("stderr = %q, message must state what was checked, not the old 'no live runtime' wording", stderr.String())
+			}
+			if tt.wantCode == 1 {
+				want := `has been in state "` + tt.state + `" since`
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
 // This is the single real CLI/config/file-store/controller-socket composition
 // proof for session wake. Lower-level wake behavior belongs in doSessionWake
 // unit tests; managed-Dolt consistency has its own provider boundary owner.
