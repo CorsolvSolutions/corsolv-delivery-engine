@@ -85,7 +85,7 @@ func TestOpenStoreResultWithConfigSkipsLoad(t *testing.T) {
 	}
 
 	before := loadCityConfigCalls.Load()
-	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, gate.ModeUnset, false, false, cfg); err != nil {
+	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, cfg, gate.ModeUnset, false, false); err != nil {
 		t.Fatalf("openStoreResultAtForCityWithConfig(cfg): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
@@ -93,7 +93,7 @@ func TestOpenStoreResultWithConfigSkipsLoad(t *testing.T) {
 	}
 
 	before = loadCityConfigCalls.Load()
-	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, gate.ModeUnset, false, false, nil); err != nil {
+	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, nil, gate.ModeUnset, false, false); err != nil {
 		t.Fatalf("openStoreResultAtForCityWithConfig(nil): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
@@ -121,7 +121,7 @@ func TestOpenStoreResultWithConfigSkipsLoad_ExecProvider(t *testing.T) {
 	}
 
 	before := loadCityConfigCalls.Load()
-	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, gate.ModeUnset, false, false, cfg); err != nil {
+	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, cfg, gate.ModeUnset, false, false); err != nil {
 		t.Fatalf("openStoreResultAtForCityWithConfig(cfg): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
@@ -129,7 +129,7 @@ func TestOpenStoreResultWithConfigSkipsLoad_ExecProvider(t *testing.T) {
 	}
 
 	before = loadCityConfigCalls.Load()
-	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, gate.ModeUnset, false, false, nil); err != nil {
+	if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, nil, gate.ModeUnset, false, false); err != nil {
 		t.Fatalf("openStoreResultAtForCityWithConfig(nil): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {

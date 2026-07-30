@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -714,6 +715,12 @@ func resolveContextFromDir() (resolvedContext, error) {
 	}
 
 	// Step 10: Walk up from cwd looking for city.toml.
+	if isTestBinary() {
+		return resolvedContext{}, fmt.Errorf(
+			"not in a city directory (ambient upward discovery from %q is refused in "+
+				"test binaries; set GC_CITY, GC_CITY_PATH, or GC_CITY_ROOT to an explicit "+
+				"synthetic city)", cwd)
+	}
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
@@ -732,18 +739,32 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	if err != nil {
 		return resolvedContext{}, err
 	}
+	// Validate the explicit target directly before scanning the registry for
+	// rig bindings. An unrelated registered city with a broken/stale config
+	// must not abort resolution of a perfectly healthy explicit target
+	// (#4364) -- this mirrors resolveCityNameContext's f.localIsCity-first
+	// ordering for named refs.
+	//
+	// Deliberately narrower than validateCityPath: only a real city.toml
+	// qualifies here, not validateCityPath's HasRuntimeRoot fallback. A rig
+	// directory can carry a leftover ".gc/" runtime artifact with no
+	// city.toml of its own (the same shape resolveContextFromDir's step-7
+	// comment already guards against for a different code path); accepting
+	// that shape here would misread the rig dir as its own city and
+	// short-circuit before rig resolution ever runs, silently losing the
+	// real city+rig binding.
+	if citylayout.HasCityConfig(abs) {
+		return resolvedContext{
+			CityPath: abs,
+			RigName:  rigFromCwdDir(abs, abs),
+		}, nil
+	}
 	ctx, ok, err := resolveRigPathToContext(abs)
 	if err != nil {
 		return resolvedContext{}, err
 	}
 	if ok {
 		return ctx, nil
-	}
-	if cityPath, err := validateCityPath(abs); err == nil {
-		return resolvedContext{
-			CityPath: cityPath,
-			RigName:  rigFromCwdDir(cityPath, abs),
-		}, nil
 	}
 	cityPath, err := findCity(abs)
 	if err != nil {
@@ -1332,13 +1353,13 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	return openStoreAtForCityWithAuthority(storePath, cityPath, false)
 }
 
-// openStoreAtForCityWithConfig is openStoreAtForCity for callers that already
-// hold a resolved *config.City (e.g. a hot per-tick path that rebuilds only
-// on config change) and must not pay for a redundant city.toml + pack-includes
-// reparse on every call. cfg may be nil, in which case behavior matches
-// openStoreAtForCity exactly (see openStoreResultAtForCityWithConfig).
+// openStoreAtForCityWithConfig is openStoreAtForCity for a caller that already
+// holds this city's config. Opening a store resolves the conditional-writes
+// mode from config, which otherwise means loading the whole city config —
+// builtin-cache readiness and pack expansion included — again inside the open.
+// A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, gate.ModeUnset, false, false, cfg)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1372,26 +1393,25 @@ func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride g
 }
 
 func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, modeOverride, haveMode, authoritative, nil)
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
-// with the resolved city config supplied by the caller instead of always
-// reloaded from disk. A hot per-tick caller that already tracks its own
-// *config.City (e.g. the order dispatcher, rebuilt only on config reload/
-// rescan — see CityRuntime.replaceOrderDispatcher) passes it through here so
-// opening N scope stores on M ticks costs one config load, not N*M
-// (ga-237xpr). cfg == nil reproduces the legacy always-reload behavior
-// exactly, which every other (non-hot-path) caller still relies on: their
-// config may have changed since the last invocation, so reloading per call is
-// correct for them.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool, cfg *config.City) (beads.StoreOpenResult, error) {
+// with the city config supplied by a caller that already loaded it. A nil
+// config is loaded here, which is what every caller outside the bd scope
+// resolution path passes.
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
 	if cfg == nil {
 		cfg, _ = loadCityConfig(runtimeCityPath, io.Discard)
+	} else {
+		// Loading the config would have run the builtin-cache readiness pass.
+		// Reusing one must not skip that self-heal for a city this process has
+		// never readied.
+		_ = ensureBuiltinRuntimeAssetsForSuppliedConfig(runtimeCityPath, io.Discard)
 	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
@@ -1428,16 +1448,17 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, modeOverride
 			if _, err := exec.LookPath("bd"); err != nil {
 				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
-			return openBdStoreAt(scopeRoot, runtimeCityPath)
+			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenExecStore: func() (beads.Store, error) {
-			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath, cfg)
+			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
-			// Reuse cfg here too (mirrors the OpenExecStore fix above): this is
-			// the synchronous open-time call, invoked once per store open, not
-			// the reopen closure below (a separate, rare reconnect path this
-			// bead intentionally leaves alone — see ga-237xpr notes).
+			// Reuse the config this call already loaded. Passing nil made the
+			// rig-scoped projection load the whole city config a second time,
+			// pack expansion included, for the same city at the same moment.
+			// The reopen hook below deliberately keeps re-loading: it fires long
+			// after this open, where re-reading current state is the point.
 			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
@@ -1468,11 +1489,10 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, modeOverride
 	return result, nil
 }
 
-// openExecStoreAtForCity opens an exec-provider store. cfg is the caller's
-// already-resolved city config, reused here for the rig-scoped Dolt env
-// projection instead of a second loadCityConfig call; if cfg is nil it is
-// loaded on demand, matching the pre-ga-237xpr behavior.
-func openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath string, cfg *config.City) (beads.Store, error) {
+// openExecStoreAtForCityWithConfig opens the exec-provider store for a city.
+// A caller that already holds this city's config passes it to avoid reloading
+// it; a nil config is loaded here.
+func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath string, cfg *config.City) (beads.Store, error) {
 	target, err := resolveConfiguredExecStoreTargetWithConfig(runtimeCityPath, scopeRoot, cfg)
 	if err != nil {
 		return nil, err
@@ -1480,13 +1500,15 @@ func openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath string, cfg *co
 	env := gcExecStoreEnv(runtimeCityPath, target, provider)
 	if execProviderNeedsScopedDoltStoreEnv(provider) {
 		if target.ScopeKind == "rig" {
-			if cfg == nil {
-				cfg, err = loadCityConfig(runtimeCityPath, io.Discard)
+			rigCfg := cfg
+			if rigCfg == nil {
+				loaded, err := loadCityConfig(runtimeCityPath, io.Discard)
 				if err != nil {
 					return nil, err
 				}
+				rigCfg = loaded
 			}
-			projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+			projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, rigCfg, target.ScopeRoot)
 			if err != nil {
 				return nil, err
 			}
@@ -1519,19 +1541,26 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
-	scopeRoot = filepath.Clean(scopeRoot)
 	// Resolve symlinks so a city reached through a linked path (e.g. ~/gc ->
 	// /real/city) yields the same scope root as the real path. Without this the
 	// native-store identity gate sees an unregistered scope and rejects it
 	// ("database project_id could not be confirmed"), silently degrading to the
 	// bd-subprocess fallback.
-	if resolved, err := filepath.EvalSymlinks(scopeRoot); err == nil {
+	//
+	// Normalize through pathutil, not bare EvalSymlinks: pathutil also collapses
+	// the darwin /private alias. Resolving without that collapse maps an
+	// already-canonical /var city path to a /private/var scope root, so the
+	// scope no longer matches the city it was derived from.
+	if resolved := pathutil.NormalizePathForCompare(scopeRoot); resolved != "" {
 		scopeRoot = resolved
 	}
 	return scopeRoot
 }
 
-func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
+// openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
+// A caller that already holds this city's config passes it to avoid reloading
+// it; a nil config is loaded here.
+func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		store := bdStoreForCity(storePath, cityPath)
 		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
@@ -1539,9 +1568,12 @@ func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 		}
 		return store, nil
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		cfg = nil
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			loaded = nil
+		}
+		cfg = loaded
 	}
 	store := bdStoreForRig(storePath, cityPath, cfg)
 	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
