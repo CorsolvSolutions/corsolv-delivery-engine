@@ -1883,10 +1883,19 @@ func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
 // test: dispatch()'s per-tick store-open must reuse the dispatcher's own
 // cached *config.City instead of re-parsing city.toml (and all pack
 // includes) on every tick for every scope target. Unlike the other dispatch
-// tests in this file, this one must drive the REAL storeFn built by
-// newMemoryOrderDispatcher (openStoreAtForCity's actual chain) rather than
-// buildOrderDispatcherFromListExec's fixed-store stub, or it would never
-// exercise the code path this bug lives in.
+// tests in this file, this one drives the REAL storeFn built by
+// newMemoryOrderDispatcher rather than buildOrderDispatcherFromListExec's
+// fixed-store stub, so the dispatcher's cached cfg actually reaches a store
+// open instead of stopping at a stub.
+//
+// Scope, stated exactly, because a test that overstates its coverage stops
+// the next reader from looking: this city declares provider = "file", so it
+// covers the dispatcher -> openStoreAtForCityWithConfig -> OpenFileStore
+// path and nothing else. It does NOT exercise the exec: or native bd store
+// paths. Per-provider coverage of the same config-reuse invariant lives in
+// store_rollout_test.go — TestOpenStoreResultWithConfigSkipsLoad for the
+// file path and TestOpenStoreResultWithConfigSkipsLoad_ExecProvider for the
+// exec: path, which is where the reparse hole actually was.
 func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
 	cityDir := t.TempDir()
 	toml := "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"file\"\n"
