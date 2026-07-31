@@ -62,8 +62,15 @@ type TimerFacts struct {
 	// with a valid anchor). When false no other fact is consulted.
 	Triggered bool
 	// Blocker is the active lifecycle timer blocker as reported by the
-	// caller (currently "user_hold" or "quarantine"), or empty when none
-	// applies. Any non-empty value defers the timer.
+	// caller (currently "user_hold", "quarantine", or "pinned"), or empty
+	// when none applies. Any non-empty value defers the timer.
+	//
+	// "user_hold" and "quarantine" are timestamp-gated and self-clear once
+	// their deadline passes; "pinned" is durable and clears only when the
+	// operator unpins. Both ladders defer on any non-empty value, and the
+	// blocker rung has no consecutive-defer escape valve (unlike the
+	// assigned-work rung, which has DecideAssignedWorkExhausted), so a
+	// durable blocker defers its timer for as long as it is set.
 	Blocker string
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
