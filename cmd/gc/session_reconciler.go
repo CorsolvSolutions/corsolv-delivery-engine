@@ -47,8 +47,11 @@ type wakeTarget struct {
 // lifecycleTimerBlockerInfo reports the active lifecycle timer blocker (user hold /
 // quarantine / pinned) from the typed Info.HeldUntil / Info.QuarantinedUntil /
 // Info.PinAwake mirrors, using the metadataTimeInFuture rule for the timed
-// blockers and an exact "true" compare for the pin (matching the wake-pass
-// suppression check elsewhere in this file).
+// blockers and a TrimSpace'd "true" compare for the pin, matching
+// pinnedConfiguredNamedSessionKillProtected below and the projection's
+// projectWakeCauses. Note the wake-pass suppression check
+// (`info.PinAwake != "true"`) compares raw and is the one pin read that does
+// not trim; it is not the precedent for this compare.
 func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	switch {
 	case metadataTimeInFuture(info.HeldUntil, now):
