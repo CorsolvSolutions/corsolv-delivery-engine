@@ -52,6 +52,9 @@ type wakeTarget struct {
 // projectWakeCauses. Note the wake-pass suppression check
 // (`info.PinAwake != "true"`) compares raw and is the one pin read that does
 // not trim; it is not the precedent for this compare.
+//
+// This is the full ladder, reported as-is to the idle-timeout timer. The
+// max-session-age timer narrows it — see maxSessionAgeBlockerInfo.
 func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	switch {
 	case metadataTimeInFuture(info.HeldUntil, now):
@@ -63,6 +66,35 @@ func lifecycleTimerBlockerInfo(info sessionpkg.Info, now time.Time) string {
 	default:
 		return ""
 	}
+}
+
+// maxSessionAgeBlockerInfo reports the active blocker for the max-session-age
+// timer: lifecycleTimerBlockerInfo minus the pin. A pin exempts a session from
+// the idle ladder, but it must not exempt it from the age-based restart.
+//
+// Deferring here would not keep the pinned session alive. max_session_age does
+// not kill: SleepPatch records state=asleep with sleep_reason=max_session_age,
+// and ComputeAwakeSet's durable pin override re-wakes an asleep pinned session
+// on the next tick — "asleep" is absent from that override's pinBlockedByState
+// set, and unlike the on-demand override directly above it, the pin override
+// carries no sleep_reason guard. So the stop is the credential refresh the
+// timer exists to perform, and deferring it would skip the refresh without
+// saving the session.
+//
+// The defer would also be unbounded. user_hold and quarantine are
+// timestamp-gated and self-clear once their deadline passes; a pin clears only
+// when an operator unpins it, and the blocker rung has no consecutive-defer
+// escape valve of the kind assigned_work_defer_limit gives the assigned-work
+// rung. A pinned session would therefore never reach its age restart at all.
+//
+// Because lifecycleTimerBlockerInfo checks the timed blockers first, a
+// "pinned" result means neither of them is active, so dropping it here loses
+// no blocker.
+func maxSessionAgeBlockerInfo(info sessionpkg.Info, now time.Time) string {
+	if blocker := lifecycleTimerBlockerInfo(info, now); blocker != "pinned" {
+		return blocker
+	}
+	return ""
 }
 
 // timerTraceCodes maps a lifecycle-timer decision's trace reason/outcome onto
@@ -3128,14 +3160,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// so no work is lost mid-flight. The next tick retries.
 		// sessionpkg.DecideMaxSessionAge owns the decision ladder (blocker,
 		// then pending interaction, then assigned work, then stop); this
-		// block gathers the facts it asks for and executes the outcome.
+		// block gathers the facts it asks for and executes the outcome. The
+		// blocker fact deliberately omits the durable pin — a pinned session
+		// still gets its age-based credential restart. See
+		// maxSessionAgeBlockerInfo.
 		if maxAgeTr != nil && alive {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[id].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
 				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
 			}
 			if facts.Triggered {
-				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
+				facts.Blocker = maxSessionAgeBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideMaxSessionAge(facts)
 			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {

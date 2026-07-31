@@ -37,13 +37,9 @@ func TestDecideMaxSessionAgeLadder(t *testing.T) {
 			reason:  "quarantine",
 			outcome: "deferred_quarantine",
 		},
-		{
-			name:    "pinned blocks before anything else",
-			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes, AssignedWork: AssignedWorkHas},
-			action:  TimerActionDefer,
-			reason:  "pinned",
-			outcome: "deferred_pinned",
-		},
+		// No "pinned" case here on purpose: the max-session-age caller does
+		// not report the durable pin as a blocker, so this ladder never sees
+		// it. cmd/gc's TestMaxSessionAgeBlockerInfo is what pins that.
 		{
 			name:   "unknown pending interaction must be gathered",
 			facts:  TimerFacts{Triggered: true},
@@ -135,7 +131,9 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			outcome: "deferred_quarantine",
 		},
 		{
-			name:    "pinned blocks",
+			// The idle ladder is the only one the durable pin reaches; the
+			// max-session-age caller withholds it (see that ladder's test).
+			name:    "pinned blocks the idle ladder",
 			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes},
 			action:  TimerActionDefer,
 			reason:  "pinned",

@@ -1730,6 +1730,37 @@ func TestLifecycleTimerBlockerInfo(t *testing.T) {
 	}
 }
 
+// The max-session-age timer takes the same blocker ladder minus the durable
+// pin: a pinned session is exempt from the idle kill but must still get its
+// age-based credential restart, which the pin override then re-wakes it from.
+func TestMaxSessionAgeBlockerInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	tests := []struct {
+		name string
+		md   map[string]string
+		want string
+	}{
+		{"none", map[string]string{}, ""},
+		{"hold", map[string]string{"held_until": future}, "user_hold"},
+		{"quarantine", map[string]string{"quarantined_until": future}, "quarantine"},
+		{"expired hold", map[string]string{"held_until": past}, ""},
+		{"pinned does not block max session age", map[string]string{"pin_awake": "true"}, ""},
+		{"pinned whitespace does not block max session age", map[string]string{"pin_awake": " true "}, ""},
+		{"hold still blocks a pinned session", map[string]string{"held_until": future, "pin_awake": "true"}, "user_hold"},
+		{"quarantine still blocks a pinned session", map[string]string{"quarantined_until": future, "pin_awake": "true"}, "quarantine"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := seedSessionInfo(makeBead("b1", tt.md))
+			if got := maxSessionAgeBlockerInfo(info, now); got != tt.want {
+				t.Errorf("maxSessionAgeBlockerInfo = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResetPendingCommittedAtInfo(t *testing.T) {
 	const valid = "2026-03-08T12:00:00Z"
 	tests := []struct {

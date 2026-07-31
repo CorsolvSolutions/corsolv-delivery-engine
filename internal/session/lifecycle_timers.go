@@ -65,12 +65,15 @@ type TimerFacts struct {
 	// caller (currently "user_hold", "quarantine", or "pinned"), or empty
 	// when none applies. Any non-empty value defers the timer.
 	//
-	// "user_hold" and "quarantine" are timestamp-gated and self-clear once
-	// their deadline passes; "pinned" is durable and clears only when the
-	// operator unpins. Both ladders defer on any non-empty value, and the
-	// blocker rung has no consecutive-defer escape valve (unlike the
-	// assigned-work rung, which has DecideAssignedWorkExhausted), so a
-	// durable blocker defers its timer for as long as it is set.
+	// Both ladders defer on any non-empty value, and the blocker rung has no
+	// consecutive-defer escape valve (unlike the assigned-work rung, which
+	// has DecideAssignedWorkExhausted), so a blocker defers its timer for as
+	// long as the caller keeps reporting it. Which blockers a caller reports
+	// is therefore caller policy, and it is not uniform across the two
+	// timers: "user_hold" and "quarantine" are timestamp-gated and self-clear
+	// once their deadline passes, so both timers report them, while "pinned"
+	// is durable and clears only when the operator unpins — the idle-timeout
+	// caller reports it and the max-session-age caller deliberately does not.
 	Blocker string
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
