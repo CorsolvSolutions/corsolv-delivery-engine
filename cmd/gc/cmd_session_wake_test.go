@@ -376,7 +376,7 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 				t.Fatalf("doSessionWake() = %d, want %d; stderr=%s", code, tt.wantCode, stderr.String())
 			}
 			if !withdrawCalled {
-				t.Fatalf("withdrawQueuedWaitNudges was not called (exit %d): WakeSession already cancelled the waits, so their nudges are stranded", code)
+				t.Fatalf("withdrawQueuedWaitNudges was not called (exit %d): WakeSession already canceled the waits, so their nudges are stranded", code)
 			}
 			if strings.Contains(stderr.String(), "no live runtime") {
 				t.Fatalf("stderr = %q, message must state what was checked, not the old 'no live runtime' wording", stderr.String())

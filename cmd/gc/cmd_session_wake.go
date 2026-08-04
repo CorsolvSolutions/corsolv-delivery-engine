@@ -123,7 +123,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	// wake_requested_at set, quarantine cleared) before this arm is reached, so the
 	// nonzero exit reports "wake cannot complete", not "nothing happened". The exit
 	// is deferred to after the cleanup block below so the waits WakeSession already
-	// cancelled still get their queued nudges withdrawn.
+	// canceled still get their queued nudges withdrawn.
 	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info):
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, stuckCreatingSinceInfo(res.Info).UTC().Format(time.RFC3339)) //nolint:errcheck
 		rejectStuck = true
