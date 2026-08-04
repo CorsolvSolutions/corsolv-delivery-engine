@@ -105,7 +105,8 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	nudgeIDs := res.NudgeIDs
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
 	switch {
-	case !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info):
+	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) ||
+		(sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info))):
 		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
@@ -161,10 +162,7 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
-	return state == session.StateSuspended ||
-		state == session.StateDrained ||
-		state == session.StateCreating ||
-		state == session.StateStartPending
+	return state == session.StateSuspended || state == session.StateDrained
 }
 
 // sessionWakeStuckInFlightInfo reports whether info was already mid-create

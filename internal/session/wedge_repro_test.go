@@ -5,16 +5,19 @@ import (
 	"time"
 )
 
-// TestCreatingWedgesWhenRuntimeUnobserved demonstrates ga-pofwv9: a session bead
-// stuck in state=creating is only healed when the runtime was OBSERVED. When the
-// runtime probe returns Observed=false — the case for a session that never
-// acquired a session_key, so there is nothing to probe — projectRuntimeProjection
-// bails at the !input.Runtime.Observed guard and returns the stored state
-// unchanged, never reaching the BaseStateCreating staleness branch that would
-// heal it. The bead then sits in "creating" forever while still counting against
-// pool occupancy.
+// TestCreatingWedgesWhenRuntimeUnobserved pins the ga-pofwv9 contract: a session
+// bead stuck in state=creating heals whether or not the runtime was OBSERVED.
+// Before the fix, an Observed=false probe — the case for a session that never
+// acquired a session_key, so there is nothing to probe — made
+// projectRuntimeProjection bail at the !input.Runtime.Observed guard and return
+// the stored state unchanged, never reaching the BaseStateCreating staleness
+// branch that would heal it; the bead then sat in "creating" forever while still
+// counting against pool occupancy. It now heals to asleep once aged past
+// unobservedCreatingTimeout, and only then — the third subtest guards the
+// overcorrection where a transient probe failure over a young, live create would
+// be healed away.
 //
-// Runtime.Observed is the ONLY field that differs between the two subtests.
+// Runtime.Observed is the ONLY field that differs between the first two subtests.
 func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	longAgo := now.Add(-12 * 24 * time.Hour) // 12 days, matching gm-4l0p2
@@ -43,7 +46,7 @@ func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 		}
 	})
 
-	t.Run("unobserved runtime stays creating forever", func(t *testing.T) {
+	t.Run("aged unobserved runtime heals to asleep", func(t *testing.T) {
 		got := ProjectLifecycle(newInput(false))
 		t.Logf("observed=false -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
 			got.RuntimeProjection, got.ReconciledState, got.CountsAgainstCap)

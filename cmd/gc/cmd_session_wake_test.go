@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -365,6 +366,86 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 				if !strings.Contains(stderr.String(), want) {
 					t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
 				}
+			}
+		})
+	}
+}
+
+// TestDoSessionWake_NoRunnableTemplateAgeGate pins the age-gate on the
+// no-runnable-template CLI arm, the mirror of TestDoSessionWake_StuckInFlightAgeGate.
+// When config has no agent matching the session's template, a session still
+// healthily mid-create must be left alone: force-clearing its
+// pending_create_claim/pending_create_started_at lease would yank the lease out
+// from under a create a provider had just legitimately started. Only a create
+// that has sat past staleCreatingStateTimeout is healed to asleep. Either way
+// the command succeeds — unlike the stuck-in-flight arm, there is no runnable
+// template to report a failure against.
+func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
+	freshStart := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
+	staleStart := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+
+	tests := []struct {
+		name      string
+		state     string
+		startedAt string
+		wantState string
+		wantHeal  bool
+	}{
+		{name: "fresh creating keeps its lease", state: "creating", startedAt: freshStart, wantState: "creating", wantHeal: false},
+		{name: "fresh start-pending keeps its lease", state: "start-pending", startedAt: freshStart, wantState: "start-pending", wantHeal: false},
+		{name: "stale creating heals to asleep", state: "creating", startedAt: staleStart, wantState: "asleep", wantHeal: true},
+		{name: "stale start-pending heals to asleep", state: "start-pending", startedAt: staleStart, wantState: "asleep", wantHeal: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"template":                  "worker",
+					"state":                     tt.state,
+					"pending_create_claim":      "1",
+					"pending_create_started_at": tt.startedAt,
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(): %v", err)
+			}
+
+			// An agent that deliberately does NOT match template "worker",
+			// so sessionWakeHasRunnableTemplateInfo reports false. A nil cfg
+			// would report true and route to the stuck-in-flight arm instead.
+			cfg := &config.City{Agents: []config.Agent{{Name: "other"}}}
+			if sessionWakeHasRunnableTemplateInfo(session.Info{Template: "worker"}, cfg) {
+				t.Fatal("test setup: template \"worker\" must not be runnable under this config")
+			}
+			deps := sessionWakeDeps{store: store, cfg: cfg, cityPath: "/city", now: time.Now}
+
+			var stdout, stderr bytes.Buffer
+			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {
+				t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+			}
+
+			updated, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", b.ID, err)
+			}
+			if got := updated.Metadata["state"]; got != tt.wantState {
+				t.Fatalf("state = %q, want %q", got, tt.wantState)
+			}
+			if tt.wantHeal {
+				if got := updated.Metadata["pending_create_claim"]; got != "" {
+					t.Fatalf("pending_create_claim = %q, want cleared", got)
+				}
+				if got := updated.Metadata["pending_create_started_at"]; got != "" {
+					t.Fatalf("pending_create_started_at = %q, want cleared", got)
+				}
+				return
+			}
+			if got := updated.Metadata["pending_create_started_at"]; got != tt.startedAt {
+				t.Fatalf("pending_create_started_at = %q, want %q (healthy in-flight create must keep its lease)", got, tt.startedAt)
 			}
 		})
 	}
