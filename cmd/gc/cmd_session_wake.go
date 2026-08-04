@@ -104,10 +104,14 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 	nudgeIDs := res.NudgeIDs
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
+	startupTimeout := time.Duration(0)
+	if deps.cfg != nil {
+		startupTimeout = deps.cfg.Session.StartupTimeoutDuration()
+	}
+	createAbandoned := sessionWakeCreateAbandonedInfo(res.Info, startupTimeout)
 	rejectStuck := false
 	switch {
-	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) ||
-		(sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info))):
+	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) || createAbandoned):
 		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
@@ -124,8 +128,12 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	// nonzero exit reports "wake cannot complete", not "nothing happened". The exit
 	// is deferred to after the cleanup block below so the waits WakeSession already
 	// canceled still get their queued nudges withdrawn.
-	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info):
-		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, stuckCreatingSinceInfo(res.Info).UTC().Format(time.RFC3339)) //nolint:errcheck
+	case hasRunnableTemplate && createAbandoned:
+		since := "an unknown time"
+		if started := stuckCreatingSinceInfo(res.Info); !started.IsZero() {
+			since = started.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
 	}
 	if deps.cityResolved {
@@ -182,6 +190,20 @@ func sessionWakeRequestedCreateInfo(info session.Info) bool {
 func sessionWakeStuckInFlightInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	return state == session.StateCreating || state == session.StateStartPending
+}
+
+// sessionWakeCreateAbandonedInfo reports whether an in-flight create is
+// genuinely abandoned and so may be acted on by the CLI.
+//
+// Mirrors the sweep's gate order in city_runtime.go:2853-2857: the
+// pending-create lease is checked FIRST, staleness second. Checking only
+// staleness rejects a create the reconciler still protects, because
+// pendingCreateNeverStartedTimeout (10m) is deliberately longer than
+// staleCreatingStateTimeout (1m).
+func sessionWakeCreateAbandonedInfo(info session.Info, startupTimeout time.Duration) bool {
+	return sessionWakeStuckInFlightInfo(info) &&
+		!pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) &&
+		isStaleCreatingInfo(info)
 }
 
 // stuckCreatingSinceInfo returns the timestamp isStaleCreatingInfo measures

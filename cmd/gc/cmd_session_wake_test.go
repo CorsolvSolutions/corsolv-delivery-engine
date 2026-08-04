@@ -327,11 +327,13 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 // to withdraw them.
 func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 	freshStart := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
-	staleStart := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	leasedStart := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	staleStart := time.Now().Add(-15 * time.Minute).UTC().Format(time.RFC3339)
 
 	tests := []struct {
 		name      string
 		state     string
+		claim     bool
 		startedAt string
 		wantCode  int
 	}{
@@ -339,19 +341,29 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 		{name: "fresh start-pending wakes normally", state: "start-pending", startedAt: freshStart, wantCode: 0},
 		{name: "stale creating rejects wake", state: "creating", startedAt: staleStart, wantCode: 1},
 		{name: "stale start-pending rejects wake", state: "start-pending", startedAt: staleStart, wantCode: 1},
+		// The window the sweep protects but a staleness-only gate would
+		// reject: past staleCreatingStateTimeout (1m) yet still inside the
+		// never-started lease (pendingCreateNeverStartedTimeout, 10m), with
+		// no last_woke_at. The sweep skips this bead; the CLI must agree.
+		{name: "leased never-started create wakes normally", state: "creating", claim: true, startedAt: leasedStart, wantCode: 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := beads.NewMemStore()
+			metadata := map[string]string{
+				"template":                  "worker",
+				"state":                     tt.state,
+				"pending_create_started_at": tt.startedAt,
+				"last_woke_at":              "",
+			}
+			if tt.claim {
+				metadata["pending_create_claim"] = "true"
+			}
 			b, err := store.Create(beads.Bead{
-				Type:   session.BeadType,
-				Labels: []string{session.LabelSession},
-				Metadata: map[string]string{
-					"template":                  "worker",
-					"state":                     tt.state,
-					"pending_create_started_at": tt.startedAt,
-				},
+				Type:     session.BeadType,
+				Labels:   []string{session.LabelSession},
+				Metadata: metadata,
 			})
 			if err != nil {
 				t.Fatalf("store.Create(): %v", err)
@@ -397,12 +409,15 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 // healthily mid-create must be left alone: force-clearing its
 // pending_create_claim/pending_create_started_at lease would yank the lease out
 // from under a create a provider had just legitimately started. Only a create
-// that has sat past staleCreatingStateTimeout is healed to asleep. Either way
-// the command succeeds — unlike the stuck-in-flight arm, there is no runnable
+// whose pending-create lease has expired AND which has sat past
+// staleCreatingStateTimeout is healed to asleep — the same two-condition gate,
+// in the same order, that the sweep applies in city_runtime.go. Either way the
+// command succeeds — unlike the stuck-in-flight arm, there is no runnable
 // template to report a failure against.
 func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 	freshStart := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
-	staleStart := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	leasedStart := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	staleStart := time.Now().Add(-15 * time.Minute).UTC().Format(time.RFC3339)
 
 	tests := []struct {
 		name      string
@@ -413,6 +428,11 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 	}{
 		{name: "fresh creating keeps its lease", state: "creating", startedAt: freshStart, wantState: "creating", wantHeal: false},
 		{name: "fresh start-pending keeps its lease", state: "start-pending", startedAt: freshStart, wantState: "start-pending", wantHeal: false},
+		// Mirror of the stuck-in-flight arm's leased case: stale by the
+		// 1-minute bound, still leased by the 10-minute never-started bound.
+		// The sweep protects this bead, so the mutating CLI arm must not
+		// clear the lease out from under it.
+		{name: "leased never-started create keeps its lease", state: "creating", startedAt: leasedStart, wantState: "creating", wantHeal: false},
 		{name: "stale creating heals to asleep", state: "creating", startedAt: staleStart, wantState: "asleep", wantHeal: true},
 		{name: "stale start-pending heals to asleep", state: "start-pending", startedAt: staleStart, wantState: "asleep", wantHeal: true},
 	}
@@ -426,8 +446,9 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 				Metadata: map[string]string{
 					"template":                  "worker",
 					"state":                     tt.state,
-					"pending_create_claim":      "1",
+					"pending_create_claim":      "true",
 					"pending_create_started_at": tt.startedAt,
+					"last_woke_at":              "",
 				},
 			})
 			if err != nil {
