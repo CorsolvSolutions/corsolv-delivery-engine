@@ -745,6 +745,14 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 // StaleCreatingAfter: an unobserved runtime may simply be a transient probe
 // failure over a live session, so this must not fire on a normal hiccup —
 // only on a create that is definitively abandoned (ga-pofwv9).
+//
+// Reachability at this head: Runtime.Observed == false is entered in production
+// via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
+// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go), but the only
+// consumer of the fields this branch sets (RuntimeProjection, ReconciledState,
+// ResetContinuation) is cmd/gc/session_reconcile.go, which sets Observed: true.
+// So the branch is inert here rather than unreachable — defense in depth for a
+// future consumer that reads a projection built without runtime facts.
 const unobservedCreatingTimeout = 15 * time.Minute
 
 func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {

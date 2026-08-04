@@ -104,6 +104,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 	nudgeIDs := res.NudgeIDs
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
+	rejectStuck := false
 	switch {
 	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) ||
 		(sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info))):
@@ -118,9 +119,14 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
+	// WakeSession has already recorded the wake on the bead (wake_request=explicit,
+	// wake_requested_at set, quarantine cleared) before this arm is reached, so the
+	// nonzero exit reports "wake cannot complete", not "nothing happened". The exit
+	// is deferred to after the cleanup block below so the waits WakeSession already
+	// cancelled still get their queued nudges withdrawn.
 	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info) && isStaleCreatingInfo(res.Info):
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, stuckCreatingSinceInfo(res.Info).UTC().Format(time.RFC3339)) //nolint:errcheck
-		return 1
+		rejectStuck = true
 	}
 	if deps.cityResolved {
 		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
@@ -131,6 +137,9 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}
+	}
+	if rejectStuck {
+		return 1
 	}
 
 	if asJSON {

@@ -319,6 +319,12 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 // staleCreatingStateTimeout should be rejected. Before the age gate, ANY
 // creating/start-pending session with a runnable template failed wake with
 // exit 1, even one a provider had just legitimately started.
+//
+// Every subtest — including the rejecting ones — also asserts that queued wait
+// nudges are withdrawn. WakeSession cancels the waits and commits the batch
+// before doSessionWake ever sees the result, so a reject arm that returns
+// before the cleanup block strands those nudges in the queue with nothing left
+// to withdraw them.
 func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 	freshStart := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
 	staleStart := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
@@ -351,12 +357,26 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 				t.Fatalf("store.Create(): %v", err)
 			}
 
-			deps := sessionWakeDeps{store: store, cityPath: "/city", now: time.Now}
+			withdrawCalled := false
+			deps := sessionWakeDeps{
+				store:        store,
+				cityPath:     "/city",
+				cityResolved: true,
+				now:          time.Now,
+				withdrawQueuedWaitNudges: func(string, []string) error {
+					withdrawCalled = true
+					return nil
+				},
+				cityUsesManagedReconciler: func(string) bool { return false },
+			}
 
 			var stdout, stderr bytes.Buffer
 			code := doSessionWake(b.ID, &stdout, &stderr, false, deps)
 			if code != tt.wantCode {
 				t.Fatalf("doSessionWake() = %d, want %d; stderr=%s", code, tt.wantCode, stderr.String())
+			}
+			if !withdrawCalled {
+				t.Fatalf("withdrawQueuedWaitNudges was not called (exit %d): WakeSession already cancelled the waits, so their nudges are stranded", code)
 			}
 			if strings.Contains(stderr.String(), "no live runtime") {
 				t.Fatalf("stderr = %q, message must state what was checked, not the old 'no live runtime' wording", stderr.String())
