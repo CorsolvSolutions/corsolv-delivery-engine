@@ -398,6 +398,13 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 				if !strings.Contains(stderr.String(), want) {
 					t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
 				}
+				updated, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatalf("store.Get(%s): %v", b.ID, err)
+				}
+				if got := updated.Metadata["wake_request"]; got != "explicit" {
+					t.Fatalf("wake_request = %q, want %q: the reject arm reports that wake cannot complete now, it does not roll the recorded wake back", got, "explicit")
+				}
 			}
 		})
 	}

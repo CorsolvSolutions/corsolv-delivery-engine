@@ -133,7 +133,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if started := stuckCreatingSinceInfo(res.Info); !started.IsZero() {
 			since = started.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
 	}
 	if deps.cityResolved {
