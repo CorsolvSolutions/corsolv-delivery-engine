@@ -160,7 +160,10 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
-	bead, err := store.Get(beadID)
+	// The control bead is graph class, so it is read from the graph store — not
+	// from the scope store, which on a split city holds only the copy the
+	// migration retained and no longer receives the workflow's mutations.
+	bead, err := controlGraphStore(cityPath, cfg, store).Get(beadID)
 	if err != nil {
 		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
 	}
@@ -187,6 +190,13 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	} else {
 		warnLegacyWorkflowTracePath(cityPath, nil, stderr)
 	}
+
+	// store is the SCOPE store. Control beads, the workflow topology they
+	// mutate, and every bead the control kinds create (retry attempts, fanout
+	// fragments, drain units and their convoys) are graph class, so all of that
+	// runs against the graph store. store itself stays the work leg: it owns the
+	// input convoy whose tracks edges the execution snapshot below reads.
+	graphStore := controlGraphStore(cityPath, cfg, store)
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
@@ -223,12 +233,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
-				return decorateDynamicFragmentRecipe(fragment, source, store, loadedCityName(cfg, cityPath), cityPath, cfg)
+				return decorateDynamicFragmentRecipe(fragment, source, graphStore, loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
 		case "drain":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
-				return decorateDrainItemRecipe(recipe, source, store, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
+				return decorateDrainItemRecipe(recipe, source, graphStore, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
 		case "retry-eval":
 			sp, err := dispatchControlSessionProvider()
@@ -256,7 +266,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		}
 	}
 
-	result, err := dispatch.ProcessControl(store, bead, opts)
+	result, err := dispatch.ProcessControl(graphStore, bead, opts)
 	if err != nil {
 		if errors.Is(err, dispatch.ErrControlPending) {
 			return err
@@ -264,7 +274,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		if dispatch.IsTransientControllerError(err) {
 			return err
 		}
-		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
+		if quarantineErr := quarantineControlFailureBead(graphStore, beadID, err); quarantineErr != nil {
 			return errors.Join(err, quarantineErr)
 		}
 		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
@@ -273,7 +283,6 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	if result.Processed {
 		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 		if rootID != "" {
-			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 			recorder := openCityRecorderAt(cityPath, stderr)
 			emitErr := executionevent.EmitCurrent(recorder, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}, rootID, "control-dispatch")
 			var closeErr error
@@ -448,6 +457,30 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 	})
 }
 
+// controlGraphStore returns the store that owns a control bead and everything
+// its dispatch creates, given the scope store the caller resolved.
+//
+// Control beads are graph class: coordclass counts every gc.kind control bead,
+// and the molecule/step topology they mutate, as ClassGraph. The scope store
+// answers WHICH city or rig; the graph class answers WHICH database inside it.
+// Running control dispatch against the scope store on a split city reads the
+// copy the migration retained in the work ledger and writes the results back
+// there, where no graph-routed reader looks.
+//
+// When the routes relocate nothing this returns the exact store value it was
+// handed, so a single-store city dispatches against the very store it always
+// did — same bd command runner, same scope issue prefix, same instance for the
+// optional-capability assertions (DepListBatch, UpdateAll) the scope-skip paths
+// make against it.
+func controlGraphStore(cityPath string, cfg *config.City, scopeStore beads.Store) beads.Store {
+	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
+}
+
+// openControlStoreAtForCity resolves the control store for a city or rig SCOPE.
+// It answers WHICH scope only; the coordination class — which database within
+// that scope — is applied by controlGraphStore at the point of use, because the
+// control dispatcher needs BOTH: the graph store that owns control beads, and
+// this scope/work store that owns the input convoy an execution snapshot reads.
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
