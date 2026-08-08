@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1857,5 +1858,186 @@ func assertNoBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID s
 		if beads.IsReadyBlockingDependencyType(dep.Type) && dep.DependsOnID == dependsOnID {
 			t.Fatalf("dependencies for %s = %+v, want no blocking dependency on %s", issueID, deps, dependsOnID)
 		}
+	}
+}
+
+// seedSplitClassDrainWorkflow builds the drain fixture a converged split city
+// actually has: the graph.v2 input convoy and its work members in the WORK
+// store, the workflow root and the drain control in the graph binding.
+//
+// carryConvoyCopy models what `gc storage migrate` leaves behind. A synthetic
+// convoy is graph class, so the migration copies the convoy ROW into the
+// binding — but importInfraSnapshot re-adds only the dep edges whose BOTH
+// endpoints are infra, so the copy carries none of its tracks edges to the work
+// members. The two stores mint from disjoint id ranges, the way two real bead
+// databases with different prefixes do.
+func seedSplitClassDrainWorkflow(t *testing.T, carryConvoyCopy bool) (work *beads.MemStore, graph *beads.MemStore, drain beads.Bead, memberIDs []string) {
+	t.Helper()
+	work = beads.NewMemStore()
+	parent, err := work.Create(beads.Bead{
+		Title:    "input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatalf("create input convoy: %v", err)
+	}
+	for _, title := range []string{"first", "second"} {
+		member, err := work.Create(beads.Bead{Title: title, Type: "task"})
+		if err != nil {
+			t.Fatalf("create member %s: %v", title, err)
+		}
+		if err := convoycore.TrackItem(work, parent.ID, member.ID); err != nil {
+			t.Fatalf("track member %s: %v", title, err)
+		}
+		memberIDs = append(memberIDs, member.ID)
+	}
+
+	var carried []beads.Bead
+	if carryConvoyCopy {
+		carried = append(carried, parent)
+	}
+	graph = beads.NewMemStoreFrom(1000, carried, nil)
+
+	root, err := graph.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	drain, err = graph.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create drain control: %v", err)
+	}
+	return work, graph, drain, memberIDs
+}
+
+// TestDrainReadsConvoyMembershipAcrossTheClassBoundary pins the head of the
+// membership lookup, which opts.MemberStores does not reach.
+//
+// MemberStores resolves member BEADS. The convoy's own membership — its legacy
+// children and its tracks edges — is read from one store, and reading it from
+// the store the drain runs in is what loses the convoy: a store that never saw
+// the convoy answers both reads empty instead of erroring, which is
+// indistinguishable from a genuinely empty convoy.
+//
+// Both shapes are covered because the naive repair — pick the one store that
+// holds the convoy bead — passes the first and fails the second. On a converged
+// city the convoy bead is in BOTH stores and the binding's copy is the empty one.
+func TestDrainReadsConvoyMembershipAcrossTheClassBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		carryConvoyCopy bool
+	}{
+		{name: "convoy only in the work store", carryConvoyCopy: false},
+		{name: "edgeless migration copy also in the binding", carryConvoyCopy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, tc.carryConvoyCopy)
+			root := mustGetBead(t, graph, drain.Metadata["gc.root_bead_id"])
+			convoyID := root.Metadata["gc.input_convoy_id"]
+
+			members, err := drainConvoyMembers(graph, convoyID, ProcessOptions{MemberStores: []beads.Store{work}})
+			if err != nil {
+				t.Fatalf("drainConvoyMembers: %v", err)
+			}
+			var got []string
+			for _, member := range members {
+				got = append(got, member.ID)
+			}
+			if !slices.Equal(got, memberIDs) {
+				t.Fatalf("members = %v, want %v; membership read from a store that does not hold this convoy's edges returns empty instead of failing, and an empty convoy is a drain SUCCESS", got, memberIDs)
+			}
+		})
+	}
+}
+
+// TestDrainSingleStoreMembershipIsUnchanged is the compatibility half: with no
+// member stores named — every single-store caller — the membership read is the
+// one convoycore.Members call it always was, against the one store.
+func TestDrainSingleStoreMembershipIsUnchanged(t *testing.T) {
+	store, drain := seedDrainWorkflow(t)
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	convoyID := root.Metadata["gc.input_convoy_id"]
+
+	want, err := convoycore.Members(store, convoyID, false)
+	if err != nil {
+		t.Fatalf("convoycore.Members: %v", err)
+	}
+	got, err := drainConvoyMembers(store, convoyID, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("drainConvoyMembers: %v", err)
+	}
+	if len(got) != len(want) || len(got) != 2 {
+		t.Fatalf("members = %d, want the same 2 convoycore.Members returns", len(got))
+	}
+	for i := range got {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("member %d = %s, want %s; the single-store read must be order-identical", i, got[i].ID, want[i].ID)
+		}
+	}
+}
+
+// TestProcessDrainNeverPassesAConvoyItCouldNotRead is the invariant that makes
+// the failure mode unwritable rather than merely fixed.
+//
+// A drain over an EMPTY input convoy closes gc.outcome=pass with zero rows, and
+// TestProcessDrainSeparateSucceedsForEmptyInputConvoy pins that as intended. That
+// is exactly what makes a lost convoy invisible: a drain that could not read its
+// membership produces byte-for-byte the same terminal state as a drain that
+// correctly found nothing to do, so the whole convoy is left open and
+// undispatched while the run reports green and exits 0.
+//
+// Whatever else a split-class drain does, it may never reach that state over a
+// convoy that has members. Failing loudly is allowed; passing is not.
+func TestProcessDrainNeverPassesAConvoyItCouldNotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		carryConvoyCopy bool
+	}{
+		{name: "convoy only in the work store", carryConvoyCopy: false},
+		{name: "edgeless migration copy also in the binding", carryConvoyCopy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, tc.carryConvoyCopy)
+
+			result, _ := ProcessControl(graph, drain, ProcessOptions{
+				FormulaSearchPaths: []string{dir},
+				MemberStores:       []beads.Store{work},
+			})
+			got := mustGetBead(t, graph, drain.ID)
+			manifest := mustDrainManifest(t, got)
+
+			if got.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass && len(manifest.Rows) == 0 {
+				t.Fatalf("drain closed gc.outcome=pass over a convoy of %d members with an empty manifest (action=%q); every member is left open and the run reports green", len(memberIDs), result.Action)
+			}
+			if len(manifest.Rows) != len(memberIDs) {
+				t.Fatalf("manifest rows = %d, want %d — one per convoy member", len(manifest.Rows), len(memberIDs))
+			}
+			for _, id := range memberIDs {
+				if !slices.ContainsFunc(manifest.Rows, func(row drainManifestRow) bool { return row.MemberID == id }) {
+					t.Fatalf("member %s is missing from the drain manifest %+v", id, manifest.Rows)
+				}
+			}
+		})
 	}
 }

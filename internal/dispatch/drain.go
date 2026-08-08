@@ -215,7 +215,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 		}
 		return manifest, members, nil
 	}
-	members, err := convoycore.Members(store, parentConvoyID, false, opts.MemberStores...)
+	members, err := drainConvoyMembers(store, parentConvoyID, opts)
 	if err != nil {
 		return drainManifest{}, nil, fmt.Errorf("%s: loading convoy members for %s: %w", bead.ID, parentConvoyID, err)
 	}
@@ -344,6 +344,75 @@ func drainMemberDepStore(store beads.Store, memberID string, opts ProcessOptions
 		return store, nil
 	}
 	return drainMemberOwningStore(store, memberID, opts)
+}
+
+// drainConvoyMembers reads a drain's input-convoy membership across every
+// candidate store rather than from the one store the drain itself runs in.
+//
+// opts.MemberStores resolves member beads, and that is only the TAIL of the
+// lookup. The head — the convoy's own legacy children (List by ParentID) and its
+// tracks edges (DepList) — is read from a single handle, and reading it from the
+// ambient graph store is what silently loses a whole convoy: a store that has
+// never seen the convoy answers both reads EMPTY rather than erroring, and an
+// empty membership is indistinguishable from a genuinely empty input convoy, so
+// the drain expands to zero rows and closes gc.outcome=pass with every member
+// left open and undispatched. A graph.v2 input convoy is minted alongside its
+// work members (convoycore.TrackItemIn refuses a tracks edge whose member is
+// owned by another class, so a convoy is co-resident with its members), which
+// puts the edges in the work store while the drain runs in the binding.
+//
+// Picking one store as the owner is not enough, because on a converged city the
+// convoy bead exists in BOTH: gc storage migrate copies the synthetic convoy row
+// into the binding while importInfraSnapshot re-adds only the edges whose both
+// endpoints are infra, so the copy carries no membership at all. An owner probe
+// finds that empty copy first and reports the same silent zero.
+//
+// So membership is read as the UNION of what each candidate store records, which
+// is what convoy membership already is — an edge inventory. The union is
+// order-free and monotone: a store that never saw the convoy contributes
+// nothing, an edgeless migration copy contributes nothing, and no single store's
+// answer can subtract a member another store records. That makes a zero-row
+// expansion over a non-empty convoy structurally impossible rather than merely
+// unlikely. A member seen as an unresolved placeholder in one store and as a
+// real bead in another keeps the real bead.
+//
+// With no member stores configured — every single-store caller — this collapses
+// to the single convoycore.Members call it replaces, byte for byte.
+func drainConvoyMembers(store beads.Store, convoyID string, opts ProcessOptions) ([]beads.Bead, error) {
+	if len(opts.MemberStores) == 0 {
+		return convoycore.Members(store, convoyID, false)
+	}
+	var merged []beads.Bead
+	at := make(map[string]int)
+	for _, probe := range drainMemberProbeSet(store, opts) {
+		if probe == nil {
+			continue
+		}
+		members, err := convoycore.Members(probe, convoyID, false, opts.MemberStores...)
+		if err != nil {
+			return nil, err
+		}
+		for _, member := range members {
+			i, seen := at[member.ID]
+			if !seen {
+				at[member.ID] = len(merged)
+				merged = append(merged, member)
+				continue
+			}
+			if convoycore.IsUnresolvedTrackedItem(merged[i]) && !convoycore.IsUnresolvedTrackedItem(member) {
+				merged[i] = member
+			}
+		}
+	}
+	// Same order convoycore.MembersIn returns within one store, so the manifest
+	// row order does not depend on which store answered first.
+	slices.SortStableFunc(merged, func(a, b beads.Bead) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return merged, nil
 }
 
 func loadDrainManifestMembers(store beads.Store, controlID string, manifest drainManifest, opts ProcessOptions) ([]beads.Bead, error) {

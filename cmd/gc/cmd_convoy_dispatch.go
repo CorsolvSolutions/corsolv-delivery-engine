@@ -246,6 +246,20 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
 				return decorateDrainItemRecipe(recipe, source, graphStore, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
+			// A drain is the one control kind that reads beads it did not
+			// create. Its control and item roots are graph class and run
+			// against graphStore above, but the convoy it expands over is
+			// minted alongside its work members and stays in the scope store —
+			// the same store handed to EmitCurrent below as the work leg that
+			// owns that convoy's tracks edges. Naming it here is what lets the
+			// membership read, the member reservations and the member
+			// dependency projection cross the class boundary. Only when the
+			// class actually relocated: on every other city graphStore IS
+			// store, and an empty tail keeps each of those reads on the single
+			// direct call it makes today.
+			if controlGraphRelocated(cityPath, storePath) {
+				opts.MemberStores = []beads.Store{store}
+			}
 		case "retry-eval":
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
@@ -409,8 +423,29 @@ func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.
 	}
 }
 
+// makeSourceWorkflowStoresLister lists every store that can hold a LIVE workflow
+// root, which is the precondition workflow-finalize checks before closing a
+// source bead: a source bead with another workflow still running against it must
+// stay open.
+//
+// Each scope is opened through the same class hop the dispatch itself takes.
+// Workflow roots are graph class (coordclass classifies gc.kind=workflow that
+// way), so on a converged split city the city scope's roots are in the binding,
+// and a scan of the city WORK store finds none of them. That is a guard that
+// silently answers "no live roots" for the one arrangement it exists to catch —
+// and unlike a missed read it is destructive, because the answer closes and
+// terminally stamps a human-visible source bead while its other workflow is
+// still executing. Routing the scan and the mutation to the same ledger is the
+// whole point.
+//
+// The hop is scope-guarded by controlGraphBinding, so rig scopes keep their own
+// stores; a relocated scope does not open the scope store at all, because that
+// would be a bd process this scan never reads.
 func makeSourceWorkflowStoresLister(cityPath string, cfg *config.City) func() ([]dispatch.SourceWorkflowStore, error) {
 	return makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, func(dir string) (beads.Store, error) {
+		if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
+			return binding, nil
+		}
 		return openStoreAtForCity(dir, cityPath)
 	})
 }
