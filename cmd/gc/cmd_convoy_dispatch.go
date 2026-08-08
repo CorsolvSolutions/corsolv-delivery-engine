@@ -130,13 +130,15 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	}
 
 	// Manual control dispatch keeps the operator convenience of resolving a
-	// bead ID across city and rig stores.
-	store, bead, storePath, err := findBeadAcrossStores(cityPath, beadID, stderr)
+	// bead ID across city and rig stores. That resolution answers WHICH SCOPE
+	// owns the id; the bead the dispatch gates on is read below from the store
+	// it is about to mutate, not from the unrouted scope store searched here.
+	store, storePath, err := findBeadScopeAcrossStores(cityPath, beadID, stderr)
 	if err != nil {
 		return fmt.Errorf("loading bead %s: %w", beadID, err)
 	}
 
-	return runControlDispatcherWithStore(cityPath, storePath, store, bead, beadID, stdout, stderr)
+	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
@@ -160,22 +162,21 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
-	// The control bead is graph class, so it is read from the graph store — not
-	// from the scope store, which on a split city holds only the copy the
-	// migration retained and no longer receives the workflow's mutations.
-	bead, err := controlGraphStore(cityPath, cfg, store).Get(beadID)
-	if err != nil {
-		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
-	}
 
-	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 }
 
-func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, stdout, stderr io.Writer) error {
-	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, nil, stdout, stderr)
+func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store, beadID string, stdout, stderr io.Writer) error {
+	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, nil, stdout, stderr)
 }
 
-func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, bead beads.Bead, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
+// runControlDispatcherWithStoreAndConfig reads the control bead itself rather
+// than accepting a value, so the copy ProcessControl's idempotence gate consults
+// is by construction the copy the dispatch is about to mutate. Both entry points
+// above resolve a SCOPE and hand it over; a bead value resolved alongside that
+// scope comes from an unrouted store, and gating on it while writing elsewhere
+// re-runs a control kind the graph store had already finished.
+func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
 	var cfgLoadErr error
@@ -196,7 +197,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	// fragments, drain units and their convoys) are graph class, so all of that
 	// runs against the graph store. store itself stays the work leg: it owns the
 	// input convoy whose tracks edges the execution snapshot below reads.
-	graphStore := controlGraphStore(cityPath, cfg, store)
+	graphStore := controlGraphStore(cityPath, storePath, cfg, store)
+
+	bead, err := graphStore.Get(beadID)
+	if err != nil {
+		return fmt.Errorf("loading control bead %s from the %s for scope %q: %w", beadID, controlStoreDescription(cityPath, storePath), storePath, err)
+	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
@@ -457,22 +463,74 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 	})
 }
 
+// controlScopeTakesGraphClass reports whether control dispatch for a scope
+// resolves its control beads through the graph class instead of staying on the
+// store the scope opened.
+//
+// Only the CITY scope does. The scope guard is load-bearing: resolveClassStore
+// holds a single city-level store per class, so there is no per-scope graph
+// binding to route a RIG to, and `gc storage migrate` copies only the city work
+// store (openInfraMigrationSource), so a rig's control beads were never carried
+// into the binding in the first place. Redirecting a rig scope at the city
+// binding would point both the readiness scan and the dispatch at a database
+// that has never held that rig's beads — every rig-scoped control bead would
+// read as "bead not found", which IsTransientControllerError does not match, so
+// the dispatcher would exit non-zero and crash-loop. A rig scope therefore stays
+// entirely on its own store, exactly as it does today.
+func controlScopeTakesGraphClass(cityPath, storePath string) bool {
+	return samePath(resolveStoreScopeRoot(cityPath, storePath), cityPath)
+}
+
+// controlGraphBinding returns the store this scope's control beads live in when
+// that store is somewhere the scope directory's own `bd` cannot reach, and
+// whether that is the case at all.
+//
+// It is the question a shell-based readiness scan has to ask before running:
+// `bd ready` in the work directory enumerates the copies the migration retained
+// there, which no longer receive the workflow's mutations.
+func controlGraphBinding(cityPath, storePath string) (beads.Store, bool) {
+	if !controlScopeTakesGraphClass(cityPath, storePath) {
+		return nil, false
+	}
+	return graphClassBinding(cliStorageRoutes(cityPath))
+}
+
+// controlGraphRelocated reports whether this scope's control beads are served by
+// a database the scope directory's own `bd` cannot reach.
+func controlGraphRelocated(cityPath, storePath string) bool {
+	_, relocated := controlGraphBinding(cityPath, storePath)
+	return relocated
+}
+
+// controlStoreDescription names the ledger a control-bead read actually went to,
+// so a not-found sends the operator to the database that was searched rather
+// than to the scope directory that merely selected it.
+func controlStoreDescription(cityPath, storePath string) string {
+	if controlGraphRelocated(cityPath, storePath) {
+		return "graph-class binding"
+	}
+	return "scoped control store"
+}
+
 // controlGraphStore returns the store that owns a control bead and everything
 // its dispatch creates, given the scope store the caller resolved.
 //
 // Control beads are graph class: coordclass counts every gc.kind control bead,
 // and the molecule/step topology they mutate, as ClassGraph. The scope store
-// answers WHICH city or rig; the graph class answers WHICH database inside it.
-// Running control dispatch against the scope store on a split city reads the
-// copy the migration retained in the work ledger and writes the results back
-// there, where no graph-routed reader looks.
+// answers WHICH city or rig; for the city scope the graph class then answers
+// WHICH database inside it. Running control dispatch against the scope store on
+// a split city reads the copy the migration retained in the work ledger and
+// writes the results back there, where no graph-routed reader looks.
 //
-// When the routes relocate nothing this returns the exact store value it was
-// handed, so a single-store city dispatches against the very store it always
-// did — same bd command runner, same scope issue prefix, same instance for the
-// optional-capability assertions (DepListBatch, UpdateAll) the scope-skip paths
-// make against it.
-func controlGraphStore(cityPath string, cfg *config.City, scopeStore beads.Store) beads.Store {
+// When the routes relocate nothing — every city with no [storage] section, and
+// every rig scope — this returns the exact store value it was handed, so those
+// callers dispatch against the very store they always did: same bd command
+// runner, same scope issue prefix, same instance for the optional-capability
+// assertions (DepListBatch, UpdateAll) the scope-skip paths make against it.
+func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
+	if !controlScopeTakesGraphClass(cityPath, storePath) {
+		return scopeStore
+	}
 	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
 }
 
@@ -512,41 +570,46 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	})
 }
 
-// findBeadAcrossStores tries the city store first, then all rig stores,
-// returning the store and bead on first match.
-func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
+// findBeadScopeAcrossStores tries the city store first, then all rig stores,
+// returning the scope store and its path on first match.
+//
+// It answers WHICH SCOPE owns an id, and nothing else. The bead it reads along
+// the way is deliberately not returned: these are unrouted scope stores, so on a
+// split city a graph-class bead's value here is the copy the migration retained,
+// and a caller that gated on it while writing the graph store would act on work
+// the graph store had already finished.
+func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, string, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		return nil, beads.Bead{}, "", fmt.Errorf("opening city store: %w", err)
+		return nil, "", fmt.Errorf("opening city store: %w", err)
 	}
-	if b, err := cityStore.Get(beadID); err == nil {
-		return cityStore, b, cityPath, nil
+	if _, err := cityStore.Get(beadID); err == nil {
+		return cityStore, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
-		return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
+		return nil, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
 	}
 
 	// Try rig stores.
 	cfg, err := loadCityConfig(cityPath, warningWriter)
 	if err != nil {
-		return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
+		return nil, "", fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	for _, rig := range cfg.Rigs {
 		store, err := openControlStoreAtForCity(rig.Path, cityPath, cfg)
 		if err != nil {
-			return nil, beads.Bead{}, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
+			return nil, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
-		bead, err := store.Get(beadID)
-		if err != nil {
+		if _, err := store.Get(beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, rig.Path, err)
+			return nil, "", fmt.Errorf("getting bead %q from %s: %w", beadID, rig.Path, err)
 		}
-		return store, bead, rig.Path, nil
+		return store, rig.Path, nil
 	}
-	return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q: %w", beadID, beads.ErrNotFound)
+	return nil, "", fmt.Errorf("getting bead %q: %w", beadID, beads.ErrNotFound)
 }
 
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {
