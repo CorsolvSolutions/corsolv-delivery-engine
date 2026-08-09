@@ -83,22 +83,41 @@ func boolPtr(b bool) *bool { return &b }
 // list is the entire surface an autonomous worker gets. Three properties are
 // load-bearing, each verified against the Claude CLI (v2.1.226):
 //
-//   - Edit-and-inspect tools only. Bare `Bash` is absent, so the mode never
-//     becomes a blanket shell grant.
-//   - Exactly one scoped shell grant, `Bash(gc runtime drain-ack:*)`. A worker
-//     must acknowledge its drain for the controller to reclaim the session;
-//     without it the session is never released. The scope is verified to match
-//     `gc runtime drain-ack` (with or without flags) and to refuse every other
-//     `gc` subcommand, so it confers no general shell or `gc` access, and no
-//     commit, push, merge, or release capability — those stay with the
-//     controller.
+//   - Edit-and-inspect tools, plus shell grants enumerated per `gc` subcommand.
+//     Bare `Bash` and `Bash(gc:*)` are both absent, so the mode is never a
+//     blanket shell or blanket `gc` grant, and no `git` grant exists at all —
+//     commit, push, merge, and release stay with the controller.
+//   - The shell grants are exactly the mandatory pool-worker lifecycle, derived
+//     from `packs/core/assets/prompts/pool-worker.md` (claim → show → molecule
+//     steps → close → drain-ack) and `packs/core/formulas/mol-do-work.toml`
+//     (convoy status → bd show → heartbeat → bd update --status=closed →
+//     drain-ack). Optional paths are deliberately excluded: `gc mail
+//     inbox`/`gc mail send` (escalation) and `gc runtime request-restart`
+//     (context exhaustion) are conditional, not lifecycle.
+//   - `gc hook` is scoped to `--claim`, NOT the whole subcommand. `gc hook run
+//     -- <gc args...>` re-executes this binary with arbitrary arguments, so
+//     `Bash(gc hook:*)` would be equivalent to `Bash(gc:*)`. Likewise
+//     `gc runtime` is scoped to `drain-ack`, because the same family carries
+//     the controller-side `drain` and `undrain`.
 //   - The tools are attached with `=` as a SINGLE argv token rather than
 //     `--allowedTools A B C`. `--allowedTools <tools...>` is variadic: in the
 //     space-separated form it greedily consumes every following non-flag token,
 //     so if it ever lands last it swallows the positional prompt that Claude's
 //     `prompt_mode = "arg"` appends. The `=` form binds the value to one token
 //     and is immune to that, which keeps the flag order-independent.
-const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)"
+//
+// The allow/deny behavior of every rule below is verified against the real
+// permission engine by corsolv/p2-smoke/policy-matrix.sh.
+const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep," +
+	"Bash(gc hook --claim:*)," +
+	"Bash(gc bd show:*)," +
+	"Bash(gc bd mol current:*)," +
+	"Bash(gc bd mol progress:*)," +
+	"Bash(gc bd heartbeat:*)," +
+	"Bash(gc bd update:*)," +
+	"Bash(gc bd close:*)," +
+	"Bash(gc convoy status:*)," +
+	"Bash(gc runtime drain-ack:*)"
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.

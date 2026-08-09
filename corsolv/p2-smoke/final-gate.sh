@@ -91,7 +91,7 @@ check 16 "$CFG" 'TestResolveProviderAgentProvider'                              
 
 # --- bounded-permission safety control ------------------------------------
 check 17 "$CFG" 'TestResolveProviderClaudeBoundedPermissionMode'                'bounded permission mode, no bypass flag'
-check 18 "$CFG" 'TestBuiltinClaudeDontAskGrantsOnlySafeTools'                   'allowlist exact: scoped drain only, no global Bash'
+check 18 "$CFG" 'TestBuiltinClaudeDontAskGrantsOnlySafeTools'                   'allowlist exact: lifecycle grants only, no global Bash'
 check 19 "$CFG" 'TestBuildProviderLaunchCommandClaudeStaysBounded'              'bounded mode survives into launch command'
 check 20 "$CFG" 'TestClaudeAllowedToolsCannotSwallowPositionalPrompt'           'allowlist cannot swallow positional prompt'
 

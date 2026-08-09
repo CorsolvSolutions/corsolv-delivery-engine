@@ -26,15 +26,29 @@ trap 'restore; rm -f "$BAK"' EXIT
 
 BAD=0
 
+# The policy constant is a multi-line concatenation; replace the whole
+# declaration with a single-line literal so mutations are exact.
 mutate_const() {
   python3 - "$SRC" "$1" <<'PY'
-import sys
+import re, sys
 path, new = sys.argv[1], sys.argv[2]
 s = open(path).read()
-old = 'const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)"'
-assert old in s, "anchor not found -- update this script alongside the policy"
-open(path, 'w').write(s.replace(old, 'const ClaudeDontAskAllowedToolsArg = "%s"' % new))
+pat = re.compile(
+    r'const ClaudeDontAskAllowedToolsArg = "--allowedTools=.*?"(?:\s*\+\s*\n\s*"[^"]*")*',
+    re.S)
+m = pat.search(s)
+assert m, "policy constant not found -- update this script alongside the policy"
+s = s[:m.start()] + 'const ClaudeDontAskAllowedToolsArg = "%s"' % new + s[m.end():]
+open(path, 'w').write(s)
 PY
+}
+
+# The approved policy as one line, so mutations can be expressed as deltas.
+APPROVED='--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc hook --claim:*),Bash(gc bd show:*),Bash(gc bd mol current:*),Bash(gc bd mol progress:*),Bash(gc bd heartbeat:*),Bash(gc bd update:*),Bash(gc bd close:*),Bash(gc convoy status:*),Bash(gc runtime drain-ack:*)'
+
+# drop_grant <rule> — remove one mandatory lifecycle rule.
+drop_grant() {
+  mutate_const "$(printf '%s' "$APPROVED" | sed "s|,$1||")"
 }
 
 check() {
@@ -61,28 +75,70 @@ echo '============================================================'
 
 check 'baseline: approved policy' PASS
 
-mutate_const '--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*),Bash'
+echo
+echo '-- widening the shell surface --'
+
+mutate_const "$APPROVED,Bash"
 check 'adding global Bash' FAIL
 
 mutate_const '--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc:*)'
 check 'broadening to Bash(gc:*)' FAIL
 
-mutate_const '--allowedTools=Read,Write,Edit,Glob,Grep'
-check 'removing the scoped drain grant' FAIL
+mutate_const "$APPROVED,Bash(git:*)"
+check 'adding Bash(git:*)' FAIL
 
-mutate_const '--allowedTools=Read,Write,Edit,Glob,Grep,Bash(git:*)'
-check 'granting Bash(git:*)' FAIL
+# gc hook run -- <gc args...> re-executes the binary with arbitrary arguments,
+# so the unscoped hook family is Bash(gc:*) by another name.
+mutate_const "$(printf '%s' "$APPROVED" | sed 's|Bash(gc hook --claim:\*)|Bash(gc hook:*)|')"
+check 'broadening gc hook to the whole family' FAIL
+
+# gc runtime also carries controller-side drain / undrain.
+mutate_const "$(printf '%s' "$APPROVED" | sed 's|Bash(gc runtime drain-ack:\*)|Bash(gc runtime:*)|')"
+check 'broadening gc runtime to the whole family' FAIL
+
+echo
+echo '-- removing any mandatory lifecycle permission --'
+
+for rule in \
+  'Bash(gc hook --claim:\*)' \
+  'Bash(gc bd show:\*)' \
+  'Bash(gc bd mol current:\*)' \
+  'Bash(gc bd mol progress:\*)' \
+  'Bash(gc bd heartbeat:\*)' \
+  'Bash(gc bd update:\*)' \
+  'Bash(gc bd close:\*)' \
+  'Bash(gc convoy status:\*)' \
+  'Bash(gc runtime drain-ack:\*)'
+do
+  drop_grant "$rule"
+  check "removing $(printf '%s' "$rule" | tr -d '\\')" FAIL
+done
+
+echo
+echo '-- unsafe encodings and bypass --'
 
 python3 - "$SRC" <<'PY'
 import sys
 path = sys.argv[1]
 s = open(path).read()
 old = '{Value: "dontAsk", Label: "Don\'t ask", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeDontAskAllowedToolsArg}},'
-new = '{Value: "dontAsk", Label: "Don\'t ask", FlagArgs: []string{"--permission-mode", "dontAsk", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "Bash(gc runtime drain-ack:*)"}},'
+new = '{Value: "dontAsk", Label: "Don\'t ask", FlagArgs: []string{"--permission-mode", "dontAsk", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep"}},'
 assert old in s, "FlagArgs anchor not found -- update this script alongside the policy"
 open(path, 'w').write(s.replace(old, new))
 PY
 check 'reverting to the unsafe variadic encoding' FAIL
+
+# Reinstating unrestricted as the autonomous default puts
+# --dangerously-skip-permissions back on every launch.
+python3 - "$SRC" <<'PY'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+old = '"permission_mode": "dontAsk",'
+assert old in s, "OptionDefaults anchor not found -- update this script alongside the policy"
+open(path, 'w').write(s.replace(old, '"permission_mode": "unrestricted",', 1))
+PY
+check 'reinstating --dangerously-skip-permissions as the default' FAIL
 
 check 'restored: approved policy' PASS
 
