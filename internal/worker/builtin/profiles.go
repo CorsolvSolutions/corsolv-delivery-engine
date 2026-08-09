@@ -76,6 +76,23 @@ type BuiltinProviderSpec struct {
 
 func boolPtr(b bool) *bool { return &b }
 
+// ClaudeDontAskAllowedToolsArg is the tool surface granted alongside Claude's
+// non-blocking `dontAsk` permission mode.
+//
+// Two properties of this literal are load-bearing and verified against the
+// Claude CLI (`claude --help`, v2.1.226):
+//
+//   - The list is deliberately edit-and-inspect only. `Bash` is absent, so
+//     `dontAsk` never becomes a blanket shell grant; anything outside this set
+//     still goes through the normal permission path.
+//   - The tools are attached with `=` as a SINGLE argv token rather than
+//     `--allowedTools A B C`. `--allowedTools <tools...>` is variadic: in the
+//     space-separated form it greedily consumes every following non-flag token,
+//     so if it ever lands last it swallows the positional prompt that Claude's
+//     `prompt_mode = "arg"` appends. The `=` form binds the value to one token
+//     and is immune to that, which keeps the flag order-independent.
+const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep"
+
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
 type ProfileIdentity struct {
@@ -108,8 +125,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
 		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
 		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
+		// Autonomous launches run bounded: dontAsk keeps the agent from
+		// blocking on interactive permission prompts without handing it a
+		// blanket permission bypass, and the mode carries the bounded tool
+		// surface in ClaudeDontAskAllowedToolsArg so selecting it can never
+		// widen to an implicit shell grant. A city that needs a wider surface
+		// layers its own allowlist on top rather than editing this default.
 		OptionDefaults: map[string]string{
-			"permission_mode": "unrestricted",
+			"permission_mode": "dontAsk",
 			"effort":          "max",
 		},
 		PromptMode:             "arg",
@@ -130,6 +153,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			"plan":         "--permission-mode plan",
 			"auto-edit":    "--permission-mode auto-edit",
 			"full-auto":    "--permission-mode full-auto",
+			"dontAsk":      "--permission-mode dontAsk " + ClaudeDontAskAllowedToolsArg,
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -140,6 +164,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "auto-edit"}},
 					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "full-auto"}},
+					{Value: "dontAsk", Label: "Don't ask", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeDontAskAllowedToolsArg}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},

@@ -1015,8 +1015,8 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 		t.Fatalf("resume command missing --resume flag:\n  got: %s", cmd)
 	}
 
-	// Must include default args (--dangerously-skip-permissions for claude).
-	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
+	// Must include default args (--permission-mode dontAsk for claude).
+	if !strings.Contains(cmd, "--permission-mode dontAsk") {
 		t.Fatalf("resume command missing default args:\n  got: %s", cmd)
 	}
 }
@@ -2888,8 +2888,8 @@ func TestResolvedSessionCommandIncludesDefaultsAndSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedSessionCommand: %v", err)
 	}
-	if !strings.Contains(got, "--dangerously-skip-permissions") {
-		t.Fatalf("command %q should include unrestricted default permissions", got)
+	if !strings.Contains(got, "--permission-mode dontAsk") {
+		t.Fatalf("command %q should include the bounded default permission mode", got)
 	}
 	if !strings.Contains(got, "--effort max") {
 		t.Fatalf("command %q should include effort=max default", got)
@@ -2917,8 +2917,8 @@ func TestResolvedSessionCommandAppliesOverridesOverDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedSessionCommand: %v", err)
 	}
-	if strings.Contains(got, "--dangerously-skip-permissions") {
-		t.Fatalf("command %q should not keep unrestricted default when overridden", got)
+	if strings.Contains(got, "--permission-mode dontAsk") {
+		t.Fatalf("command %q should not keep the default permission mode when overridden", got)
 	}
 	if !strings.Contains(got, "--permission-mode plan") {
 		t.Fatalf("command %q should include plan permission override", got)

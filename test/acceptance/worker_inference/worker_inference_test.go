@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	proctable "github.com/gastownhall/gascity/internal/runtime/proctable"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
@@ -1079,6 +1080,13 @@ func TestWorkerInferenceMultiTurnWorkflow(t *testing.T) {
 }
 
 func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
+	// Never allow this acceptance test to inspect or act on the host's
+	// real process table. Runtime orphan/liveness discovery must operate
+	// against a controlled fake procfs root under go test.
+	procScanRoot := t.TempDir()
+	restoreProcScanRoot := proctable.SetScanRootForTesting(procScanRoot)
+	t.Cleanup(restoreProcScanRoot)
+
 	if testing.Short() {
 		t.Skip("WorkerInference: skipping in short mode")
 	}
@@ -1682,7 +1690,7 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 	case "antigravity":
 		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
 	default:
-		return "arg", "", 10000, []string{"--dangerously-skip-permissions", "--effort", "max"}
+		return "arg", "", 10000, []string{"--permission-mode", "dontAsk", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "--effort", "max"}
 	}
 }
 

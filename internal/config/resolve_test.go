@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // --- helper lookPath functions ---
@@ -145,7 +146,7 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", cs, "claude")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
-	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	wantArgs := []string{"--permission-mode", "dontAsk", claudeSafeAllowedToolsArg, "--effort", "max"}
 	if len(defaultArgs) != len(wantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
 	} else {
@@ -155,6 +156,214 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestResolveProviderClaudeBoundedPermissionMode pins the builtin Claude
+// autonomous launch policy: the resolved provider must ask for a bounded
+// permission mode (--permission-mode dontAsk) and must never inherit the
+// blanket bypass flag. A city provider layered on builtin:claude appends its
+// own args rather than removing inherited ones, so an inherited
+// --dangerously-skip-permissions survives into the launched process even when
+// the city asks for a bounded mode.
+func TestResolveProviderClaudeBoundedPermissionMode(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+
+	args := rp.ResolveDefaultArgs()
+
+	wantArgs := []string{
+		"--permission-mode", "dontAsk",
+		claudeSafeAllowedToolsArg,
+		"--effort", "max",
+	}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", args, wantArgs)
+	}
+	assertNoPermissionBypass(t, args)
+
+	// The rest of the provider contract is unchanged by the permission policy.
+	if rp.Command != "claude" {
+		t.Errorf("Command = %q, want claude", rp.Command)
+	}
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want arg", rp.PromptMode)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.ReadyDelayMs != 10000 {
+		t.Errorf("ReadyDelayMs = %d, want 10000", rp.ReadyDelayMs)
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"node", "claude"}) {
+		t.Errorf("ProcessNames = %v, want [node claude]", rp.ProcessNames)
+	}
+	if rp.ResumeFlag != "--resume" || rp.ResumeStyle != "flag" {
+		t.Errorf("resume = %q/%q, want --resume/flag", rp.ResumeFlag, rp.ResumeStyle)
+	}
+	if !reflect.DeepEqual(rp.PrintArgs, []string{"-p"}) {
+		t.Errorf("PrintArgs = %v, want [-p]", rp.PrintArgs)
+	}
+}
+
+// claudeSafeAllowedTools / claudeSafeAllowedToolsArg are the exact tool
+// surface `dontAsk` may grant. Bash is deliberately absent: the bounded mode
+// must never become an implicit shell grant.
+//
+// These are written out literally rather than referencing
+// claudeSafeAllowedToolsArg on purpose. Asserting against the
+// production constant would make every expectation below move with it, so a
+// change that widened the grant would still pass.
+var claudeSafeAllowedTools = []string{"Read", "Write", "Edit", "Glob", "Grep"}
+
+const claudeSafeAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep"
+
+// parseAllowedToolsArg splits an `--allowedTools=<csv>` argv token into its
+// tool names. It reports false when tok is not that flag.
+func parseAllowedToolsArg(tok string) ([]string, bool) {
+	const prefix = "--allowedTools="
+	if !strings.HasPrefix(tok, prefix) {
+		return nil, false
+	}
+	return strings.Split(strings.TrimPrefix(tok, prefix), ","), true
+}
+
+// assertNoPermissionBypass fails when argv grants a blanket permission
+// bypass, or when the allowlist widens past claudeSafeAllowedTools -- most
+// importantly to Bash.
+func assertNoPermissionBypass(t *testing.T, argv []string) {
+	t.Helper()
+	for _, arg := range argv {
+		if arg == "--dangerously-skip-permissions" || arg == "--allow-dangerously-skip-permissions" {
+			t.Errorf("argv %v must not contain a permission bypass (%s)", argv, arg)
+		}
+		tools, ok := parseAllowedToolsArg(arg)
+		if !ok {
+			continue
+		}
+		for _, tool := range tools {
+			if strings.HasPrefix(tool, "Bash") {
+				t.Errorf("argv %v grants Bash (%q); the bounded mode must not allow shell", argv, tool)
+			}
+		}
+	}
+}
+
+// TestBuiltinClaudeDontAskGrantsOnlySafeTools pins the exact tool surface the
+// bounded permission mode hands to an autonomous worker. Widening this set is
+// a deliberate policy change and must break this test.
+func TestBuiltinClaudeDontAskGrantsOnlySafeTools(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+
+	var found []string
+	seen := 0
+	for _, arg := range rp.ResolveDefaultArgs() {
+		if tools, ok := parseAllowedToolsArg(arg); ok {
+			found = tools
+			seen++
+		}
+	}
+	if seen == 0 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want an --allowedTools= token", rp.ResolveDefaultArgs())
+	}
+	if seen > 1 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want exactly one --allowedTools= token, got %d",
+			rp.ResolveDefaultArgs(), seen)
+	}
+	if !reflect.DeepEqual(found, claudeSafeAllowedTools) {
+		t.Errorf("allowed tools = %v, want %v", found, claudeSafeAllowedTools)
+	}
+	assertNoPermissionBypass(t, rp.ResolveDefaultArgs())
+}
+
+// TestBuildProviderLaunchCommandClaudeStaysBounded proves the bounded
+// permission mode survives all the way into the materialized launch command,
+// which is what the managed process actually runs.
+func TestBuildProviderLaunchCommandClaudeStaysBounded(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	got, err := BuildProviderLaunchCommand("", rp, nil, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+
+	argv := shellquote.Split(got.Command)
+	wantArgv := []string{
+		"claude",
+		"--permission-mode", "dontAsk",
+		claudeSafeAllowedToolsArg,
+		"--effort", "max",
+	}
+	if !reflect.DeepEqual(argv, wantArgv) {
+		t.Fatalf("argv = %v, want %v", argv, wantArgv)
+	}
+	assertNoPermissionBypass(t, argv)
+}
+
+// TestClaudeAllowedToolsCannotSwallowPositionalPrompt pins the one ordering
+// property that is a real CLI contract rather than cosmetic adjacency.
+//
+// `--allowedTools <tools...>` is variadic in the Claude CLI: written as
+// separate tokens it consumes every following non-flag argument. Claude's
+// prompt_mode is "arg", so the startup prompt is appended to the command as a
+// bare positional -- and `--allowedTools` is not always followed by another
+// flag (the --settings arg is only appended when the settings file exists, and
+// a city may configure effort away). Emitting the allowlist as one `=`-bound
+// token is what keeps the prompt intact in every position.
+//
+// Verified against claude 2.1.226: `--allowedTools A B C PROMPT` loses PROMPT,
+// while `--allowedTools=A,B,C PROMPT` preserves it.
+func TestClaudeAllowedToolsCannotSwallowPositionalPrompt(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	// Worst case: no settings file on disk, and the city has configured the
+	// effort option away, so nothing follows the allowlist.
+	got, err := BuildProviderLaunchCommand("", rp, map[string]string{"effort": ""}, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+
+	argv := shellquote.Split(got.Command)
+	if len(argv) == 0 {
+		t.Fatal("empty launch command")
+	}
+
+	// The invariant: the allowlist occupies exactly one argv token, with its
+	// tools bound by '='. A space-separated `--allowedTools A B C` would eat
+	// the positional prompt appended after it.
+	first := -1
+	for i, arg := range argv {
+		if strings.HasPrefix(arg, "--allowedTools") {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		t.Fatalf("argv = %v, want an --allowedTools token", argv)
+	}
+	if _, bound := parseAllowedToolsArg(argv[first]); !bound {
+		t.Fatalf("allowlist is written as separate tokens (%v from index %d). "+
+			"--allowedTools is variadic, so it would swallow the positional prompt "+
+			"appended by prompt_mode=\"arg\". Bind the tools with '=' instead: %q",
+			argv[first:], first, claudeSafeAllowedToolsArg)
+	}
+
+	// Confirm the hazard this guards is genuinely reachable: in this
+	// configuration nothing follows the allowlist, so the prompt would be the
+	// very next token.
+	if first != len(argv)-1 {
+		t.Logf("note: allowlist is not trailing here (argv = %v); the '=' binding "+
+			"is what makes its position irrelevant", argv)
+	}
+	assertNoPermissionBypass(t, argv)
 }
 
 func TestResolveProviderWorkspaceProvider(t *testing.T) {

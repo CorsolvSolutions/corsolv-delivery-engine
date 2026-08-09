@@ -619,9 +619,9 @@ func TestResolveDefaultArgs_ClaudeSchema(t *testing.T) {
 
 	args := rp.ResolveDefaultArgs()
 
-	// Claude effective defaults: permission_mode=unrestricted, effort=max (from OptionDefaults).
-	// Should produce --dangerously-skip-permissions --effort max.
-	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	// Claude effective defaults: permission_mode=dontAsk, effort=max (from OptionDefaults).
+	// dontAsk carries its bounded tool surface as a single `=`-bound token.
+	wantArgs := []string{"--permission-mode", "dontAsk", claudeSafeAllowedToolsArg, "--effort", "max"}
 	if len(args) != len(wantArgs) {
 		t.Fatalf("got args=%v, want %v", args, wantArgs)
 	}
@@ -1097,8 +1097,8 @@ func TestBuiltinProviders_ClaudeHasNilArgsAndOptionDefaults(t *testing.T) {
 	if claude.OptionDefaults == nil {
 		t.Fatal("claude OptionDefaults should not be nil")
 	}
-	if claude.OptionDefaults["permission_mode"] != "unrestricted" {
-		t.Errorf("claude OptionDefaults[permission_mode] = %q, want unrestricted",
+	if claude.OptionDefaults["permission_mode"] != "dontAsk" {
+		t.Errorf("claude OptionDefaults[permission_mode] = %q, want dontAsk",
 			claude.OptionDefaults["permission_mode"])
 	}
 }

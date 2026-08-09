@@ -135,8 +135,8 @@ func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) 
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
-	if !strings.Contains(resolved.Command, "--dangerously-skip-permissions") {
-		t.Fatalf("Command = %q, want unrestricted default", resolved.Command)
+	if !strings.Contains(resolved.Command, "--permission-mode dontAsk") {
+		t.Fatalf("Command = %q, want bounded permission-mode default", resolved.Command)
 	}
 	if !strings.Contains(resolved.Command, "--effort max") {
 		t.Fatalf("Command = %q, want effort max default", resolved.Command)
@@ -149,7 +149,7 @@ func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) 
 // TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags is a
 // regression test for gastownhall/gascity#799: a pool-agent session
 // resumed through the control-dispatcher path must reconstruct the full
-// launch command (--dangerously-skip-permissions, --settings, schema
+// launch command (--permission-mode dontAsk, --settings, schema
 // defaults) even when the persisted session command is the bare
 // provider name. The pre-fix path dropped those flags and caused pool
 // workers resumed via `claude --resume <uuid>` to wedge on interactive
@@ -194,8 +194,8 @@ func TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags(t *testing.
 	if runtimeCfg == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
-	if !strings.Contains(runtimeCfg.Command, "--dangerously-skip-permissions") {
-		t.Fatalf("resumed pool Command = %q, want --dangerously-skip-permissions", runtimeCfg.Command)
+	if !strings.Contains(runtimeCfg.Command, "--permission-mode dontAsk") {
+		t.Fatalf("resumed pool Command = %q, want --permission-mode dontAsk", runtimeCfg.Command)
 	}
 	if !strings.Contains(runtimeCfg.Command, "--effort max") {
 		t.Fatalf("resumed pool Command = %q, want --effort max default", runtimeCfg.Command)

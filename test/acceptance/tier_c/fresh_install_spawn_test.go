@@ -48,14 +48,15 @@ func TestFreshInit_SlingSpawnsDefaultPoolWorker(t *testing.T) {
 	_ = runFreshInitSlingClaudeWork(t, "Write the current time to time.txt", "time.txt")
 }
 
-// TestFreshInit_SlingClaudeUsesUnrestrictedPermissionMode covers the root
-// cause from issue #278: a freshly initialized claude worker should launch
-// with unrestricted permissions so autonomous bash-heavy work does not block
-// on permission prompts.
+// TestFreshInit_ClaudeBoundedPermissionMode covers the root cause from issue
+// #278: a freshly initialized claude worker should launch in a permission mode
+// that does not block autonomous bash-heavy work on interactive prompts. It
+// also pins the bounded-execution policy: that non-blocking mode is
+// --permission-mode dontAsk, never a blanket permission bypass.
 //
 // This remains Tier C because the assertion is made on the real spawned
 // session bead after going through the full provider-backed fresh-install path.
-func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
+func TestFreshInit_ClaudeBoundedPermissionMode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Tier C: skipping in short mode")
 	}
@@ -65,7 +66,8 @@ func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
 	require.NoError(t, err, "refresh spawned session bead %s", result.SpawnedSessionBead.ID)
 	command := metaString(spawnedSessionBead.Metadata, "command")
 	require.NotEmpty(t, command, "spawned worker should persist the resolved launch command")
-	require.Contains(t, command, "--dangerously-skip-permissions", "fresh claude worker should launch unrestricted")
+	require.Contains(t, command, "--permission-mode dontAsk", "fresh claude worker should launch in the bounded dontAsk mode")
+	require.NotContains(t, command, "--dangerously-skip-permissions", "fresh claude worker must not launch with a permission bypass")
 	require.NotContains(t, command, "--permission-mode auto-edit", "fresh claude worker should not launch in auto-edit mode")
 }
 

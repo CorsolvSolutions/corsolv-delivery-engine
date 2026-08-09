@@ -56,8 +56,8 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	if p.Args != nil {
 		t.Errorf("Args = %v, want nil (schema flags moved to OptionDefaults)", p.Args)
 	}
-	if p.OptionDefaults["permission_mode"] != "unrestricted" {
-		t.Errorf("OptionDefaults[permission_mode] = %q, want unrestricted", p.OptionDefaults["permission_mode"])
+	if p.OptionDefaults["permission_mode"] != "dontAsk" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want dontAsk", p.OptionDefaults["permission_mode"])
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -111,7 +111,7 @@ func TestBuiltinClaudeCommandString(t *testing.T) {
 	}
 	// Default args should produce the permission flag and effort flag.
 	defaultArgs := rp.ResolveDefaultArgs()
-	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	wantArgs := []string{"--permission-mode", "dontAsk", claudeSafeAllowedToolsArg, "--effort", "max"}
 	if len(defaultArgs) != len(wantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
 	} else {

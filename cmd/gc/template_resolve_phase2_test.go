@@ -15,11 +15,23 @@ import (
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
+// phase2SettingsPathToken stands in for the materialized provider settings
+// path inside a wantCommandArgv expectation. The real path is a per-test
+// temp dir, so the token matches structurally and the exact suffix is checked
+// by the wantSettingsArg assertion.
+const phase2SettingsPathToken = "<settings-path>"
+
 type phase2ProviderCase struct {
-	profileID             workertest.ProfileID
-	family                string
-	wantCommand           string
-	wantCommandPrefix     string
+	profileID         workertest.ProfileID
+	family            string
+	wantCommand       string
+	wantCommandPrefix string
+	// wantCommandArgv, when set, asserts the FULL materialized argument vector
+	// token-for-token (use phase2SettingsPathToken for the settings path).
+	// Preferred over wantCommandPrefix: an exact vector proves the flags that
+	// are present, their values, and the absence of duplicate or conflicting
+	// ones, without pinning cosmetic adjacency.
+	wantCommandArgv       []string
 	wantPromptMode        string
 	wantPromptFlag        string
 	wantSettingsArg       bool
@@ -56,9 +68,26 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 
 	all := []phase2ProviderCase{
 		{
-			profileID:             "claude/tmux-cli",
-			family:                "claude",
-			wantCommandPrefix:     "claude --dangerously-skip-permissions --effort max",
+			profileID: "claude/tmux-cli",
+			family:    "claude",
+			// Full argument vector rather than a prefix: the bounded
+			// permission mode carries a tool allowlist between
+			// --permission-mode and --effort, and adjacency of those two
+			// flags is not a CLI contract (verified against claude 2.1.226 --
+			// --permission-mode/--allowedTools/--effort/--settings parse
+			// independently of each other's order). What must hold is the
+			// exact set of flags and values, which this pins.
+			// The allowlist is spelled out literally rather than referencing
+			// workerbuiltin.ClaudeDontAskAllowedToolsArg: an expectation that
+			// tracks the production constant would follow it if the grant were
+			// ever widened (e.g. to Bash) and the gate would still pass.
+			wantCommandArgv: []string{
+				"claude",
+				"--permission-mode", "dontAsk",
+				"--allowedTools=Read,Write,Edit,Glob,Grep",
+				"--effort", "max",
+				"--settings", phase2SettingsPathToken,
+			},
 			wantSettingsArg:       true,
 			wantReadyDelayMs:      10000,
 			wantReadyPromptPrefix: "❯ ",
