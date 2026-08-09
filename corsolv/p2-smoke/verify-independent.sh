@@ -70,7 +70,11 @@ section '2. diff scope / unexpected files'
 # judged on what the WORKER touched: the authority is its transcript, and the
 # infrastructure paths are reported for visibility rather than counted against
 # it.
-INFRA_RE='^(\.beads/|\.gc/|\.gitignore$)'
+# .claude/ belongs here too: Gas City materializes provider skills into it
+# (.claude/skills/.gc-skill-ownership.json) during rig setup, before any worker
+# starts. Attribution is not assumed -- the transcript check below proves the
+# worker's only file write was the artifact.
+INFRA_RE='^(\.beads/|\.gc/|\.claude/|\.gitignore$)'
 
 if git -C "$RIG" rev-parse HEAD >/dev/null 2>&1; then
   changed="$(git -C "$RIG" status --porcelain 2>/dev/null | awk '{print $2}')"
@@ -137,12 +141,37 @@ else
   info 'work_outcome' "${wo:-unset} — no commit SHA because git is withheld from workers by policy; the controller publishes"
 fi
 
-# Worker sessions must be gone: drain-ack releases the slot.
+# The worker must have released its slot. `drain-ack` moves the session to
+# `draining` and the reconciler then reaps it, so `draining` and `closed` are
+# both correct end states -- only a session still `active` means the worker
+# never drained. Matching on the template alone (ignoring the state column)
+# reported a healthy drain as a failure.
 sessions="$(cd "$CITY" && gc session list 2>&1)"
-if printf '%s' "$sessions" | awk 'NR>1 && $2 ~ /claude/ {found=1} END {exit !found}'; then
-  fail 'worker session drained' 'a worker session is still active'
+stuck="$(printf '%s\n' "$sessions" | awk 'NR>1 && $2 ~ /\/claude$/ && $3 == "active" {print $1}')"
+if [ -n "$stuck" ]; then
+  fail 'worker session drained' "still active: $(printf '%s' "$stuck" | tr '\n' ' ')"
 else
-  pass 'worker session drained'
+  state="$(printf '%s\n' "$sessions" | awk 'NR>1 && $2 ~ /\/claude$/ {print $3; exit}')"
+  pass "worker session drained${state:+ (state: $state)}"
+fi
+
+# Corroborate from the process table: no live claude process for this city may
+# be a pool worker.
+worker_procs=''
+for p in /proc/[0-9]*; do
+  [ -r "$p/environ" ] || continue
+  # Other users' processes are unreadable; skip them rather than emit noise.
+  agent="$( { tr '\0' '\n' < "$p/environ"; } 2>/dev/null | sed -n 's/^GC_AGENT=//p' | head -1)" || continue
+  case "$agent" in
+    */claude*|claude-*) ;;
+    *) continue ;;
+  esac
+  tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qF "$CITY" && worker_procs="$worker_procs $(basename "$p")"
+done
+if [ -z "$worker_procs" ]; then
+  pass 'no worker process left running'
+else
+  fail 'no worker process left running' "pids:$worker_procs"
 fi
 
 # Transcript evidence that the worker drove its own lifecycle.
