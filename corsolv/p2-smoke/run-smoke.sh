@@ -4,11 +4,20 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/go/bin:$PATH"
 
 export GC_HOME="$HOME/.gc-corsolv-p2"
-export GC_BEADS=file
 export GOTOOLCHAIN=auto
 
+# Deliberately NOT setting GC_BEADS. `gc init` gives the city a Dolt-backed
+# store, and GC_BEADS=file only overrides how *this shell* resolves the
+# provider -- it does not change the city. With the override set, every
+# `gc bd show` below fails with "only supported for bd-backed beads
+# providers", so the wait loop can never observe CLOSED and the run always
+# burns down to the safety deadline.
+
 SOURCE_REPO="/mnt/d/Development/corsolv-delivery-engine"
-REPORT="$SOURCE_REPO/docs/corsolv/P2-SMOKE-RESULT.md"
+# engdocs/, not docs/: everything under docs/ publishes to the Mintlify site
+# and must appear in docs/docs.json navigation, which TestEveryDocsPageIsPublished
+# enforces. This is an engineering record, so it belongs in engdocs/.
+REPORT="$SOURCE_REPO/engdocs/corsolv/P2-SMOKE-RESULT.md"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -22,6 +31,7 @@ EXPECTED_FILE="$TARGET/CORSOLV_GASCITY_SMOKE.txt"
 
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$HOME/corsolv-p2"
+mkdir -p "$(dirname "$REPORT")"
 
 echo
 echo "============================================================"
@@ -91,7 +101,7 @@ echo
 echo "Creating Gas City:"
 echo "$CITY"
 
-gc init "$CITY" --provider claude
+gc init "$CITY" --provider claude --yes
 
 echo
 echo "City status after init:"
@@ -113,6 +123,36 @@ echo
 echo "Registered rigs:"
 gc rig list
 
+# `gc rig add` can return before the rig's own beads database is usable. If
+# work is slung in that window the bead lands in the city scope instead of the
+# rig, and dispatch fails. Wait for the rig store to come up.
+echo
+echo "Waiting for rig beads store:"
+
+RIG_BEADS_DEADLINE=120
+RIG_BEADS_START="$(date +%s)"
+
+while true; do
+    if gc rig list 2>&1 |
+       awk -v rig="$RIG_NAME:" '
+           $1 == rig {inrig = 1; next}
+           inrig && /^  [^ ]/ && $0 !~ /^    / {inrig = 0}
+           inrig && /Beads:/ {print}
+       ' |
+       grep -q 'initialized'; then
+        echo "PASS - rig beads initialized"
+        break
+    fi
+
+    if [ "$(( $(date +%s) - RIG_BEADS_START ))" -ge "$RIG_BEADS_DEADLINE" ]; then
+        echo "FAIL: rig beads store not initialized within ${RIG_BEADS_DEADLINE}s."
+        gc rig list
+        exit 54
+    fi
+
+    sleep 2
+done
+
 # ------------------------------------------------------------
 # Dispatch REAL coding work through Gas City.
 # ------------------------------------------------------------
@@ -126,13 +166,23 @@ echo "============================================================"
 echo "DISPATCHING WORK THROUGH GAS CITY"
 echo "============================================================"
 
+# Capture stderr too. Under `set -e` a failing sling would otherwise abort the
+# run with its diagnostics discarded, which is what made the first failure of
+# this harness unreadable.
+SLING_STATUS=0
 SLING_OUTPUT="$(
     gc sling \
         "${RIG_NAME}/claude" \
-        "$TASK"
-)"
+        "$TASK" 2>&1
+)" || SLING_STATUS=$?
 
 printf '%s\n' "$SLING_OUTPUT"
+
+if [ "$SLING_STATUS" -ne 0 ]; then
+    echo
+    echo "FAIL: gc sling exited $SLING_STATUS."
+    exit 55
+fi
 
 WORK_ID="$(
     printf '%s\n' "$SLING_OUTPUT" |
