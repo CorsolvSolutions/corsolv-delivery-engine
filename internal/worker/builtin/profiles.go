@@ -76,6 +76,49 @@ type BuiltinProviderSpec struct {
 
 func boolPtr(b bool) *bool { return &b }
 
+// ClaudeBoundedAutoAllowedToolsArg is the tool surface granted by the
+// `bounded-auto` permission mode: the mode an autonomous pool worker launches
+// with by default.
+//
+// `--permission-mode dontAsk` is deny-by-default rather than "permit without
+// prompting", so this list is the entire surface the worker gets. Three
+// properties are load-bearing, each verified against the Claude CLI (v2.1.226):
+//
+//   - Edit-and-inspect tools, plus shell grants enumerated per `gc` subcommand.
+//     Bare `Bash` and `Bash(gc:*)` are both absent, so the mode is never a
+//     blanket shell or blanket `gc` grant, and no `git` grant exists at all —
+//     commit, push, merge, and release stay with the controller.
+//   - The shell grants are exactly the mandatory pool-worker lifecycle, derived
+//     from `packs/core/assets/prompts/pool-worker.md` (claim → show → molecule
+//     steps → close → drain-ack) and `packs/core/formulas/mol-do-work.toml`
+//     (convoy status → bd show → heartbeat → bd update --status=closed →
+//     drain-ack). Optional paths are excluded: `gc mail inbox`/`gc mail send`
+//     (escalation) and `gc runtime request-restart` (context exhaustion).
+//   - `gc hook` is scoped to `--claim`, NOT the whole subcommand. `gc hook run
+//     -- <gc args...>` re-executes this binary with arbitrary arguments, so
+//     `Bash(gc hook:*)` would be equivalent to `Bash(gc:*)`. Likewise
+//     `gc runtime` is scoped to `drain-ack`, because the same family carries
+//     the controller-side `drain` and `undrain`.
+//   - The tools are attached with `=` as a SINGLE argv token rather than
+//     `--allowedTools A B C`. `--allowedTools <tools...>` is variadic: in the
+//     space-separated form it greedily consumes every following non-flag token,
+//     so if it ever lands last it swallows the positional prompt that Claude's
+//     `prompt_mode = "arg"` appends. The `=` form binds the value to one token
+//     and is immune to that, which keeps the flag order-independent.
+//
+// The allow/deny behavior of every rule is verified against the real
+// permission engine by corsolv/p2-smoke/policy-matrix.sh.
+const ClaudeBoundedAutoAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep," +
+	"Bash(gc hook --claim:*)," +
+	"Bash(gc bd show:*)," +
+	"Bash(gc bd mol current:*)," +
+	"Bash(gc bd mol progress:*)," +
+	"Bash(gc bd heartbeat:*)," +
+	"Bash(gc bd update:*)," +
+	"Bash(gc bd close:*)," +
+	"Bash(gc convoy status:*)," +
+	"Bash(gc runtime drain-ack:*)"
+
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
 type ProfileIdentity struct {
@@ -108,8 +151,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
 		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
 		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
+		// Autonomous launches run bounded rather than with a blanket bypass.
+		// `bounded-auto` is dontAsk plus exactly the pool-worker lifecycle
+		// grants; see ClaudeBoundedAutoAllowedToolsArg.
 		OptionDefaults: map[string]string{
-			"permission_mode": "unrestricted",
+			"permission_mode": "bounded-auto",
 			"effort":          "max",
 		},
 		PromptMode:             "arg",
@@ -132,6 +178,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			"plan":         "--permission-mode plan",
 			"auto-edit":    "--permission-mode acceptEdits",
 			"full-auto":    "--permission-mode dontAsk",
+			"bounded-auto": "--permission-mode dontAsk " + ClaudeBoundedAutoAllowedToolsArg,
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -142,6 +189,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
 					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
+					// bounded-auto is full-auto's dontAsk plus the enumerated
+					// pool-worker lifecycle grants. It is a distinct choice
+					// rather than a change to full-auto so the plain mode keeps
+					// its existing meaning for anyone already selecting it.
+					{Value: "bounded-auto", Label: "Bounded autonomous", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeBoundedAutoAllowedToolsArg}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},

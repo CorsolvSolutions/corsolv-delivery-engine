@@ -176,7 +176,7 @@ func TestBuildSessionResumePreservesStoredResolvedCommand(t *testing.T) {
 // regression test for gastownhall/gascity#799: when a pool-agent session
 // resumed through the control-dispatcher path has only the bare
 // provider binary ("claude") as its stored command, the API must
-// re-inject schema defaults (--dangerously-skip-permissions) and the
+// re-inject schema defaults (--permission-mode dontAsk) and the
 // provider-owned --settings path from the current resolved config.
 // Before the fix, the bare stored command was preserved as-is and pool
 // workers wedged on interactive permission prompts on resume.
@@ -221,7 +221,7 @@ func TestBuildSessionResumeRebuildsBareStoredCommandForPoolClaudeAgent(t *testin
 	if err != nil {
 		t.Fatalf("buildSessionResume: %v", err)
 	}
-	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
+	if !strings.Contains(cmd, "--permission-mode dontAsk") {
 		t.Fatalf("resume command missing default args:\n  got: %s", cmd)
 	}
 	if !strings.Contains(cmd, "--resume abc-123") {

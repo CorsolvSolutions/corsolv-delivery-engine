@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -24,6 +25,26 @@ func newPhase2Reporter(t *testing.T, suite string) *workertest.SuiteReporter {
 }
 
 func phase2BoolPtr(b bool) *bool { return &b }
+
+// phase2ArgvMatches reports whether the materialized command's argument vector
+// equals want token-for-token. phase2SettingsPathToken in want matches any
+// single token (the per-test settings path); its exact value is asserted
+// separately by the wantSettingsArg check.
+func phase2ArgvMatches(command string, want []string) bool {
+	got := shellquote.Split(command)
+	if len(got) != len(want) {
+		return false
+	}
+	for i, w := range want {
+		if w == phase2SettingsPathToken {
+			continue
+		}
+		if got[i] != w {
+			return false
+		}
+	}
+	return true
+}
 
 func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParams) workertest.Result {
 	evidence := phase2TemplateEvidence(tc, tp)
@@ -46,6 +67,10 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 	case tc.wantCommandPrefix != "" && !strings.HasPrefix(tp.Command, tc.wantCommandPrefix):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want prefix %q", tp.Command, tc.wantCommandPrefix)).WithEvidence(evidence)
+	case len(tc.wantCommandArgv) > 0 && !phase2ArgvMatches(tp.Command, tc.wantCommandArgv):
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+			fmt.Sprintf("argv = %v, want %v (%s matches the materialized settings path)",
+				shellquote.Split(tp.Command), tc.wantCommandArgv, phase2SettingsPathToken)).WithEvidence(evidence)
 	case !containsOrderedArgs(tp.Command, tp.ResolvedProvider.ResolveDefaultArgs()):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want default args %v", tp.Command, tp.ResolvedProvider.ResolveDefaultArgs())).WithEvidence(evidence)
