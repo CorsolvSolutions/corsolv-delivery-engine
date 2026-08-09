@@ -1,7 +1,8 @@
 # Corsolv P2 / P2.1 — Final Gate and Acceptance Evidence
 
 GATE: PASS (20/20, exit 0)
-P2.1 ACCEPTANCE: PASS
+P2.1 ACCEPTANCE (worker path): PASS
+P2.1 OVERALL: **NOT COMPLETE** — blocked on GitHub CI, see "Remaining blockers"
 
 ## Foundation
 
@@ -191,6 +192,69 @@ committed content: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS
 ```
 
 The worker was never granted git to achieve this.
+
+## GitHub publication
+
+| Item | Value |
+| --- | --- |
+| Branch pushed | `corsolv/p2-gascity-smoke` |
+| Pushed SHA | `83414f92e56becf32dddd89e710bfab8d34b1f43` (remote == local) |
+| Pre-push suite | PASS — "All fast jobs passed" |
+| PR | https://github.com/CorsolvSolutions/corsolv-delivery-engine/pull/1 |
+| PR head | `83414f92e56becf32dddd89e710bfab8d34b1f43` (exact match) |
+| CI against that SHA | **NONE — cannot run** |
+
+### Why the push looked "in flight" for over an hour
+
+WSL git has **no credential helper** (`credential.helper` unset locally and
+globally). Anonymous `git ls-remote` succeeds, so the remote appeared
+reachable, but `push` needs auth: `git-remote-https` slept indefinitely waiting
+for a prompt a non-interactive shell can never answer. Two pushes sat in
+`State: S (sleeping)`, emitting no error — which is exactly why it read as
+progress. Both were killed; neither wrote anything to the remote.
+
+Resolved without new credentials by passing the already-authorised `gh` token
+into WSL via `WSLENV` and an in-memory credential helper, so it never reaches
+argv, the reflog, or on-disk config. No `--no-verify`; the hook ran and passed.
+
+## Remaining blockers
+
+### 1. GitHub Actions has never been activated on this fork
+
+```
+repos/.../actions/permissions        -> {"enabled":true,"allowed_actions":"all"}
+repos/.../actions/workflows          -> total_count: 0
+repos/.../actions/runs               -> total_count: 0   (none, ever)
+commits/83414f92e.../check-runs      -> total_count: 0
+commits/83414f92e.../status          -> pending
+```
+
+The workflow files are present on both `main` and the branch (`ci.yml` and 20+
+others), and `ci.yml` triggers on `pull_request` (`opened`, `reopened`,
+`synchronize`, `ready_for_review`). A fresh `reopened` event was fired by
+closing and reopening PR #1 — still 0 runs.
+
+`enabled: true` on the permissions endpoint is not the same as workflows being
+registered; `total_count: 0` proves none are. GitHub disables Actions on forks
+until a repo admin clicks through the one-time confirmation in the Actions tab
+("I understand my workflows, go ahead and enable them"). There is no REST API
+for that step, so it cannot be done from here.
+
+**Action required:** a repo admin enables Actions at
+https://github.com/CorsolvSolutions/corsolv-delivery-engine/actions, then
+re-fires the PR event. Nothing in the branch needs to change.
+
+### 2. PR #1 conflicts with `main`
+
+`mergeable: CONFLICTING`, `mergeStateStatus: DIRTY`. The branch is based on
+`a7297c511` (upstream v1.4.0), which **is** an ancestor of `origin/main`, but
+`origin/main` is **362 commits ahead** while this branch carries 6.
+
+Rebasing onto `origin/main` is not a mechanical step to take unasked: upstream
+almost certainly touched `internal/worker/builtin/profiles.go` and the config
+tests over those 362 commits, and any rebase invalidates the fingerprinted
+binary, the 20/20 gate run, and the acceptance evidence recorded here — all of
+which would need re-running against the rebased tree.
 
 ## Defects found and fixed
 
