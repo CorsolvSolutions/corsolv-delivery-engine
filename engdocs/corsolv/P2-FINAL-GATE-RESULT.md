@@ -1,15 +1,124 @@
 # Corsolv P2 Final Gate — Result
 
-OVERALL: PASS (20/20, exit 0)
+GATE: PASS (20/20, exit 0)
+P2.1 ACCEPTANCE: BLOCKED — one privilege short (see "Remaining gap")
 
 ## Foundation
 
 - Branch: `corsolv/p2-gascity-smoke`
-- SHA: `db90818a83e9501b4daf8e70d06450f3306d1b48`
+- SHA: `70e1e09a79125ccbf0252757c6f8decd49d5d710`
+- Binary SHA256: `0381ac7de8665e7e3fa8406e9b0f61c8379643af6be3ce15c4f02ea7cd81036f`
+- `gc version`: `1.4.1`
 - Base SHA: `a7297c511d637a3609947386f3389d76ddb2f23b`
 - Claude Code: 2.1.226
 - Go: 1.26.5 (linux/amd64, WSL2 Ubuntu)
 - Gate script: `corsolv/p2-smoke/final-gate.sh`
+- Mutation proof: `corsolv/p2-smoke/policy-mutations.sh`
+
+## Approved security posture (implemented)
+
+```
+claude --permission-mode dontAsk \
+       '--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)' \
+       --effort max --settings <path>
+```
+
+Global Bash denied; `--dangerously-skip-permissions` absent; `Bash(gc:*)` and
+`Bash(git:*)` denied. The grant string is `drain-ack`, not `drain-acc` as
+written in the approval — `gc runtime drain-ack` is the actual command, and a
+pattern for `drain-acc` would match nothing. Same scope, corrected spelling.
+
+### Mutation proof (all as required)
+
+| Mutation | Result |
+| --- | --- |
+| baseline: approved policy | PASS |
+| adding global `Bash` | FAIL |
+| broadening to `Bash(gc:*)` | FAIL |
+| removing the scoped drain grant | FAIL |
+| granting `Bash(git:*)` | FAIL |
+| reverting to the unsafe variadic encoding | FAIL |
+| restored: approved policy | PASS |
+
+### Live-process posture (verified from `/proc/<pid>/cmdline`)
+
+City `city-20260809T103717Z`, worker pid 2726031:
+
+```
+permission mode is dontAsk                    PASS
+Read,Write,Edit,Glob,Grep present             PASS
+scoped Bash(gc runtime drain-ack:*) present   PASS
+no global or broader Bash grant               PASS
+no --dangerously-skip-permissions             PASS
+
+allowlist: Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)
+```
+
+## Remaining gap: the worker cannot claim work
+
+Fresh run, work item `r2-cyh`, dispatched cleanly:
+
+```
+Created r2-cyh — "Create the file CORSOLV_GASCITY_SMOKE.txt ..."
+Attached workflow r2-dnv (formula "mol-do-work")
+```
+
+The worker never started the task. `r2-cyh` stayed `OPEN`, artifact absent.
+The blocker is upstream of drain: the documented pool-worker lifecycle
+(`internal/bootstrap/packs/core/assets/prompts/pool-worker.md`) begins with
+
+```
+1. Find and claim work: gc hook --claim --drain-ack --json
+...
+6. When all work is done, close the bead: gc bd close <id>
+7. MANDATORY — gc runtime drain-ack
+```
+
+`Bash(gc runtime drain-ack:*)` authorises step 7 only. Steps 1 and 6 are
+refused, so the worker cannot claim the bead, cannot read it, and cannot close
+it. The scoped grant is correct and provably live — it is simply not the only
+lifecycle command a worker issues.
+
+`mol-do-work.toml` needs the same family: `gc bd show`, four `gc bd update`
+calls, `gc bd heartbeat`, `gc mail inbox`, `gc convoy status`.
+
+### Minimal additional grant to unblock (NOT applied — needs approval)
+
+Strictly narrower than the prohibited `Bash(gc:*)`, and none of it confers
+commit, push, merge, release, or general shell:
+
+```
+Bash(gc hook:*)            claim work                (blocks step 1 today)
+Bash(gc bd show:*)         read the work item
+Bash(gc bd close:*)        close work                (blocks step 6 today)
+Bash(gc bd update:*)       set status/metadata
+Bash(gc bd mol:*)          molecule navigation
+Bash(gc bd heartbeat:*)    liveness
+Bash(gc mail inbox:*)      escalation checks
+Bash(gc convoy status:*)   convoy status
+```
+
+These are work-ledger operations against the local bead store. Git write,
+publish, and release stay with the controller, as required.
+
+Note the worker itself proposed `Bash(gc:*)`; that is explicitly prohibited and
+was not applied. The list above is the enumerated-subcommand equivalent.
+
+## Pass-bar status
+
+| Requirement | Status |
+| --- | --- |
+| 20/20 current-source tests pass | PASS |
+| Exact patched binary fingerprinted | PASS |
+| Scoped drain Bash permission works | PASS (pattern verified; live in argv) |
+| Global Bash remains denied | PASS |
+| Dangerous bypass absent in live process | PASS |
+| Fresh Gas City-managed Claude task completes | **FAIL — blocked at claim** |
+| Task drains/closes automatically | **FAIL — never claimed** |
+| Independent assurance passes | NOT RUN — nothing completed to assure |
+| Durable GitHub evidence | see "Push" below |
+
+P2.1 is therefore **not** complete.
 
 ## Why the previous run stopped at 2/20
 
