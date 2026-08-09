@@ -14,8 +14,29 @@ if [ -z "$CITY" ]; then
   CITY="$(ls -d "$HOME"/corsolv-p2/city-* 2>/dev/null | sort | tail -1)"
 fi
 
-APPROVED_GRANT='Bash(gc runtime drain-ack:*)'
+# The complete approved shell surface: the mandatory pool-worker lifecycle and
+# nothing else. Kept literal here so this verifier fails independently of the
+# Go constant it is checking.
+APPROVED_GRANTS=(
+  'Bash(gc hook --claim:*)'
+  'Bash(gc bd show:*)'
+  'Bash(gc bd mol current:*)'
+  'Bash(gc bd mol progress:*)'
+  'Bash(gc bd heartbeat:*)'
+  'Bash(gc bd update:*)'
+  'Bash(gc bd close:*)'
+  'Bash(gc convoy status:*)'
+  'Bash(gc runtime drain-ack:*)'
+)
 FAILURES=0
+
+is_approved_grant() {
+  local candidate="$1" g
+  for g in "${APPROVED_GRANTS[@]}"; do
+    [ "$candidate" = "$g" ] && return 0
+  done
+  return 1
+}
 
 note() { printf '  %-52s %s\n' "$1" "$2"; }
 fail() { note "$1" "FAIL — $2"; FAILURES=$((FAILURES + 1)); }
@@ -92,24 +113,33 @@ for pid in "${PIDS[@]}"; do
     fail 'Read,Write,Edit,Glob,Grep present' "missing:$missing"
   fi
 
-  # 3. the scoped drain grant present
-  case ",$allowlist," in
-    *",$APPROVED_GRANT,"*) pass 'scoped Bash(gc runtime drain-ack:*) present' ;;
-    *) fail 'scoped Bash(gc runtime drain-ack:*) present' "allowlist='$allowlist'" ;;
-  esac
+  # 3. every mandatory lifecycle grant present
+  missing_grants=''
+  for g in "${APPROVED_GRANTS[@]}"; do
+    case ",$allowlist," in
+      *",$g,"*) ;;
+      *) missing_grants="$missing_grants '$g'" ;;
+    esac
+  done
+  if [ -z "$missing_grants" ]; then
+    pass 'all mandatory lifecycle grants present'
+  else
+    fail 'all mandatory lifecycle grants present' "missing:$missing_grants"
+  fi
 
-  # 4. no shell grant other than the approved one
+  # 4. no shell grant outside the approved set (catches bare Bash, Bash(gc:*),
+  #    Bash(gc hook:*), Bash(git:*))
   offenders=''
   IFS=',' read -r -a tools <<< "$allowlist"
   for t in "${tools[@]}"; do
     case "$t" in
-      Bash*) [ "$t" = "$APPROVED_GRANT" ] || offenders="$offenders '$t'" ;;
+      Bash*) is_approved_grant "$t" || offenders="$offenders '$t'" ;;
     esac
   done
   if [ -z "$offenders" ]; then
-    pass 'no global or broader Bash grant'
+    pass 'no Bash grant outside the approved lifecycle set'
   else
-    fail 'no global or broader Bash grant' "found:$offenders"
+    fail 'no Bash grant outside the approved lifecycle set' "found:$offenders"
   fi
 
   # 5. no permission bypass
