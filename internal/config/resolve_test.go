@@ -183,6 +183,7 @@ func TestResolveProviderClaudeBoundedPermissionMode(t *testing.T) {
 		t.Fatalf("ResolveDefaultArgs() = %v, want %v", args, wantArgs)
 	}
 	assertNoPermissionBypass(t, args)
+	assertDrainGrantPresent(t, args)
 
 	// The rest of the provider contract is unchanged by the permission policy.
 	if rp.Command != "claude" {
@@ -209,16 +210,30 @@ func TestResolveProviderClaudeBoundedPermissionMode(t *testing.T) {
 }
 
 // claudeSafeAllowedTools / claudeSafeAllowedToolsArg are the exact tool
-// surface `dontAsk` may grant. Bash is deliberately absent: the bounded mode
-// must never become an implicit shell grant.
+// surface `dontAsk` may grant.
 //
 // These are written out literally rather than referencing
-// claudeSafeAllowedToolsArg on purpose. Asserting against the
+// workerbuiltin.ClaudeDontAskAllowedToolsArg on purpose. Asserting against the
 // production constant would make every expectation below move with it, so a
 // change that widened the grant would still pass.
-var claudeSafeAllowedTools = []string{"Read", "Write", "Edit", "Glob", "Grep"}
+var claudeSafeAllowedTools = []string{
+	"Read", "Write", "Edit", "Glob", "Grep",
+	claudeApprovedBashGrant,
+}
 
-const claudeSafeAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep"
+const claudeSafeAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)"
+
+// claudeApprovedBashGrant is the ONLY Bash grant the autonomous Claude policy
+// permits. It exists so a worker can acknowledge its drain and let the
+// controller reclaim the session. Anything broader -- bare Bash, Bash(gc:*),
+// Bash(git:*) -- is a policy violation, not a widening to wave through.
+const claudeApprovedBashGrant = "Bash(gc runtime drain-ack:*)"
+
+// claudeSafeAllowedToolsShellArg is claudeSafeAllowedToolsArg as it appears
+// inside a rendered command STRING. The scoped grant contains a space, so
+// shellquote.Join wraps the token in single quotes -- which is exactly what
+// keeps it a single argv element when the command is split again.
+const claudeSafeAllowedToolsShellArg = `'--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)'`
 
 // parseAllowedToolsArg splits an `--allowedTools=<csv>` argv token into its
 // tool names. It reports false when tok is not that flag.
@@ -230,9 +245,14 @@ func parseAllowedToolsArg(tok string) ([]string, bool) {
 	return strings.Split(strings.TrimPrefix(tok, prefix), ","), true
 }
 
-// assertNoPermissionBypass fails when argv grants a blanket permission
-// bypass, or when the allowlist widens past claudeSafeAllowedTools -- most
-// importantly to Bash.
+// assertNoPermissionBypass fails when argv grants a blanket permission bypass,
+// or when the allowlist carries any shell grant other than the single approved
+// scoped one.
+//
+// The check is an exact-match allow, not a pattern heuristic: bare `Bash`,
+// `Bash(gc:*)`, and `Bash(git:*)` all fail, because each would hand the worker
+// capability the policy withholds (arbitrary shell, arbitrary gc, and commit /
+// push / merge / release respectively).
 func assertNoPermissionBypass(t *testing.T, argv []string) {
 	t.Helper()
 	for _, arg := range argv {
@@ -244,11 +264,36 @@ func assertNoPermissionBypass(t *testing.T, argv []string) {
 			continue
 		}
 		for _, tool := range tools {
-			if strings.HasPrefix(tool, "Bash") {
-				t.Errorf("argv %v grants Bash (%q); the bounded mode must not allow shell", argv, tool)
+			if !strings.HasPrefix(tool, "Bash") {
+				continue
+			}
+			if tool != claudeApprovedBashGrant {
+				t.Errorf("argv %v grants shell access %q; the only permitted Bash grant is %q",
+					argv, tool, claudeApprovedBashGrant)
 			}
 		}
 	}
+}
+
+// assertDrainGrantPresent fails when the worker cannot acknowledge its drain.
+// Without this grant the controller never reclaims the session, so the work
+// item stalls open even after the worker has finished -- the failure mode that
+// blocked the first P2.1 acceptance attempt.
+func assertDrainGrantPresent(t *testing.T, argv []string) {
+	t.Helper()
+	for _, arg := range argv {
+		tools, ok := parseAllowedToolsArg(arg)
+		if !ok {
+			continue
+		}
+		for _, tool := range tools {
+			if tool == claudeApprovedBashGrant {
+				return
+			}
+		}
+	}
+	t.Errorf("argv %v is missing the drain grant %q; the session can never be reclaimed",
+		argv, claudeApprovedBashGrant)
 }
 
 // TestBuiltinClaudeDontAskGrantsOnlySafeTools pins the exact tool surface the
@@ -280,6 +325,7 @@ func TestBuiltinClaudeDontAskGrantsOnlySafeTools(t *testing.T) {
 		t.Errorf("allowed tools = %v, want %v", found, claudeSafeAllowedTools)
 	}
 	assertNoPermissionBypass(t, rp.ResolveDefaultArgs())
+	assertDrainGrantPresent(t, rp.ResolveDefaultArgs())
 }
 
 // TestBuildProviderLaunchCommandClaudeStaysBounded proves the bounded
@@ -305,6 +351,7 @@ func TestBuildProviderLaunchCommandClaudeStaysBounded(t *testing.T) {
 		t.Fatalf("argv = %v, want %v", argv, wantArgv)
 	}
 	assertNoPermissionBypass(t, argv)
+	assertDrainGrantPresent(t, argv)
 }
 
 // TestClaudeAllowedToolsCannotSwallowPositionalPrompt pins the one ordering
@@ -364,6 +411,7 @@ func TestClaudeAllowedToolsCannotSwallowPositionalPrompt(t *testing.T) {
 			"is what makes its position irrelevant", argv)
 	}
 	assertNoPermissionBypass(t, argv)
+	assertDrainGrantPresent(t, argv)
 }
 
 func TestResolveProviderWorkspaceProvider(t *testing.T) {

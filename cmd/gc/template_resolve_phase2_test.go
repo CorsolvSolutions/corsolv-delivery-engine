@@ -80,11 +80,13 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			// The allowlist is spelled out literally rather than referencing
 			// workerbuiltin.ClaudeDontAskAllowedToolsArg: an expectation that
 			// tracks the production constant would follow it if the grant were
-			// ever widened (e.g. to Bash) and the gate would still pass.
+			// ever widened (e.g. to bare Bash or Bash(gc:*)) and the gate would
+			// still pass. The single scoped Bash grant lets the worker
+			// acknowledge its drain and nothing else.
 			wantCommandArgv: []string{
 				"claude",
 				"--permission-mode", "dontAsk",
-				"--allowedTools=Read,Write,Edit,Glob,Grep",
+				"--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)",
 				"--effort", "max",
 				"--settings", phase2SettingsPathToken,
 			},

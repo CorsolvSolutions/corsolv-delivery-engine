@@ -79,19 +79,26 @@ func boolPtr(b bool) *bool { return &b }
 // ClaudeDontAskAllowedToolsArg is the tool surface granted alongside Claude's
 // non-blocking `dontAsk` permission mode.
 //
-// Two properties of this literal are load-bearing and verified against the
-// Claude CLI (`claude --help`, v2.1.226):
+// `dontAsk` is deny-by-default rather than "permit without prompting", so this
+// list is the entire surface an autonomous worker gets. Three properties are
+// load-bearing, each verified against the Claude CLI (v2.1.226):
 //
-//   - The list is deliberately edit-and-inspect only. `Bash` is absent, so
-//     `dontAsk` never becomes a blanket shell grant; anything outside this set
-//     still goes through the normal permission path.
+//   - Edit-and-inspect tools only. Bare `Bash` is absent, so the mode never
+//     becomes a blanket shell grant.
+//   - Exactly one scoped shell grant, `Bash(gc runtime drain-ack:*)`. A worker
+//     must acknowledge its drain for the controller to reclaim the session;
+//     without it the session is never released. The scope is verified to match
+//     `gc runtime drain-ack` (with or without flags) and to refuse every other
+//     `gc` subcommand, so it confers no general shell or `gc` access, and no
+//     commit, push, merge, or release capability — those stay with the
+//     controller.
 //   - The tools are attached with `=` as a SINGLE argv token rather than
 //     `--allowedTools A B C`. `--allowedTools <tools...>` is variadic: in the
 //     space-separated form it greedily consumes every following non-flag token,
 //     so if it ever lands last it swallows the positional prompt that Claude's
 //     `prompt_mode = "arg"` appends. The `=` form binds the value to one token
 //     and is immune to that, which keeps the flag order-independent.
-const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep"
+const ClaudeDontAskAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)"
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.

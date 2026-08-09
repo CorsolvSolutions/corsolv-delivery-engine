@@ -1690,7 +1690,11 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 	case "antigravity":
 		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
 	default:
-		return "arg", "", 10000, []string{"--permission-mode", "dontAsk", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "--effort", "max"}
+		return "arg", "", 10000, []string{
+			"--permission-mode", "dontAsk",
+			"--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc runtime drain-ack:*)",
+			"--effort", "max",
+		}
 	}
 }
 
