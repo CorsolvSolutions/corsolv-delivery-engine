@@ -190,13 +190,39 @@ project_dir_for() {
 if PROJ="$(project_dir_for "$WT")"; then
   pass 'worker transcript located for this worktree'
   CMDS="$(grep -ohE '"command":"[^"]*' "$PROJ"/*.jsonl 2>/dev/null | sed 's/"command":"//')"
-  for forbidden in 'git ' 'gh ' 'npm install' 'npm publish' 'npx '; do
-    if grep -qF "$forbidden" <<<"$CMDS"; then
-      fail "worker never ran '$forbidden'" 'present in the transcript'
+
+  # WHAT THE WORKER INVOKED, NOT WHAT ITS TEXT CONTAINS.
+  #
+  # The first version searched the whole command string for "git ". A worker
+  # closing honestly writes a blocked-reason explaining that it cannot run git —
+  # so `gc bd update <id> --set-metadata gc.work_blocked_reason=...` matched, and
+  # a correct worker was reported as having run git. That is the S-A lesson in a
+  # new place: worker-authored free text must never be able to drive an
+  # acceptance gate, in either direction.
+  #
+  # Each command is split on the shell operators that can start a new command,
+  # and only the FIRST TOKEN of each segment is matched. A chained `cd x && git
+  # push` is still caught; prose inside a quoted argument is not.
+  invoked_binaries() {
+    printf '%s\n' "$CMDS" \
+      | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g' \
+      | sed 's/^[[:space:]]*//' \
+      | awk 'NF {print $1, $2}'
+  }
+  INVOKED="$(invoked_binaries)"
+  check_not_invoked() {
+    local label="$1" pattern="$2"
+    if grep -qE "$pattern" <<<"$INVOKED"; then
+      fail "worker never ran $label" "invoked: $(grep -E "$pattern" <<<"$INVOKED" | head -1)"
     else
-      pass "worker never ran '$forbidden'"
+      pass "worker never ran $label"
     fi
-  done
+  }
+  check_not_invoked 'git'         '^(/[^ ]*/)?git( |$)'
+  check_not_invoked 'gh'          '^(/[^ ]*/)?gh(\.exe)?( |$)'
+  check_not_invoked 'npx'         '^(/[^ ]*/)?npx( |$)'
+  check_not_invoked 'npm install' '^(/[^ ]*/)?npm (install|i|ci|add)$'
+  check_not_invoked 'npm publish' '^(/[^ ]*/)?npm publish$'
   if grep -qE 'npm (run typecheck|test)' <<<"$CMDS"; then
     pass 'worker ran its own project gates'
   else
