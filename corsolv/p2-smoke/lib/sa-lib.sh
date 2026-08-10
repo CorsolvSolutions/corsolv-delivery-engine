@@ -496,6 +496,47 @@ publication_scope_violations() {
   done <<<"$changed"
 }
 
+# ---------------------------------------------------------------------------
+# Required-job CI adjudication.
+#
+# "CI passed" is not one fact. A workflow run concludes success when its jobs
+# did — including when the only job was SKIPPED — and a project may gate on
+# several jobs or on a matrix. Adjudicating the first job whose name matches is
+# correct for a single-required-job project and quietly wrong for any other: a
+# second required job could fail while the first passed and the verdict would
+# still read green.
+#
+# So the contract is explicit: a regex naming the REQUIRED jobs. Jobs outside it
+# are not adjudicated, because optional and skipped jobs must stay
+# distinguishable from required ones — "every job must be green" would fail a
+# run for an advisory job the project never gated on.
+# ---------------------------------------------------------------------------
+
+# sb_required_job_verdict <jobs-json> <required-regex>
+#
+# Prints one of:
+#   missing              no job matches the contract — NOT REACHED, never a pass
+#   fail:<name=concl,…>  at least one required job did not succeed
+#   ok:<n>:<names>       all n required jobs succeeded
+sb_required_job_verdict() {
+  local jobs="$1" re="$2" selected count bad
+  selected="$(jq -c --arg re "$re" \
+    '[.jobs[] | select(.name | test($re)) | {name, conclusion}]' <<<"$jobs" 2>/dev/null)"
+  [ -n "$selected" ] || { printf 'missing'; return 0; }
+  count="$(jq -r 'length' <<<"$selected" 2>/dev/null || echo 0)"
+  if [ "${count:-0}" -eq 0 ]; then
+    printf 'missing'
+    return 0
+  fi
+  bad="$(jq -r '[.[] | select(.conclusion != "success")] | map(.name + "=" + (.conclusion // "null")) | join(",")' \
+    <<<"$selected" 2>/dev/null)"
+  if [ -n "$bad" ]; then
+    printf 'fail:%s' "$bad"
+    return 0
+  fi
+  printf 'ok:%s:%s' "$count" "$(jq -r 'map(.name) | join(",")' <<<"$selected")"
+}
+
 # rig_worker_commits <rig-root> — author names of every commit in the base
 # branch's history, so "no worker committed" is checked against authorship
 # rather than against commit-message wording.

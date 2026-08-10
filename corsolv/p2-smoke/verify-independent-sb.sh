@@ -104,14 +104,36 @@ fi
 # Run-level success is not job-level success: a workflow whose only job was
 # skipped also concludes "success". The validate job is the gate.
 JOBS_JSON="$("$GH" api "repos/$REPO_SLUG/actions/runs/$CI_RUN/jobs" 2>/dev/null)"
-VALIDATE_CONCL="$(jq -r '[.jobs[] | select(.name | test("typecheck|validate"))] | .[0].conclusion // empty' <<<"$JOBS_JSON" 2>/dev/null)"
-VALIDATE_NAME="$(jq -r '[.jobs[] | select(.name | test("typecheck|validate"))] | .[0].name // empty' <<<"$JOBS_JSON" 2>/dev/null)"
-if [ "$VALIDATE_CONCL" = 'success' ]; then
-  pass "the validating job itself succeeded ('$VALIDATE_NAME')"
-else
-  fail 'the validating job itself succeeded' \
-       "job '${VALIDATE_NAME:-<none>}' concluded '${VALIDATE_CONCL:-<none>}' — a skipped job still yields a green run"
-fi
+
+# EVERY required job must conclude success — not merely the first one that
+# matches.
+#
+# The first version adjudicated `.[0]` of the jobs matching typecheck|validate.
+# That is correct for this project, which has exactly one required job, and
+# quietly wrong for any project with several or with a matrix: a second required
+# job could fail while the first passed and this would still report green.
+# Independent assurance flagged it as a generalisation gap before it became a
+# false pass.
+#
+# SB_REQUIRED_JOBS is the project's required-check contract, as an extended
+# regex over job names. Jobs outside it stay outside: optional and skipped jobs
+# must remain distinguishable from required ones, so "every GitHub job must be
+# green" would be the wrong repair — it would fail a run for an advisory job the
+# project never gated on.
+SB_REQUIRED_JOBS="${SB_REQUIRED_JOBS:-typecheck|validate}"
+
+VERDICT="$(sb_required_job_verdict "$JOBS_JSON" "$SB_REQUIRED_JOBS")"
+case "$VERDICT" in
+  ok:*)
+    pass "every required job succeeded (${VERDICT#ok:})" ;;
+  fail:*)
+    fail 'every required job succeeded' "${VERDICT#fail:}" ;;
+  missing|*)
+    # No required job present is NOT a pass: a run whose required job never
+    # materialised has been validated by nothing.
+    fail 'the required job(s) ran' \
+         "NOT REACHED — no job matching the required-check contract /$SB_REQUIRED_JOBS/ appears in run $CI_RUN" ;;
+esac
 # And it must have actually run the gates, not skipped them.
 STEP_FAILS="$(jq -r '[.jobs[].steps[]? | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null)] | length' <<<"$JOBS_JSON" 2>/dev/null)"
 if [ "${STEP_FAILS:-0}" = '0' ]; then

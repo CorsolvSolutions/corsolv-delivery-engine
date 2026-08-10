@@ -32,9 +32,28 @@ acceptance record. PRs, CI runs and merges are real and land on
 **The integration target is `sb/20260810T171804Z/base`, not `main`.** W1/W2/W3 are already
 merged into main (PRs #1/#2/#3) by the original PowerShell controller, so the
 same three tasks cannot be re-expressed as a diff against main. The graph is
-replayed from the POC's own pre-workstream base `8c4f7c7`. Criterion 11
-("all successful work entered main through PRs") is already satisfied on main by
-the original run and is **not** re-proved here against main.
+replayed from the POC's own pre-workstream base `8c4f7c7`.
+
+### Criterion 11 — exact attribution
+
+Criterion 11 is *"all successful work entered main through PRs."* Stated
+precisely, so this run is not read as claiming more than it proved:
+
+- **What the Delivery Engine S-B run proved:** PR-only, governed entry to *its
+  own integration target* (`sb/20260810T171804Z/base`). Every change reached
+  that target through a pull request, with required CI on the exact head SHA and
+  independent assurance before merge. No worker held commit, push, PR or merge
+  authority at any point.
+- **Where main's W1/W2/W3 state came from:** the earlier PowerShell-controller
+  run, via PRs #1/#2/#3. That is historical evidence, not evidence produced by
+  this run.
+- **What this run did NOT do:** it did not re-prove PR-only entry *to main*, and
+  no work was invented merely to replay already-merged changes against main so
+  that it could.
+
+Independent assurance (Gas City 3) recorded this as **DEFERRED BUT
+NON-BLOCKING**: the governed-entry property is proved, and only its attribution
+to `main` specifically is carried by the historical run rather than by this one.
 
 ## Foundation
 

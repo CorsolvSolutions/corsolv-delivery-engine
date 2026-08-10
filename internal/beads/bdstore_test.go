@@ -967,7 +967,7 @@ func TestBdStoreUpdateEmptyOpts(t *testing.T) {
 	}
 }
 
-func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
+func TestBdStoreClaimAsActorReturnsClaimedBead(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
@@ -977,7 +977,7 @@ func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
 		return []byte(`[{"id":"bd-42","title":"Do it","status":"in_progress","assignee":"worker-1","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	claimed, ok, err := s.Claim("bd-42")
+	claimed, ok, err := s.ClaimAsActor("bd-42")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,12 +992,12 @@ func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
 	}
 }
 
-func TestBdStoreClaimConflictReturnsFalse(t *testing.T) {
+func TestBdStoreClaimAsActorConflictReturnsFalse(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(`{"error":"issue is already assigned to worker-2"}`), fmt.Errorf("exit status 1")
 	}
 	s := beads.NewBdStore("/city", runner)
-	claimed, ok, err := s.Claim("bd-42")
+	claimed, ok, err := s.ClaimAsActor("bd-42")
 	if err != nil {
 		t.Fatal(err)
 	}

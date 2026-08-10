@@ -551,7 +551,11 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	claimed, ok, err := store.Claim(beadID)
+	// ClaimAsActor, not Claim: this path configures the store's invocation with
+	// the assignee (hookClaimBdStoreContext sets the actor), so the ambient-actor
+	// form is the correct one here. Claim(id, assignee) is the graph front
+	// door's compare-and-swap and takes the assignee explicitly.
+	claimed, ok, err := store.ClaimAsActor(beadID)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

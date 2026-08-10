@@ -464,6 +464,61 @@ else
        "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts' | tr '\n' ' ')"
 fi
 
+# ===========================================================================
+section '7. required-job CI adjudication'
+# ===========================================================================
+#
+# "CI passed" is not one fact. A workflow run concludes success when its jobs
+# did — including when the only job was skipped — and a project may gate on
+# several jobs or a matrix. Adjudicating the first matching job is right for one
+# required job and quietly wrong for any other. These controls pin every case
+# the contract has to answer.
+
+RE='typecheck|validate'
+jobs() { printf '{"jobs":[%s]}' "$1"; }
+
+V="$(sb_required_job_verdict "$(jobs '{"name":"typecheck + test","conclusion":"success"}')" "$RE")"
+case "$V" in
+  ok:1:*) pass 'one required job succeeding is a pass' ;;
+  *) fail 'one required job succeeding is a pass' "verdict '$V'" ;;
+esac
+
+V="$(sb_required_job_verdict "$(jobs '{"name":"typecheck","conclusion":"success"},{"name":"validate (18)","conclusion":"success"}')" "$RE")"
+case "$V" in
+  ok:2:*) pass 'two required jobs succeeding is a pass' ;;
+  *) fail 'two required jobs succeeding is a pass' "verdict '$V'" ;;
+esac
+
+# THE CASE THE OLD LOGIC GOT WRONG: the first required job passed, the second
+# did not. Adjudicating only .[0] reported this green.
+V="$(sb_required_job_verdict "$(jobs '{"name":"typecheck","conclusion":"success"},{"name":"validate (20)","conclusion":"failure"}')" "$RE")"
+case "$V" in
+  fail:*validate*) pass 'one of two required jobs failing is a FAIL' ;;
+  *) fail 'one of two required jobs failing is a FAIL' "verdict '$V' — a failing required job read as green" ;;
+esac
+
+# Optional/advisory jobs are outside the contract and must not manufacture a
+# failure; requiring every GitHub job green would be the wrong repair.
+V="$(sb_required_job_verdict "$(jobs '{"name":"typecheck + test","conclusion":"success"},{"name":"lint-advisory","conclusion":"failure"},{"name":"notify","conclusion":"skipped"}')" "$RE")"
+case "$V" in
+  ok:1:*) pass 'a non-required job failing does not create a false failure' ;;
+  *) fail 'a non-required job failing does not create a false failure' "verdict '$V'" ;;
+esac
+
+# A skipped REQUIRED job is not a pass: the gate did not run.
+V="$(sb_required_job_verdict "$(jobs '{"name":"validate","conclusion":"skipped"}')" "$RE")"
+case "$V" in
+  fail:*) pass 'a skipped required job is not a pass' ;;
+  *) fail 'a skipped required job is not a pass' "verdict '$V'" ;;
+esac
+
+# A missing required job is NOT REACHED, never a pass.
+V="$(sb_required_job_verdict "$(jobs '{"name":"build-docs","conclusion":"success"}')" "$RE")"
+case "$V" in
+  missing) pass 'a missing required job is NOT REACHED, not a pass' ;;
+  *) fail 'a missing required job is NOT REACHED, not a pass' "verdict '$V'" ;;
+esac
+
 echo
 echo '============================================================'
 if [ "$FAILURES" -ne 0 ]; then

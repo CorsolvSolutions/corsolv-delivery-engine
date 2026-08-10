@@ -1363,12 +1363,18 @@ func bdSQLStringLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-// Claim atomically claims an open bead through bd update --claim.
+// ClaimAsActor atomically claims an open bead through bd update --claim, for
+// whatever actor the invocation is configured with — typically BEADS_ACTOR.
 //
 // It returns ok=false when bd reports that another actor won the claim race.
-// The caller controls the claim actor through the store's CommandRunner
-// environment, typically BEADS_ACTOR.
-func (s *BdStore) Claim(id string) (Bead, bool, error) {
+//
+// This is deliberately NOT named Claim: the assignee is implicit in the bd
+// invocation, which is a different operation from the assignee-aware
+// compare-and-swap the graph front door requires. That one is
+// [BdStore.Claim] in bdstore_claim.go. Naming them apart keeps a caller from
+// reaching for the ambient-actor form when it means the CAS, which is the
+// mistake the storebinding adapter refuses to paper over.
+func (s *BdStore) ClaimAsActor(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
