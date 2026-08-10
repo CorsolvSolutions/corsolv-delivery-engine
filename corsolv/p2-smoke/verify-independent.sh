@@ -224,24 +224,39 @@ fi
 
 # --- 5. security policy regression ----------------------------------------
 section '5. security policy (no regression)'
-PROC_OK=0
-for p in /proc/[0-9]*; do
-  [ -r "$p/cmdline" ] || continue
-  exe="$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null | head -1)"
-  case "$exe" in *claude) ;; *) continue ;; esac
-  tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qF "$CITY" || continue
-  PROC_OK=1
-  argv="$(tr '\0' ' ' < "$p/cmdline")"
-  case "$argv" in
-    *--dangerously-skip-permissions*) fail 'no bypass flag in live argv' "pid $(basename "$p")" ;;
-    *) pass "no bypass flag in live argv (pid $(basename "$p"))" ;;
-  esac
-  case "$argv" in
-    *'--allowedTools=Read,Write,Edit,Glob,Grep,Bash(gc hook --claim:*)'*) pass 'live allowlist is the approved set' ;;
-    *) fail 'live allowlist is the approved set' 'allowlist differs' ;;
-  esac
-done
-[ "$PROC_OK" -eq 0 ] && info 'live process check' 'no claude process left for this city (already drained)'
+
+# This script does NOT prove live permission posture, by design. It runs after
+# the worker has drained -- section 4 deliberately waits for exactly that -- so
+# any live scan performed here is inspecting a city with no worker left in it.
+#
+# The earlier version scanned anyway, and that was the defect: with no worker
+# alive it either reported INFO (which reads as coverage while proving nothing)
+# or matched the city's long-lived `mayor` and `bd.dog` agents and reported
+# PASS on processes that were never pool workers at all. Both outcomes look
+# like a green security check and neither one is.
+#
+# There is now ONE authoritative live verifier -- verify-live-process.sh -- and
+# the acceptance sequence must run it while a managed worker is still alive:
+#
+#   worker starts -> verify-live-process.sh (must PASS) -> worker drains
+#                 -> verify-independent.sh
+#
+# This section adjudicates that recorded result. A missing record is a
+# sequencing failure of the acceptance run, not a skip, so it FAILS: per the
+# POC brief, NOT REACHED is never reported as PASS.
+LIVE_PROCESS_RESULT="${LIVE_PROCESS_RESULT:-}"
+if [ -z "$LIVE_PROCESS_RESULT" ]; then
+  fail 'live worker posture proved before drain' \
+       'NOT REACHED — set LIVE_PROCESS_RESULT to the verify-live-process.sh result recorded during the run'
+elif [ ! -f "$LIVE_PROCESS_RESULT" ]; then
+  fail 'live worker posture proved before drain' \
+       "NOT REACHED — no recorded result at $LIVE_PROCESS_RESULT"
+elif grep -q '^PASS$' "$LIVE_PROCESS_RESULT"; then
+  pass "live worker posture proved before drain (recorded: $LIVE_PROCESS_RESULT)"
+else
+  fail 'live worker posture proved before drain' \
+       "recorded result is $(head -1 "$LIVE_PROCESS_RESULT")"
+fi
 
 # The worker must have been refused git; if the transcript shows a successful
 # commit, the policy leaked.

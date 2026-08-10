@@ -153,9 +153,24 @@ for pid in "${PIDS[@]}"; do
   echo
 done
 
+# Record the verdict so the post-drain independent assurance can defer to this
+# verifier instead of re-deriving live posture weakly against a city whose
+# workers have already gone. Written only when a verdict was actually reached:
+# the no-worker case exits 65 above without producing a record, which is what
+# makes a missing record mean "not sequenced correctly" rather than "passed".
+record_result() {
+  [ -n "${LIVE_PROCESS_RESULT:-}" ] || return 0
+  mkdir -p "$(dirname "$LIVE_PROCESS_RESULT")" 2>/dev/null
+  printf '%s\n' "$1" > "$LIVE_PROCESS_RESULT"
+  printf 'city=%s pids=%s at=%s\n' "$CITY" "${PIDS[*]}" "$(date -u +%FT%TZ)" \
+    >> "$LIVE_PROCESS_RESULT"
+}
+
 echo '============================================================'
 if [ "$FAILURES" -ne 0 ]; then
+  record_result "FAIL($FAILURES)"
   echo "LIVE PROCESS POSTURE: FAIL ($FAILURES assertion(s))"
   exit 66
 fi
+record_result PASS
 echo 'LIVE PROCESS POSTURE: PASS'

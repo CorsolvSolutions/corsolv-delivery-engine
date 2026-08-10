@@ -235,21 +235,48 @@ DEADLINE_SECONDS=1200
 FINAL_WORK_STATE=""
 LAST_SHOW=""
 
+# Where the live-posture verdict is recorded. The independent assurance refuses
+# to pass without it, because after drain there is no worker left to inspect.
+LIVE_RESULT="${LIVE_PROCESS_RESULT:-$CITY/.gc/corsolv-live-process.result}"
+LIVE_PROOF=""
+
 while true; do
 
     NOW="$(date +%s)"
     ELAPSED="$((NOW - START_EPOCH))"
 
+    # Capture the live permission posture WHILE the worker is still running.
+    # This is the only window in which it is capturable: `drain-ack` retires the
+    # process, so a verifier run afterwards inspects a city with no worker in
+    # it and can only report "nothing found" -- or, worse, match the long-lived
+    # mayor/bd.dog agents and report PASS on processes that were never pool
+    # workers. Sequencing, not timing luck.
+    if [ -z "$LIVE_PROOF" ]; then
+        if LIVE_PROCESS_RESULT="$LIVE_RESULT" \
+           bash "$SOURCE_REPO/corsolv/p2-smoke/verify-live-process.sh" "$CITY" \
+                >/dev/null 2>&1; then
+            LIVE_PROOF=PASS
+            echo "LIVE POSTURE: PASS (recorded to $LIVE_RESULT)"
+        fi
+        # Exit 65 means no worker is up yet; keep looking. Any other failure is
+        # recorded by the verifier itself and adjudicated by the assurance.
+    fi
+
     LAST_SHOW="$(
         gc bd show "$WORK_ID" 2>&1 || true
     )"
 
-    if printf '%s\n' "$LAST_SHOW" |
-       grep -Eq 'CLOSED|Closed|closed'; then
-
+    # `case`, not `printf ... | grep -q`. Under `set -o pipefail` that pipeline
+    # is inverted by its own success: grep -q exits at the first match, the
+    # producer takes SIGPIPE (141), and pipefail promotes that to the pipeline
+    # status -- so a MATCH can read as "not closed" and the wait runs to its
+    # deadline with the bead already closed. Pattern matching avoids the pipe.
+    case "$LAST_SHOW" in
+      *CLOSED*|*Closed*|*closed*)
         FINAL_WORK_STATE="CLOSED"
         break
-    fi
+        ;;
+    esac
 
     if [ "$ELAPSED" -ge "$DEADLINE_SECONDS" ]; then
 
