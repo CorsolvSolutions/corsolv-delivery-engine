@@ -710,6 +710,7 @@ close_merge_bead() {
     ( cd "$WT_W3" && npm ci --silent ) >"$EVIDENCE/npm-ci-worker-w3.txt" 2>&1 \
       && pass 'W3 worktree dependencies installed by the controller' \
       || fail 'W3 worktree dependencies installed by the controller' 'see npm-ci-worker-w3.txt'
+    sa_ledger_mark release
     RELEASE_EPOCH="$(date +%s)"
     RELEASE_UTC="$(date -u +%FT%TZ)"
   fi
@@ -776,7 +777,7 @@ info 'W3 wall clock' "${W3_ELAPSED}s"
   && pass "normal controller demand claimed and started W3 with no operator command ($W3_CLAIMED_AT)" \
   || not_reached 'normal controller demand claimed and started W3' 'no W3 worker was observed' "$W3"
 
-W3_DIRECTIVES="$(sa_ledger_directives_after "$RELEASE_EPOCH" "$W3")$(sa_ledger_directives_after "$RELEASE_EPOCH" 'worker-w3')"
+W3_DIRECTIVES="$(sa_ledger_directives_since_mark release "$W3")$(sa_ledger_directives_since_mark release worker-w3)"
 [ -z "$W3_DIRECTIVES" ] \
   && pass "zero post-release directives naming W3 (release $RELEASE_UTC)" \
   || fail 'zero post-release directives naming W3' "$(printf '%s' "$W3_DIRECTIVES" | tr '\n' ';' | head -c 200)"

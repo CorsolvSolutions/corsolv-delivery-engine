@@ -104,6 +104,36 @@ sa_ledger_mentions_after() {
 # directive, so the check fails closed: a new mutating verb is a violation
 # until someone deliberately classifies it.
 SA_READONLY_VERBS='bd show|bd ready|bd list|bd dep tree|bd dep list|session list|config show|rig list|status|version|events|trace'
+
+# sa_ledger_mark <label> — write an ordering marker into the ledger.
+#
+# "After release" is a STRICT ORDERING claim, and the ledger's timestamps have
+# one-second resolution. That is not enough: the dependent task's worktree is
+# provisioned immediately before the release action, and on a fast run both
+# landed in the same second — so a `>= release_epoch` comparison counted the
+# pre-release provisioning as post-release and failed a correct run. Comparing
+# by ledger POSITION instead of by clock makes the order total by construction:
+# everything below the marker happened after it, whatever the clock says.
+sa_ledger_mark() {
+  [ -n "${SA_CMD_LEDGER:-}" ] || return 0
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$(date -u +%FT%TZ)" "[mark] $1" >> "$SA_CMD_LEDGER"
+}
+
+# sa_ledger_directives_since_mark <label> <needle> — directives naming <needle>
+# recorded after the marker line. Empty output means none were issued.
+sa_ledger_directives_since_mark() {
+  local label="$1" needle="$2"
+  [ -n "${SA_CMD_LEDGER:-}" ] || return 0
+  awk -F'\t' -v mark="[mark] $label" -v needle="$needle" -v ro="$SA_READONLY_VERBS" '
+    $3 == mark { seen = 1; next }
+    !seen { next }
+    index($3, needle) > 0 {
+      n = split(ro, verbs, "|")
+      for (i = 1; i <= n; i++) if (index($3, verbs[i]) == 1) next
+      print $0
+    }' "$SA_CMD_LEDGER"
+}
+
 sa_ledger_directives_after() {
   local since="$1" needle="$2"
   [ -n "${SA_CMD_LEDGER:-}" ] || return 0

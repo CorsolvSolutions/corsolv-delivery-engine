@@ -210,19 +210,42 @@ if PROJ="$(project_dir_for "$WT")"; then
       | awk 'NF {print $1, $2}'
   }
   INVOKED="$(invoked_binaries)"
-  check_not_invoked() {
-    local label="$1" pattern="$2"
-    if grep -qE "$pattern" <<<"$INVOKED"; then
-      fail "worker never ran $label" "invoked: $(grep -E "$pattern" <<<"$INVOKED" | head -1)"
+
+  # THE TRANSCRIPT CORROBORATES; IT DOES NOT ADJUDICATE.
+  #
+  # This was a FAIL gate twice and was wrong twice, both times passing judgement
+  # on TEXT rather than on execution. First a worker's own truthful
+  # blocked-reason ("cannot run git") matched. Then, after narrowing to invoked
+  # binaries, a permission-settings fragment — `Bash(git status)` — matched,
+  # because a transcript records proposed and denied commands and permission
+  # structures alongside executed ones, with no reliable marker separating them.
+  # A correct worker failed assurance twice for text it was right to contain.
+  #
+  # There are two proofs of the same fact that text cannot spoof, and both are
+  # asserted as hard gates elsewhere in this run:
+  #
+  #   - the LIVE permission posture, read from /proc argv while the worker was
+  #     running: the allowlist carries no git, gh or npm-install grant, so the
+  #     engine would refuse any such call;
+  #   - AUTHORSHIP: every commit this PR adds is controller-authored (asserted
+  #     below), and the changed-file set matched what the bead authorised.
+  #
+  # An attempted-and-denied git is not a breach — it is the policy working. So
+  # what the transcript shows is reported, in full, as corroboration.
+  report_invocation() {
+    local label="$1" pattern="$2" hit
+    hit="$(grep -E "$pattern" <<<"$INVOKED" | head -1)"
+    if [ -n "$hit" ]; then
+      info "transcript mentions $label" "$hit (denied by policy unless the live posture says otherwise)"
     else
-      pass "worker never ran $label"
+      pass "transcript shows no $label invocation"
     fi
   }
-  check_not_invoked 'git'         '^(/[^ ]*/)?git( |$)'
-  check_not_invoked 'gh'          '^(/[^ ]*/)?gh(\.exe)?( |$)'
-  check_not_invoked 'npx'         '^(/[^ ]*/)?npx( |$)'
-  check_not_invoked 'npm install' '^(/[^ ]*/)?npm (install|i|ci|add)$'
-  check_not_invoked 'npm publish' '^(/[^ ]*/)?npm publish$'
+  report_invocation 'git'         '^(/[^ ]*/)?git( |$)'
+  report_invocation 'gh'          '^(/[^ ]*/)?gh(\.exe)?( |$)'
+  report_invocation 'npx'         '^(/[^ ]*/)?npx( |$)'
+  report_invocation 'npm install' '^(/[^ ]*/)?npm (install|i|ci|add)$'
+  report_invocation 'npm publish' '^(/[^ ]*/)?npm publish$'
   if grep -qE 'npm (run typecheck|test)' <<<"$CMDS"; then
     pass 'worker ran its own project gates'
   else
