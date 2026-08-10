@@ -11,20 +11,20 @@ performing the orchestration.
 ## Foundation
 
 - Gas City version: dev
-- Corsolv source SHA: 9e3ca3657c06728dd79e2ad5f6d7ddf6ba164216
+- Corsolv source SHA: d0872f12fb72a9216288c7986ca3a747929d73ba
 - Claude version: 2.1.226 (Claude Code)
 - Store provider: file
 - GC_HOME: /home/corsolvtech/.gc-corsolv-p2
-- City: /home/corsolvtech/corsolv-p2/city-20260810T054550Z
-- Rig path: /home/corsolvtech/corsolv-p2/rig-20260810T054550Z
-- Rig name: rig-20260810T054550Z
-- Work ID: r2-xm1
+- City: /home/corsolvtech/corsolv-p2/city-20260810T120648Z
+- Rig path: /home/corsolvtech/corsolv-p2/rig-20260810T120648Z
+- Rig name: rig-20260810T120648Z
+- Work ID: r2-tjj
 
 ## Coding target
 
-- Initial Git SHA: 36c22ed0c650115e0cca43e415e79378f05cda11
-- Git SHA after worker: 6ba5fa0d3c38810d324b2a1f2097e50412867b98
-- Required artifact: /home/corsolvtech/corsolv-p2/rig-20260810T054550Z/CORSOLV_GASCITY_SMOKE.txt
+- Initial Git SHA: 15d1f368fcc46f5b45b250272e75614200b434bc
+- Git SHA after worker: dfe237d28b8dd9a90242fe64a6af6cf42e68de9a
+- Required artifact: /home/corsolvtech/corsolv-p2/rig-20260810T120648Z/CORSOLV_GASCITY_SMOKE.txt
 - Required marker: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS
 
 ## Result
@@ -39,7 +39,7 @@ No PowerShell process launched Claude directly for this coding task.
 
 The work was dispatched using Gas City:
 
-gc sling rig-20260810T054550Z/claude "<task>"
+gc sling rig-20260810T120648Z/claude "<task>"
 
 ## Git working-tree evidence
 
@@ -57,45 +57,29 @@ gc sling rig-20260810T054550Z/claude "<task>"
 ## Gas City work evidence
 
 ```
-2026/08/10 06:48:51 WARN native_store_unavailable gate=version_compat reason="bd version differs from linked beads library version" scope=/home/corsolvtech/corsolv-p2/rig-20260810T054550Z
-✓ r2-xm1 · Create the file CORSOLV_GASCITY_SMOKE.txt in the repository root. The file must contain exactly this single line: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS. Do not merely describe the change. Make the filesystem change, verify the exact file contents, and then mark the assigned Gas City work complete.   [● P2 · CLOSED]
+2026/08/10 13:08:18 WARN native_store_unavailable gate=version_compat reason="bd version differs from linked beads library version" scope=/home/corsolvtech/corsolv-p2/rig-20260810T120648Z
+○ r2-tjj · Create the file CORSOLV_GASCITY_SMOKE.txt in the repository root. The file must contain exactly this single line: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS. Do not merely describe the change. Make the filesystem change, verify the exact file contents, and then mark the assigned Gas City work complete. You are not permitted to run git; the controller performs publication. Close with gc.work_outcome=blocked plus a gc.work_blocked_reason; do NOT claim shipped, because you did not commit.   [● P2 · OPEN]
 Owner: Corsolv Autonomy POC · Type: task
 Created: 2026-08-10 · Updated: 2026-08-10
 
 DESCRIPTION
   (none)
 
-NOTES
-
-  Created CORSOLV_GASCITY_SMOKE.txt in repo root containing exactly           
-  CORSOLV_GASCITY_MANAGED_CLAUDE_PASS plus trailing newline. Verified byte-   
-  exact with od -c. NOT COMMITTED: this session runs in don't-ask permission  
-  mode and git add/git commit were denied by the harness, as was gc mail send.
-  File is present and uncommitted in the working tree on branch main; a       
-  permitted actor must commit it. Remaining dirty paths are unrelated         
-  bead/runtime churn (.beads/, .gc/, .claude/, .gitignore).                   
-
-
-
 METADATA
-  gc.execution_routed_to: rig-20260810T054550Z/claude
-  gc.last_heartbeat_at: 2026-08-10T05:47:07Z
-  gc.outcome: pass
-  gc.work_branch: main
-  gc.work_outcome: shipped
-  gc.work_verification: od -c CORSOLV_GASCITY_SMOKE.txt; git status --short
+  gc.execution_routed_to: rig-20260810T120648Z/claude
+  gc.last_heartbeat_at: 2026-08-10T12:07:54Z
 
 BLOCKS
-  ← ○ r2-5f6: input convoy for r2-xm1 ● P2
+  ← ○ r2-ogp: input convoy for r2-tjj ● P2
 ```
 
 ## Gas City status
 
 ```
-city-20260810T054550Z  /home/corsolvtech/corsolv-p2/city-20260810T054550Z
-  Controller: supervisor-managed (PID 1266515)
+city-20260810T120648Z  /home/corsolvtech/corsolv-p2/city-20260810T120648Z
+  Controller: supervisor-managed (PID 635931)
   API:        http://127.0.0.1:8372
-  Authority: supervisor process PID 1266515
+  Authority: supervisor process PID 635931
   Suspended:  no
 
 Agents:
@@ -103,9 +87,9 @@ Agents:
     bd.dog-1              running
     bd.dog-2              stopped
   core.control-dispatcher  stopped
-  rig-20260810T054550Z/core.control-dispatcher  running
+  rig-20260810T120648Z/core.control-dispatcher  running
   claude                  scaled (min=0, max=unlimited)
-    claude-c2-1v5         running
+    claude-c2-9vf         running
 
 3/5 agents running
 
@@ -113,12 +97,12 @@ Named sessions:
   mayor                   awake (always)
 
 Rigs:
-  rig-20260810T054550Z    /home/corsolvtech/corsolv-p2/rig-20260810T054550Z
+  rig-20260810T120648Z    /home/corsolvtech/corsolv-p2/rig-20260810T120648Z
 
 Store health:
-  Path:        /home/corsolvtech/corsolv-p2/city-20260810T054550Z/.beads/dolt
-  Size:        8.5 MB
-  Live rows:   43
+  Path:        /home/corsolvtech/corsolv-p2/city-20260810T120648Z/.beads/dolt
+  Size:        7.1 MB
+  Live rows:   33
   Ratio:       0.2 MB/row  (threshold 1.0 MB/row)
 
 Sessions: 4 active, 0 suspended
@@ -128,14 +112,14 @@ Sessions: 4 active, 0 suspended
 
 ```
 
-Rigs in /home/corsolvtech/corsolv-p2/city-20260810T054550Z:
+Rigs in /home/corsolvtech/corsolv-p2/city-20260810T120648Z:
 
-  city-20260810T054550Z (HQ):
+  city-20260810T120648Z (HQ):
     Prefix: c2
     Beads:  initialized
 
-  rig-20260810T054550Z:
-    Path:   /home/corsolvtech/corsolv-p2/rig-20260810T054550Z
+  rig-20260810T120648Z:
+    Path:   /home/corsolvtech/corsolv-p2/rig-20260810T120648Z
     Prefix: r2
     Default branch: main
     Beads:  initialized
