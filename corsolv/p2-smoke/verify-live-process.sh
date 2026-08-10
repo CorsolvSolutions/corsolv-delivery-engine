@@ -28,6 +28,20 @@ APPROVED_GRANTS=(
   'Bash(gc convoy status:*)'
   'Bash(gc runtime drain-ack:*)'
 )
+
+# BOUNDED_PROJECT=1 extends the approved set with the three named project gates
+# — and ONLY those three. This is opt-in per run for the same reason the
+# permission mode is opt-in per agent: a verifier that always accepted npm
+# grants would stop being able to fail a bounded-auto worker that acquired
+# them. The mandatory lifecycle set below is unchanged either way, and every
+# denied family (bare Bash, gc, git, gh, npm, npm run, npx) still fails.
+if [ "${BOUNDED_PROJECT:-0}" = '1' ]; then
+  APPROVED_GRANTS+=(
+    'Bash(npm run typecheck:*)'
+    'Bash(npm run build:*)'
+    'Bash(npm test:*)'
+  )
+fi
 FAILURES=0
 
 is_approved_grant() {

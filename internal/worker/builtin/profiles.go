@@ -119,6 +119,58 @@ const ClaudeBoundedAutoAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Gr
 	"Bash(gc convoy status:*)," +
 	"Bash(gc runtime drain-ack:*)"
 
+// ClaudeBoundedProjectAllowedToolsArg is `bounded-auto` plus the deterministic
+// project validation gates a worker needs to check its own work before closing:
+// typecheck, build, test. It is OPT-IN — an operator selects it per agent via
+// `option_defaults`; the autonomous default stays `bounded-auto`, which grants
+// no project commands at all.
+//
+// WHAT THIS IS NOT. This is not an arbitrary-code sandbox, and describing it as
+// one would be false. `Write` and `Edit` let the worker alter package.json, and
+// `npm run build` / `npm test` execute whatever that file names — `npm test`
+// here even runs `npm run build` first. So these three grants can transitively
+// execute worker-modified project code. Enumerating script names buys scope
+// clarity, not containment.
+//
+// The boundary that actually holds is the AUTHORITY split, which no amount of
+// worker-side scripting can cross:
+//
+//   - the worker may mutate authorized repository content and run permitted
+//     project validation;
+//   - the controller alone reviews, stages, commits, pushes, opens the PR and
+//     merges — and inspects the changed-file set before publishing. A change to
+//     package.json, or to any file the bead did not authorize, must stop
+//     publication rather than ride along with it.
+//
+// That is why no git, gh, or `gc` shell family appears below and why widening
+// this list is never the fix for a worker that "needs to publish".
+//
+// Scoping notes, each deliberate:
+//
+//   - Script names are enumerated (`npm run typecheck`, `npm run build`), never
+//     `Bash(npm run:*)` — that would grant every script in package.json,
+//     including ones the worker just added, and `npm run` is a general
+//     execution surface.
+//   - `Bash(npm:*)` is absent, so `npm install` and `npm publish` are denied:
+//     dependency mutation and package publication are not validation.
+//   - `npx` is absent — it fetches and executes arbitrary packages.
+//   - `npm test` is granted as its own top-level form because that is how the
+//     POC project invokes tests; it is not reachable through the two `npm run`
+//     grants.
+//
+// The allow/deny behavior of every rule is verified against the real permission
+// engine by corsolv/p2-smoke/policy-matrix.sh, and the assertions that pin this
+// list are proved capable of failing by corsolv/p2-smoke/policy-mutations.sh.
+const ClaudeBoundedProjectAllowedToolsArg = ClaudeBoundedAutoAllowedToolsArg +
+	"," + ClaudeProjectValidationGrants
+
+// ClaudeProjectValidationGrants is the project half of `bounded-project`, kept
+// separate so the lifecycle half and the project half can be reasoned about —
+// and mutated in the policy proofs — independently.
+const ClaudeProjectValidationGrants = "Bash(npm run typecheck:*)," +
+	"Bash(npm run build:*)," +
+	"Bash(npm test:*)"
+
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
 type ProfileIdentity struct {
@@ -179,6 +231,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			"auto-edit":    "--permission-mode acceptEdits",
 			"full-auto":    "--permission-mode dontAsk",
 			"bounded-auto": "--permission-mode dontAsk " + ClaudeBoundedAutoAllowedToolsArg,
+			// Opt-in only. OptionDefaults above deliberately stays
+			// "bounded-auto": a worker gains project commands because an
+			// operator selected them for that agent, never by default.
+			"bounded-project": "--permission-mode dontAsk " + ClaudeBoundedProjectAllowedToolsArg,
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -194,6 +250,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					// rather than a change to full-auto so the plain mode keeps
 					// its existing meaning for anyone already selecting it.
 					{Value: "bounded-auto", Label: "Bounded autonomous", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeBoundedAutoAllowedToolsArg}},
+					// bounded-project adds the three deterministic project
+					// gates (typecheck/build/test) to bounded-auto. Selecting
+					// it is an operator decision per agent; it is never the
+					// default, and it grants no publication authority — see
+					// ClaudeBoundedProjectAllowedToolsArg for why the boundary
+					// is the controller's, not the allowlist's.
+					{Value: "bounded-project", Label: "Bounded autonomous + project gates", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeBoundedProjectAllowedToolsArg}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},

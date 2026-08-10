@@ -40,10 +40,29 @@
 # explicit and independent of when .gc/ happens to materialize.
 #
 # Unset (the control tests, which stub gc) it degrades to a plain call.
+# LEDGER CAPTURE LIVES HERE, AT THE LOWEST WRAPPER — deliberately.
+#
+# It used to live in gcx(), one layer up, with sa_gc() executing gc directly
+# underneath it. That left a structural bypass: any call made through sa_gc —
+# including a future mutating one — executed without ever reaching the ledger,
+# so "no post-release directive naming C" would have been a claim about the
+# calls someone remembered to route through gcx rather than about every call
+# made. An independent audit of the committed S-A run found no actual bypass
+# (its post-release calls were all reads), so the recorded evidence stands; but
+# the gap is closed structurally rather than by continued care.
+#
+# Recording here means EVERY gc invocation is captured. Read-versus-directive
+# discrimination is not weakened by that — it was never done at capture time.
+# It is applied at query time by sa_ledger_directives_after, which classifies
+# from the recorded argv, so reads remain reads and the extra rows are extra
+# evidence rather than noise in the D3 assertion.
 sa_gc() {
   local -a pre=()
   [ -n "${SA_CITY:-}" ] && pre+=(--city "$SA_CITY")
   [ -n "${SA_RIG:-}" ] && pre+=(--rig "$SA_RIG")
+  if [ -n "${SA_CMD_LEDGER:-}" ]; then
+    printf '%s\t%s\t%s\n' "$(date +%s)" "$(date -u +%FT%TZ)" "$*" >> "$SA_CMD_LEDGER"
+  fi
   command gc "${pre[@]}" "$@"
 }
 
@@ -53,13 +72,10 @@ sa_ledger_init() {
   printf 'epoch\tutc\targv\n' > "$SA_CMD_LEDGER"
 }
 
-# gcx <args...> — run gc, recording the exact argv and the time it was issued.
-gcx() {
-  if [ -n "${SA_CMD_LEDGER:-}" ]; then
-    printf '%s\t%s\t%s\n' "$(date +%s)" "$(date -u +%FT%TZ)" "$*" >> "$SA_CMD_LEDGER"
-  fi
-  sa_gc "$@"
-}
+# gcx <args...> — historical spelling of sa_gc, kept because the harness reads
+# more clearly where a call is a deliberate controller action. It must NOT log
+# again: capture happens once, in sa_gc.
+gcx() { sa_gc "$@"; }
 
 # sa_ledger_note <text> — record a controller action that is not a gc call
 # (a git worktree creation, say) so the ledger covers every action the
@@ -400,6 +416,54 @@ sa_session_workdir() {
       (if type == "array" then . else (.sessions // .items // []) end)
       | map(select((.template // "") == $a or (.agent // "") == $a))
       | (.[0].work_dir // .[0].workDir // .[0].dir // empty)' <<<"$json" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Publication scope — the boundary that actually holds.
+#
+# `bounded-project` grants Write/Edit and three npm scripts. A worker can
+# therefore edit package.json, and `npm run build` / `npm test` execute whatever
+# that file names, so the permission list buys scope clarity, not containment.
+# Describing it as an arbitrary-code sandbox would be false.
+#
+# What contains the worker is the AUTHORITY split: it may mutate a working tree,
+# and only the controller commits, pushes, opens the PR and merges. For that
+# split to mean anything, the controller must look at WHAT changed before it
+# publishes — otherwise an unauthorised edit rides along inside an authorised
+# commit and the boundary is decorative.
+#
+# So publication is gated on the changed-file set matching what the bead
+# authorised. A change to package.json, or to any other file the bead did not
+# name, stops publication. The fix for a worker that needs to change more is a
+# bead that authorises more — never a git grant.
+# ---------------------------------------------------------------------------
+
+# SA_PUBLICATION_INFRA_RE are paths owned by the controller or the toolchain
+# rather than the worker: the bead store and runtime state Gas City writes into
+# a rig, provider scaffolding, and build/dependency output that is not source.
+# They are excluded from attribution rather than authorised, because they are
+# not the worker's to author in the first place.
+SA_PUBLICATION_INFRA_RE='^(\.beads/|\.gc/|\.claude/|node_modules/|dist/|\.gitignore$)'
+
+# publication_scope_violations <worktree> <authorised-csv>
+#
+# Prints every changed path the bead did not authorise, one per line. Empty
+# output means publication may proceed. Deliberately reports rather than
+# decides, so the caller records the violation in its own control ledger.
+publication_scope_violations() {
+  local wt="$1" authorised="$2" changed path
+  changed="$(git -C "$wt" status --porcelain 2>/dev/null | awk '{print $NF}')"
+  [ -n "$changed" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    grep -qE "$SA_PUBLICATION_INFRA_RE" <<<"$path" && continue
+    # Exact membership, not prefix: "src/add.ts" must not authorise
+    # "src/add.ts.bak", and an authorised directory is spelled out per file.
+    case ",$authorised," in
+      *",$path,"*) continue ;;
+    esac
+    printf '%s\n' "$path"
+  done <<<"$changed"
 }
 
 # rig_worker_commits <rig-root> — author names of every commit in the base

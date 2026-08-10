@@ -304,6 +304,56 @@ else
        'the ledger cannot see post-release commands and proves nothing'
 fi
 
+# --- 4b. no gc invocation can bypass ledger capture -------------------------
+#
+# Capture used to live one layer up, in gcx(), with sa_gc() executing gc
+# directly underneath. Any call routed through sa_gc — including a future
+# mutating one — therefore never reached the ledger, so the D3 claim was about
+# the calls someone remembered to route through gcx rather than about every
+# call made. No actual bypass occurred in the committed run; this pins the
+# structure so none can.
+
+sa_ledger_init "$WORK/bypass.log"
+PATH="$STUB:$PATH"
+BYPASS_EPOCH="$(date +%s)"
+sleep 1
+sa_gc bd update sa-ctl-9 --set-metadata k=v >/dev/null 2>&1   # MUTATING, via the low wrapper
+sa_gc bd show sa-ctl-9 >/dev/null 2>&1                        # read-only, via the low wrapper
+gcx bd close sa-ctl-9 >/dev/null 2>&1                         # mutating, via the historical spelling
+PATH="$OLDPATH"
+
+if [ -n "$(sa_ledger_mentions_after "$BYPASS_EPOCH" 'bd update sa-ctl-9')" ]; then
+  pass 'a mutating call made through the LOW-level wrapper reaches the ledger'
+else
+  fail 'a mutating call made through the LOW-level wrapper reaches the ledger' \
+       'sa_gc executed gc without recording it — the D3 assertion would be blind to it'
+fi
+if [ -n "$(sa_ledger_directives_after "$BYPASS_EPOCH" 'bd update sa-ctl-9')" ]; then
+  pass 'that mutating call is classified as a DIRECTIVE'
+else
+  fail 'that mutating call is classified as a directive' 'it was treated as read-only'
+fi
+if [ -n "$(sa_ledger_mentions_after "$BYPASS_EPOCH" 'bd show sa-ctl-9')" ] &&
+   [ -z "$(sa_ledger_directives_after "$BYPASS_EPOCH" 'bd show sa-ctl-9')" ]; then
+  pass 'read-only calls are recorded but NOT classified as directives'
+else
+  fail 'read-only calls are recorded but not classified as directives' \
+       'read/directive discrimination was lost when capture moved down'
+fi
+if [ -n "$(sa_ledger_directives_after "$BYPASS_EPOCH" 'bd close sa-ctl-9')" ]; then
+  pass 'the historical gcx spelling still records directives'
+else
+  fail 'the historical gcx spelling still records directives' 'gcx stopped recording'
+fi
+# Capture happens once, not twice: gcx delegates to sa_gc rather than logging
+# itself. A double-counted ledger is a corrupted evidence artifact.
+DOUBLE="$(awk -F'\t' '$3 == "bd close sa-ctl-9"' "$WORK/bypass.log" | wc -l)"
+if [ "$DOUBLE" -eq 1 ]; then
+  pass 'each invocation is recorded exactly once'
+else
+  fail 'each invocation is recorded exactly once' "recorded $DOUBLE times"
+fi
+
 # ===========================================================================
 section '5. ready-set membership is decided by the ID column'
 # ===========================================================================
@@ -346,6 +396,72 @@ if sa_bead_in_ready 'pr2-zzz' "$READY"; then
   fail 'an absent bead is not reported ready' 'false positive'
 else
   pass 'an absent bead is not reported ready'
+fi
+
+# ===========================================================================
+section '6. publication scope — the bounded-project boundary'
+# ===========================================================================
+#
+# bounded-project lets a worker Write/Edit and run npm scripts, so it can edit
+# package.json and have `npm test` execute the result. The permission list does
+# not contain that; the AUTHORITY split does — and only if the controller
+# inspects what changed before publishing. These controls prove the inspection
+# refuses what it must.
+
+SCOPE_RIG="$(new_rig scope-rig)"
+printf 'export const add = (a: number, b: number): number => a + b;\n' > "$SCOPE_RIG/add.ts"
+printf 'test\n' > "$SCOPE_RIG/add.test.ts"
+
+if [ -z "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')" ]; then
+  pass 'publication proceeds when the changed set is exactly what the bead authorised'
+else
+  fail 'publication proceeds when the changed set is exactly what the bead authorised' \
+       "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts' | tr '\n' ' ')"
+fi
+
+# THE CASE THE SECURITY SEMANTIC NAMES EXPLICITLY.
+printf '{"scripts":{"build":"echo pwned"}}\n' > "$SCOPE_RIG/package.json"
+VIOL="$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')"
+if grep -qx 'package.json' <<<"$VIOL"; then
+  pass 'publication REFUSES an unauthorised package.json change'
+else
+  fail 'publication refuses an unauthorised package.json change' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+
+# Any other unauthorised file, not just the one we thought of.
+printf 'x\n' > "$SCOPE_RIG/src-unrelated.ts"
+VIOL="$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')"
+if grep -qx 'src-unrelated.ts' <<<"$VIOL"; then
+  pass 'publication refuses any file the bead did not authorise'
+else
+  fail 'publication refuses any file the bead did not authorise' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+
+# Authorisation is exact membership, never a prefix: a near-miss filename must
+# not inherit an authorised file's permission.
+rm -f "$SCOPE_RIG/package.json" "$SCOPE_RIG/src-unrelated.ts"
+printf 'x\n' > "$SCOPE_RIG/add.ts.bak"
+if grep -qx 'add.ts.bak' <<<"$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')"; then
+  pass 'authorisation is exact membership, not a filename prefix'
+else
+  fail 'authorisation is exact membership, not a filename prefix' 'add.ts.bak was treated as authorised'
+fi
+
+# Controller/toolchain paths are excluded from attribution rather than
+# authorised — they are not the worker's to author, and treating them as
+# violations would make every real run refuse to publish.
+rm -f "$SCOPE_RIG/add.ts.bak"
+mkdir -p "$SCOPE_RIG/node_modules/x" "$SCOPE_RIG/dist" "$SCOPE_RIG/.gc"
+printf 'x\n' > "$SCOPE_RIG/node_modules/x/y.js"
+printf 'x\n' > "$SCOPE_RIG/dist/out.js"
+printf 'x\n' > "$SCOPE_RIG/.gc/state"
+if [ -z "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')" ]; then
+  pass 'build output and runtime state do not block publication'
+else
+  fail 'build output and runtime state do not block publication' \
+       "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts' | tr '\n' ' ')"
 fi
 
 echo

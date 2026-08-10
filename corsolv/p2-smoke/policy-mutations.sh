@@ -18,7 +18,7 @@ cd "$REPO" || exit 66
 
 SRC=internal/worker/builtin/profiles.go
 BAK="$(mktemp -p /var/tmp)"
-TESTS='TestClaudeBoundedAutoGrantsOnlyLifecycleTools|TestClaudeBoundedAutoSurvivesIntoLaunchCommand|TestClaudeBoundedAutoIsTheAutonomousDefault|TestClaudeAllowedToolsCannotSwallowPositionalPrompt'
+TESTS='TestClaudeBoundedAutoGrantsOnlyLifecycleTools|TestClaudeBoundedAutoSurvivesIntoLaunchCommand|TestClaudeBoundedAutoIsTheAutonomousDefault|TestClaudeAllowedToolsCannotSwallowPositionalPrompt|TestClaudeBoundedProjectIsOptInNotTheDefault|TestClaudeBoundedProjectGrantsExactSurface|TestClaudeBoundedProjectPreservesDontAskAndSingleSelection|TestClaudeBoundedProjectDeniesPublicationAndInstallAuthority|TestClaudeBoundedProjectAllowsTheAuthorisedProjectGates|TestClaudeBoundedProjectAllowlistCannotSwallowPositionalPrompt'
 
 cp "$SRC" "$BAK"
 restore() { cp "$BAK" "$SRC"; }
@@ -139,6 +139,92 @@ assert old in s, "OptionDefaults anchor not found -- update this script alongsid
 open(path, 'w').write(s.replace(old, '"permission_mode": "unrestricted",', 1))
 PY
 check 'reinstating --dangerously-skip-permissions as the default' FAIL
+
+echo
+echo '-- bounded-project: the opt-in project gates --'
+#
+# bounded-project is bounded-auto plus three named project scripts. Its two
+# dangers are opposite: widening the project half into a command family (which
+# quietly restores install/publish/arbitrary-script execution), and making it
+# the default (which would hand project commands to every autonomous worker in
+# every city without anyone choosing it). Both must turn the suite red.
+
+# The project half as one line, so mutations are expressible as deltas.
+PROJECT_APPROVED='Bash(npm run typecheck:*),Bash(npm run build:*),Bash(npm test:*)'
+
+mutate_project_const() {
+  python3 - "$SRC" "$1" <<'PY'
+import re, sys
+path, new = sys.argv[1], sys.argv[2]
+s = open(path).read()
+pat = re.compile(
+    r'const ClaudeProjectValidationGrants = "[^"]*"(?:\s*\+\s*\n\s*"[^"]*")*',
+    re.S)
+m = pat.search(s)
+assert m, "project grant constant not found -- update this script alongside the policy"
+s = s[:m.start()] + 'const ClaudeProjectValidationGrants = "%s"' % new + s[m.end():]
+open(path, 'w').write(s)
+PY
+}
+
+drop_project_grant() {
+  mutate_project_const "$(printf '%s' "$PROJECT_APPROVED" | sed "s|$1,\{0,1\}||; s|,$||")"
+}
+
+mutate_project_const "$PROJECT_APPROVED"
+check 'baseline: approved project gates' PASS
+
+# `npm run` is a general execution surface: the family grants every script in
+# package.json, including one the worker just added.
+mutate_project_const 'Bash(npm run:*),Bash(npm test:*)'
+check 'broadening to Bash(npm run:*)' FAIL
+
+# Bash(npm:*) carries npm install and npm publish -- dependency mutation and
+# package publication, neither of which is validation.
+mutate_project_const 'Bash(npm:*)'
+check 'broadening to Bash(npm:*)' FAIL
+
+mutate_project_const "$PROJECT_APPROVED,Bash(npm install:*)"
+check 'adding npm install' FAIL
+
+mutate_project_const "$PROJECT_APPROVED,Bash(npm publish:*)"
+check 'adding npm publish' FAIL
+
+# npx fetches and executes arbitrary packages.
+mutate_project_const "$PROJECT_APPROVED,Bash(npx:*)"
+check 'adding npx' FAIL
+
+# Publication authority must stay with the controller.
+mutate_project_const "$PROJECT_APPROVED,Bash(gh:*)"
+check 'adding gh (PR/merge authority)' FAIL
+
+mutate_project_const "$PROJECT_APPROVED,Bash(git:*)"
+check 'adding git to the project half' FAIL
+
+echo
+echo '-- removing any authorised project gate --'
+for rule in \
+  'Bash(npm run typecheck:\*)' \
+  'Bash(npm run build:\*)' \
+  'Bash(npm test:\*)'
+do
+  drop_project_grant "$rule"
+  check "removing $(printf '%s' "$rule" | tr -d '\\')" FAIL
+done
+
+echo
+echo '-- bounded-project must stay opt-in --'
+# Making it the default is the highest-blast-radius regression available here:
+# it grants project commands to every autonomous claude worker in every city.
+python3 - "$SRC" <<'PY'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+old = '"permission_mode": "bounded-auto",'
+assert old in s, "OptionDefaults anchor not found -- update this script alongside the policy"
+open(path, 'w').write(s.replace(old, '"permission_mode": "bounded-project",', 1))
+PY
+check 'making bounded-project the autonomous default' FAIL
 
 check 'restored: approved policy' PASS
 
