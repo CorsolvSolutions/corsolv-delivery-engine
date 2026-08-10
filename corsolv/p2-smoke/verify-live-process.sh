@@ -29,18 +29,30 @@ APPROVED_GRANTS=(
   'Bash(gc runtime drain-ack:*)'
 )
 
-# BOUNDED_PROJECT=1 extends the approved set with the three named project gates
-# — and ONLY those three. This is opt-in per run for the same reason the
-# permission mode is opt-in per agent: a verifier that always accepted npm
-# grants would stop being able to fail a bounded-auto worker that acquired
-# them. The mandatory lifecycle set below is unchanged either way, and every
-# denied family (bare Bash, gc, git, gh, npm, npm run, npx) still fails.
+# MANDATORY_GRANTS is what EVERY managed process must carry. APPROVED_GRANTS is
+# the widest set any process may carry. They are separate because the project
+# gates are an OPT-IN mode, and conflating the two was a real defect.
+#
+# The first version simply appended the project gates to APPROVED_GRANTS and
+# then required every entry of that array to be present on every process. A
+# city runs more than its workers: its own mayor and bd.dog agents run
+# bounded-auto and legitimately have no npm grants, so a bounded-project run
+# reported them as failures while the two actual workers — both provably
+# correct — passed. The verifier was demanding an opt-in mode's grants of
+# agents that never opted in.
+#
+# Splitting the sets keeps every strictness that mattered: the lifecycle grants
+# are still mandatory everywhere, no process may carry anything outside the
+# approved superset, and without BOUNDED_PROJECT=1 the project gates are not
+# approved at all — so a bounded-auto worker that acquired them still fails.
+MANDATORY_GRANTS=("${APPROVED_GRANTS[@]}")
+PROJECT_GRANTS=(
+  'Bash(npm run typecheck:*)'
+  'Bash(npm run build:*)'
+  'Bash(npm test:*)'
+)
 if [ "${BOUNDED_PROJECT:-0}" = '1' ]; then
-  APPROVED_GRANTS+=(
-    'Bash(npm run typecheck:*)'
-    'Bash(npm run build:*)'
-    'Bash(npm test:*)'
-  )
+  APPROVED_GRANTS+=("${PROJECT_GRANTS[@]}")
 fi
 FAILURES=0
 
@@ -136,9 +148,12 @@ for pid in "${PIDS[@]}"; do
     fail 'Read,Write,Edit,Glob,Grep present' "missing:$missing"
   fi
 
-  # 3. every mandatory lifecycle grant present
+  # 3. every mandatory lifecycle grant present. MANDATORY, not APPROVED: the
+  #    project gates are opt-in per agent, so requiring them of every managed
+  #    process fails the city's own mayor/bd.dog for running the mode they are
+  #    supposed to run.
   missing_grants=''
-  for g in "${APPROVED_GRANTS[@]}"; do
+  for g in "${MANDATORY_GRANTS[@]}"; do
     case ",$allowlist," in
       *",$g,"*) ;;
       *) missing_grants="$missing_grants '$g'" ;;
@@ -148,6 +163,25 @@ for pid in "${PIDS[@]}"; do
     pass 'all mandatory lifecycle grants present'
   else
     fail 'all mandatory lifecycle grants present' "missing:$missing_grants"
+  fi
+
+  # 3b. under BOUNDED_PROJECT=1, record which processes carry the opt-in gates.
+  #     Counted across the scan so the positive half — that the mode reached a
+  #     worker at all — is adjudicated once, after every process is seen.
+  if [ "${BOUNDED_PROJECT:-0}" = '1' ]; then
+    has_all=1
+    for g in "${PROJECT_GRANTS[@]}"; do
+      case ",$allowlist," in
+        *",$g,"*) ;;
+        *) has_all=0 ;;
+      esac
+    done
+    if [ "$has_all" -eq 1 ]; then
+      BOUNDED_PROJECT_SEEN=$(( ${BOUNDED_PROJECT_SEEN:-0} + 1 ))
+      note 'carries the opt-in project gates' 'yes'
+    else
+      note 'carries the opt-in project gates' 'no (not an opted-in agent)'
+    fi
   fi
 
   # 4. no shell grant outside the approved set (catches bare Bash, Bash(gc:*),
@@ -175,6 +209,20 @@ for pid in "${PIDS[@]}"; do
   echo "  allowlist: $allowlist"
   echo
 done
+
+# The positive half of the opt-in, adjudicated once across the whole scan: the
+# mode must have reached at least one live process. Without this, a run in
+# which bounded-project silently failed to apply would look identical to one in
+# which it applied correctly — every process would simply carry the lifecycle
+# set and nothing would object.
+if [ "${BOUNDED_PROJECT:-0}" = '1' ]; then
+  if [ "${BOUNDED_PROJECT_SEEN:-0}" -ge 1 ]; then
+    pass "bounded-project reached ${BOUNDED_PROJECT_SEEN} live process(es)"
+  else
+    fail 'bounded-project reached a live process' \
+         'no live process carried the opt-in project gates'
+  fi
+fi
 
 # Record the verdict so the post-drain independent assurance can defer to this
 # verifier instead of re-deriving live posture weakly against a city whose

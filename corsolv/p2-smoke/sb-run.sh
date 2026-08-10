@@ -77,10 +77,15 @@ REPO_URL="https://github.com/$REPO_SLUG.git"
 # The POC's own pre-workstream base: src/ holds only index.ts here, so W1/W2/W3
 # are genuinely outstanding work again.
 PRE_BASE='8c4f7c7'
-SB_BASE_BRANCH="${SB_BASE_BRANCH:-sb/base}"
 REQUIRED_WORKFLOW='CI'
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+# Branches are RUN-SCOPED. The first S-B run merged W1 and W2 into its base, so
+# a re-run against fixed names would find its own workstreams already merged and
+# have nothing left to replay — the same reason this stage cannot replay onto
+# main. A run tag keeps every run genuinely outstanding work.
+RUN_TAG="${RUN_TAG:-$TIMESTAMP}"
+SB_BASE_BRANCH="${SB_BASE_BRANCH:-sb/$RUN_TAG/base}"
 RUN_ID="sb-$TIMESTAMP"
 CITY="$HOME/corsolv-p2/sb-city-$TIMESTAMP"
 TARGET="$HOME/corsolv-p2/sb-rig-$TIMESTAMP"
@@ -238,9 +243,12 @@ if [ ! -f "$WF" ]; then
   fail 'authoritative CI workflow present at the replay base' "$WF missing"
   abort 'no workflow to run'
 fi
-sed -i "s|^\(\s*\)branches: \[main\]$|\1branches: [main, $SB_BASE_BRANCH]|" "$WF"
-sed -i "s|github.head_ref == 'poc/w1-add'|github.head_ref == 'poc/w1-add' \|\| github.head_ref == 'sb/w1-add'|" "$WF"
-if grep -q "$SB_BASE_BRANCH" "$WF"; then
+sed -i "s|^\(\s*\)branches: \[main\]$|\1branches: [main, 'sb/**']|" "$WF"
+# The W1 CI-only delay is what forces the controller to keep W2 progressing
+# while W1 sits in WAITING_EXTERNAL. Matched by suffix so it survives the
+# run-scoped branch names.
+sed -i "s|github.head_ref == 'poc/w1-add'|endsWith(github.head_ref, 'w1-add')|" "$WF"
+if grep -q "sb/\*\*" "$WF"; then
   pass "workflow watches $SB_BASE_BRANCH (job steps unchanged)"
 else
   fail "workflow watches $SB_BASE_BRANCH" 'branch filter not updated'
@@ -396,9 +404,9 @@ section '5. per-task worktrees and dispatch'
 
 # Branch names follow the POC's own convention so the CI delay condition and
 # the acceptance record read the same.
-W1_BRANCH='sb/w1-add'
-W2_BRANCH='sb/w2-multiply'
-W3_BRANCH='sb/w3-calculator'
+W1_BRANCH="sb/$RUN_TAG/w1-add"
+W2_BRANCH="sb/$RUN_TAG/w2-multiply"
+W3_BRANCH="sb/$RUN_TAG/w3-calculator"
 
 wt_add_named() { # <wt> <branch> <base>
   sa_ledger_note "worktree add $1 branch $2 from ${3:0:9}"
@@ -635,6 +643,25 @@ denied git by policy." "${paths[@]}")"
   else
     fail "$label merge state reconciled" "state='$state' mergeCommit='${merged_sha:-<none>}'"; return 1
   fi
+
+  # RECONCILE THE LOCAL BASE WITH WHAT GITHUB JUST DID.
+  #
+  # The squash merge exists on the REMOTE base; the clone's local branch still
+  # points where it did before. Closing the merge bead as `shipped` against a
+  # stale local branch is a claim the work-record gate cannot verify — and it
+  # correctly refused it: "gc.work_commit <sha> is not reachable on
+  # gc.work_branch". The gate was right; the harness was asserting reachability
+  # on a ref it had not moved. Fast-forwarding here makes the claim true before
+  # it is made, rather than relaxing the gate that caught it.
+  git -C "$TARGET" fetch -q origin "$SB_BASE_BRANCH" 2>/dev/null
+  git -C "$TARGET" update-ref "refs/heads/$SB_BASE_BRANCH" "refs/remotes/origin/$SB_BASE_BRANCH" 2>/dev/null
+  if git -C "$TARGET" merge-base --is-ancestor "$merged_sha" "$SB_BASE_BRANCH" 2>/dev/null; then
+    pass "$label merge commit is reachable on the local base after reconciliation"
+  else
+    fail "$label merge commit is reachable on the local base after reconciliation" \
+         "$merged_sha not an ancestor of $SB_BASE_BRANCH"; return 1
+  fi
+
   MERGE_SHAS="$MERGE_SHAS$label=$merged_sha "
   return 0
 }
