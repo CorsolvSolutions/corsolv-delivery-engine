@@ -333,6 +333,45 @@ done
 # ---------------------------------------------------------------------------
 # The work graph, created BEFORE any dispatch so the dependency gate is
 # observable in its withheld state.
+#
+# ---------------------------------------------------------------------------
+# PLANNED SHAPE FOR THE AUTHORITATIVE RUN (not yet implemented below).
+#
+# Per-task worktrees and autonomous dispatch pull against each other, and the
+# conflict is not obvious until both are attempted together:
+#
+#   - worktree isolation means C cannot read A's and B's files directly; it must
+#     receive them through repository state, from a base that already contains
+#     both. That base only exists AFTER the controller integrates A and B.
+#   - autonomous dispatch (D3) forbids any harness action naming C after its
+#     dependencies clear. So C must be routed up front, and its worktree and
+#     `work_dir` stamped up front.
+#   - but C becomes ready the instant A and B CLOSE, which is BEFORE the
+#     controller has integrated them. A pool worker can therefore claim C
+#     against a base that does not yet contain ALPHA.md or BETA.md.
+#
+# Closing that race by having the harness delay, poll, or re-stamp C would be a
+# post-release action naming C -- exactly what D3 forbids -- and inventing a
+# "dependency integrated" event is explicitly out of bounds.
+#
+# The shape that resolves it uses only primitives already in use here, beads and
+# dependencies:
+#
+#     A  <- A-int                     A-int: controller validates + integrates A
+#     B  <- B-int                     B-int: controller validates + integrates B
+#     A-int, B-int  <- C              C gates on INTEGRATION, not on close
+#
+# The controller owns and closes the two integration beads, which is the same
+# authority boundary already enforced everywhere else here: workers mutate a
+# repository, the controller publishes. Readiness projection then holds C until
+# the integrated base exists, with no new event type, no harness command naming
+# C after release, and no weakening of `workDirStampHasOwnershipEvidence` --
+# C's worktree is created from the integrated base and its legacy `work_dir`
+# stamped by the controller, which is precisely the "worktree creator writes the
+# artifact path first" contract that guard demands.
+#
+# Criterion 10's remote half stays out of this stage; see the report section on
+# what "merged" means across the two stages.
 # ---------------------------------------------------------------------------
 section '2. work graph'
 
