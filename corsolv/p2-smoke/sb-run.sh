@@ -685,10 +685,16 @@ close_merge_bead() {
     # Both upstreams are merged on GitHub. Refresh the base and cut W3's
     # worktree from it, so the dependent task consumes its upstreams through
     # repository state rather than by reading either upstream worktree.
+    # NEVER MUTATE THE RIG WORKING TREE.
+    #
+    # This used to `checkout` the base and `reset --hard` to the remote. That
+    # discarded the bd-init commit `gc rig add` had made in the rig and took the
+    # tracked bead-store files with it, so the very next `gc bd close` failed
+    # with "no issue found matching <id>" — the store the controller was talking
+    # to had been reset out from under it. The remote SHA is all that is needed;
+    # reading it does not require moving the rig's own checkout anywhere.
     git -C "$TARGET" fetch -q origin "$SB_BASE_BRANCH" 2>/dev/null
-    git -C "$TARGET" checkout -q "$SB_BASE_BRANCH"
-    git -C "$TARGET" reset -q --hard "origin/$SB_BASE_BRANCH"
-    MERGED_BASE="$(git -C "$TARGET" rev-parse "$SB_BASE_BRANCH")"
+    MERGED_BASE="$(git -C "$TARGET" rev-parse "refs/remotes/origin/$SB_BASE_BRANCH")"
     sa_ledger_note "worktree add $WT_W3 branch $W3_BRANCH from merged base ${MERGED_BASE:0:9}"
     if wt_add "$TARGET" "$WT_W3" "$W3_BRANCH" "$MERGED_BASE" && wt_is_registered "$TARGET" "$WT_W3"; then
       pass "W3 worktree created from the MERGED base (${MERGED_BASE:0:9})"
@@ -800,19 +806,29 @@ for id in "$W1" "$W2" "$W3"; do
 done
 
 git -C "$TARGET" fetch -q origin "$SB_BASE_BRANCH" 2>/dev/null
-FINAL_BASE="$(git -C "$TARGET" rev-parse "origin/$SB_BASE_BRANCH" 2>/dev/null)"
-git -C "$TARGET" checkout -q "$SB_BASE_BRANCH" && git -C "$TARGET" reset -q --hard "origin/$SB_BASE_BRANCH"
+FINAL_BASE="$(git -C "$TARGET" rev-parse "refs/remotes/origin/$SB_BASE_BRANCH" 2>/dev/null)"
 info 'final S-B base sha' "${FINAL_BASE:-<none>}"
-( cd "$TARGET" && npm ci --silent ) >"$EVIDENCE/final-npm-ci.txt" 2>&1 || true
-if ( cd "$TARGET" && npm run typecheck --silent ) >"$EVIDENCE/final-typecheck.txt" 2>&1; then
-  pass 'final merged base typechecks'
+
+# The final gates run in a throwaway detached worktree at the merged base, not
+# in the rig root: the rig holds the live bead store, and resetting it is what
+# broke the controller's own store on the previous run.
+FINAL_WT="$CITY/.gc/worktrees/$RIG_NAME/final-check"
+if [ -n "$FINAL_BASE" ] && GIT_LFS_SKIP_SMUDGE=1 \
+   git -C "$TARGET" worktree add -q --detach "$FINAL_WT" "$FINAL_BASE" 2>/dev/null; then
+  pass "final merged base checked out for verification (${FINAL_BASE:0:9})"
+  ( cd "$FINAL_WT" && npm ci --silent ) >"$EVIDENCE/final-npm-ci.txt" 2>&1 || true
+  if ( cd "$FINAL_WT" && npm run typecheck --silent ) >"$EVIDENCE/final-typecheck.txt" 2>&1; then
+    pass 'final merged base typechecks'
+  else
+    fail 'final merged base typechecks' 'see final-typecheck.txt'
+  fi
+  if ( cd "$FINAL_WT" && npm test --silent ) >"$EVIDENCE/final-test.txt" 2>&1; then
+    pass 'final merged base tests pass'
+  else
+    fail 'final merged base tests pass' 'see final-test.txt'
+  fi
 else
-  fail 'final merged base typechecks' 'see final-typecheck.txt'
-fi
-if ( cd "$TARGET" && npm test --silent ) >"$EVIDENCE/final-test.txt" 2>&1; then
-  pass 'final merged base tests pass'
-else
-  fail 'final merged base tests pass' 'see final-test.txt'
+  fail 'final merged base checked out for verification' "could not create a worktree at ${FINAL_BASE:-<none>}"
 fi
 
 AUTHORS="$(git -C "$TARGET" log --format='%an' "$PRE_BASE_SHA..$FINAL_BASE" 2>/dev/null | sort -u | tr '\n' ',')"
