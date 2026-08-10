@@ -157,21 +157,54 @@ fi
 
 # Corroborate from the process table: no live claude process for this city may
 # be a pool worker.
-worker_procs=''
-for p in /proc/[0-9]*; do
-  [ -r "$p/environ" ] || continue
-  # Other users' processes are unreadable; skip them rather than emit noise.
-  agent="$( { tr '\0' '\n' < "$p/environ"; } 2>/dev/null | sed -n 's/^GC_AGENT=//p' | head -1)" || continue
-  case "$agent" in
-    */claude*|claude-*) ;;
-    *) continue ;;
-  esac
-  tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qF "$CITY" && worker_procs="$worker_procs $(basename "$p")"
+#
+# Bounded rather than instantaneous. `drain-ack` returns as soon as the worker
+# has released its slot; teardown of the process and any replacement the pool
+# briefly stands up are the reconciler's, and they complete after the bead is
+# already CLOSED. Sampling once, immediately, reports that settling window as a
+# leak: two runs minutes apart each caught a DIFFERENT short-lived pid, and 600
+# tight-loop samples plus a full concurrent run once the city quiesced caught
+# none at all. Different pids are what rule out "one process winding down" and
+# make this a settling window rather than a hung worker.
+#
+# The deadline is what keeps the check honest: a genuinely leaked worker holds
+# its slot indefinitely and still fails here. Only the transient is forgiven,
+# and the time it took to clear is reported so a creeping teardown regression
+# is visible rather than absorbed.
+worker_pids() {
+  local out='' p agent
+  for p in /proc/[0-9]*; do
+    [ -r "$p/environ" ] || continue
+    # Other users' processes are unreadable; skip them rather than emit noise.
+    agent="$( { tr '\0' '\n' < "$p/environ"; } 2>/dev/null | sed -n 's/^GC_AGENT=//p' | head -1)" || continue
+    case "$agent" in
+      */claude*|claude-*) ;;
+      *) continue ;;
+    esac
+    tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qF "$CITY" && out="$out $(basename "$p")"
+  done
+  printf '%s' "$out"
+}
+
+DRAIN_SETTLE_DEADLINE="${DRAIN_SETTLE_DEADLINE:-60}"
+settle_start="$(date +%s)"
+worker_procs="$(worker_pids)"
+while [ -n "$worker_procs" ]; do
+  [ "$(( $(date +%s) - settle_start ))" -ge "$DRAIN_SETTLE_DEADLINE" ] && break
+  sleep 2
+  worker_procs="$(worker_pids)"
 done
+settle_took="$(( $(date +%s) - settle_start ))"
+
 if [ -z "$worker_procs" ]; then
-  pass 'no worker process left running'
+  if [ "$settle_took" -le 2 ]; then
+    pass 'no worker process left running'
+  else
+    pass "no worker process left running (settled in ${settle_took}s)"
+  fi
 else
-  fail 'no worker process left running' "pids:$worker_procs"
+  fail 'no worker process left running' \
+       "pids:$worker_procs still present after ${DRAIN_SETTLE_DEADLINE}s"
 fi
 
 # Transcript evidence that the worker drove its own lifecycle.
