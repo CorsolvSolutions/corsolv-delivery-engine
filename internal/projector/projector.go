@@ -411,18 +411,23 @@ func Render(s *State) ([]byte, error) {
 		fmt.Fprintf(&b, "    actual_duration_seconds: %d\n", t.DurationSeconds())
 		fmt.Fprintf(&b, "    attempts: %d\n", t.Attempts)
 		fmt.Fprintf(&b, "    evidence:\n")
-		fmt.Fprintf(&b, "      agent_session: %s\n", yamlScalar(t.Evidence.AgentSession))
-		fmt.Fprintf(&b, "      worktree_path: %s\n", yamlScalar(t.Evidence.WorktreePath))
-		fmt.Fprintf(&b, "      source_commit: %s\n", yamlScalar(t.Evidence.SourceCommit))
-		fmt.Fprintf(&b, "      ref: %s\n", yamlScalar(t.Evidence.Ref))
+		// Evidence and GitHub values are AUTHORITATIVE FACTS: something was
+		// supposed to supply each one. They render through yamlFact so an
+		// absent one says "unknown" rather than going blank, because a blank
+		// ci_state is indistinguishable from "nothing to check" and a consumer
+		// may reasonably render it as success-shaped nothing.
+		fmt.Fprintf(&b, "      agent_session: %s\n", yamlFact(t.Evidence.AgentSession))
+		fmt.Fprintf(&b, "      worktree_path: %s\n", yamlFact(t.Evidence.WorktreePath))
+		fmt.Fprintf(&b, "      source_commit: %s\n", yamlFact(t.Evidence.SourceCommit))
+		fmt.Fprintf(&b, "      ref: %s\n", yamlFact(t.Evidence.Ref))
 		fmt.Fprintf(&b, "    github:\n")
-		fmt.Fprintf(&b, "      pr_number: %d\n", t.GitHub.PRNumber)
-		fmt.Fprintf(&b, "      pr_state: %s\n", yamlScalar(t.GitHub.PRState))
-		fmt.Fprintf(&b, "      pr_head_sha: %s\n", yamlScalar(t.GitHub.PRHeadSHA))
-		fmt.Fprintf(&b, "      ci_state: %s\n", yamlScalar(t.GitHub.CIState))
-		fmt.Fprintf(&b, "      ci_tested_sha: %s\n", yamlScalar(t.GitHub.CITestedSHA))
-		fmt.Fprintf(&b, "      merge_state: %s\n", yamlScalar(t.GitHub.MergeState))
-		fmt.Fprintf(&b, "      merge_sha: %s\n", yamlScalar(t.GitHub.MergeSHA))
+		fmt.Fprintf(&b, "      pr_number: %s\n", yamlFactInt(t.GitHub.PRNumber))
+		fmt.Fprintf(&b, "      pr_state: %s\n", yamlFact(t.GitHub.PRState))
+		fmt.Fprintf(&b, "      pr_head_sha: %s\n", yamlFact(t.GitHub.PRHeadSHA))
+		fmt.Fprintf(&b, "      ci_state: %s\n", yamlFact(t.GitHub.CIState))
+		fmt.Fprintf(&b, "      ci_tested_sha: %s\n", yamlFact(t.GitHub.CITestedSHA))
+		fmt.Fprintf(&b, "      merge_state: %s\n", yamlFact(t.GitHub.MergeState))
+		fmt.Fprintf(&b, "      merge_sha: %s\n", yamlFact(t.GitHub.MergeSHA))
 	}
 	return []byte(b.String()), nil
 }
@@ -458,4 +463,33 @@ func yamlScalar(v string) string {
 		return `""`
 	}
 	return `"` + strings.ReplaceAll(v, `"`, `\"`) + `"`
+}
+
+// UnknownValue is what an authoritative fact renders as when no authority could
+// supply it.
+//
+// An empty string is not good enough. A blank pr_state or ci_state is
+// indistinguishable from "not applicable" and a consumer may reasonably render
+// it as nothing-to-see — which, for a fact that was supposed to be checked, is
+// the same silent zero the status vocabulary already refuses. "unknown" says
+// the projector looked and could not answer.
+const UnknownValue = "unknown"
+
+// yamlFact renders an authoritative fact, making absence explicit rather than
+// blank. Use it for values a source was supposed to supply; use yamlScalar for
+// values that are legitimately empty (a title nobody set).
+func yamlFact(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return `"` + UnknownValue + `"`
+	}
+	return yamlScalar(v)
+}
+
+// yamlFactInt is the integer peer: 0 is a real PR number to nobody, so an
+// absent one renders as unknown rather than as zero.
+func yamlFactInt(v int) string {
+	if v == 0 {
+		return `"` + UnknownValue + `"`
+	}
+	return fmt.Sprintf("%d", v)
 }

@@ -216,6 +216,7 @@ func TestEvidenceAndGitHubFactsSurviveProjection(t *testing.T) {
 		"worker-w1-sc2-abc",
 		"/city/.gc/worktrees/rig/worker-w1",
 		"pr_number: 13",
+		"agent_session: \"worker-w1-sc2-abc\"",
 		"ci_tested_sha: \"d75f28e57c8c8063d10667ceeb6571b09850d7af\"",
 		"merge_sha: \"3365da401bf5782bf923270735f9571d28451e83\"",
 	} {

@@ -4,7 +4,7 @@
 # Hand edits are overwritten and are not a source of truth.
 project: "corsolv-autonomy-poc"
 generated: 2026-08-10T17:25:59Z
-next_authorised_task: ""
+next_authorized_task: ""
 tasks:
   - id: "W1"
     title: "add(a, b) with tests"
