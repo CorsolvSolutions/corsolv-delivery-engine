@@ -13,15 +13,16 @@ func ts(minute int) time.Time {
 	return time.Date(2026, 8, 10, 12, minute, 0, 0, time.UTC)
 }
 
-// fixture builds a three-task graph: w3 depends on w1 and w2.
+// fixture builds a three-task graph: W3 depends on W1 and W2.
 func fixture() *State {
 	s := NewState("corsolv-autonomy-poc")
-	s.Generated = ts(0)
-	s.Tasks["w1"] = &Task{ID: "w1", Title: "add", Status: StatusNotStarted}
-	s.Tasks["w2"] = &Task{ID: "w2", Title: "multiply", Status: StatusNotStarted}
-	s.Tasks["w3"] = &Task{
-		ID: "w3", Title: "calculator", Status: StatusNotStarted,
-		DependsOn: []string{"w1", "w2"},
+	s.Project.CurrentPhase = "first-runner"
+	s.Project.CurrentMilestone = "S-B promoted run"
+	s.Tasks["W1"] = &Task{TaskID: "W1", Title: "add", Status: StatusPlanned, TaskType: "code", OwnerType: "agent"}
+	s.Tasks["W2"] = &Task{TaskID: "W2", Title: "multiply", Status: StatusPlanned, TaskType: "code", OwnerType: "agent"}
+	s.Tasks["W3"] = &Task{
+		TaskID: "W3", Title: "calculator", Status: StatusPlanned, TaskType: "code", OwnerType: "agent",
+		Dependencies: []string{"W1", "W2"},
 	}
 	return s
 }
@@ -37,8 +38,8 @@ func TestFirstProjectionFromEmptyCursor(t *testing.T) {
 	statePath, cursorPath := paths(t)
 	s := fixture()
 	events := []Event{
-		{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "w1"},
-		{Seq: 2, Type: "work.finished", Ts: ts(5), Subject: "w1"},
+		{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"},
+		{Seq: 2, Type: "work.finished", Ts: ts(5), Subject: "W1"},
 	}
 	cur, err := Project(events, s, statePath, cursorPath, nil)
 	if err != nil {
@@ -47,31 +48,24 @@ func TestFirstProjectionFromEmptyCursor(t *testing.T) {
 	if cur.Seq != 2 {
 		t.Errorf("cursor = %d, want 2", cur.Seq)
 	}
-	if s.Tasks["w1"].Status != StatusDone {
-		t.Errorf("w1 status = %q, want done", s.Tasks["w1"].Status)
-	}
 	if _, err := os.Stat(statePath); err != nil {
 		t.Errorf("projection was not written: %v", err)
 	}
 }
 
-// B. resume from a persisted cursor: already-durable events are not re-applied,
-// and the ones after it are.
+// B. resume from a persisted cursor.
 func TestResumeFromPersistedCursor(t *testing.T) {
 	statePath, cursorPath := paths(t)
 	s := fixture()
-	first := []Event{{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "w1"}}
-	if _, err := Project(first, s, statePath, cursorPath, nil); err != nil {
+	if _, err := Project([]Event{{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"}},
+		s, statePath, cursorPath, nil); err != nil {
 		t.Fatalf("first Project: %v", err)
 	}
-	startedAt := s.Tasks["w1"].ActualStart
 
-	// A fresh projection resuming from the stored cursor sees the whole log but
-	// must only apply what is past the cursor.
 	resumed := fixture()
 	all := []Event{
-		{Seq: 1, Type: "work.started", Ts: ts(9), Subject: "w1"}, // replayed with a DIFFERENT ts
-		{Seq: 2, Type: "work.finished", Ts: ts(6), Subject: "w1"},
+		{Seq: 1, Type: "work.started", Ts: ts(9), Subject: "W1"}, // replayed with a DIFFERENT ts
+		{Seq: 2, Type: "work.finished", Ts: ts(6), Subject: "W1"},
 	}
 	cur, err := Project(all, resumed, statePath, cursorPath, nil)
 	if err != nil {
@@ -80,53 +74,47 @@ func TestResumeFromPersistedCursor(t *testing.T) {
 	if cur.Seq != 2 {
 		t.Errorf("cursor = %d, want 2", cur.Seq)
 	}
-	if !resumed.Tasks["w1"].ActualStart.IsZero() {
-		t.Errorf("an event at or below the cursor was re-applied on resume (start=%v)",
-			resumed.Tasks["w1"].ActualStart)
+	if !resumed.Tasks["W1"].ActualStart.IsZero() {
+		t.Errorf("an event at or below the cursor was re-applied on resume")
 	}
-	if resumed.Tasks["w1"].ActualFinish != ts(6) {
+	if !resumed.Tasks["W1"].ActualFinish.Equal(ts(6)) {
 		t.Errorf("the event after the cursor was not applied on resume")
 	}
-	_ = startedAt
 }
 
-// C. replaying the same event does not duplicate or alter semantic state.
+// C. replay does not duplicate attempts or move the start.
 func TestReplayIsIdempotent(t *testing.T) {
 	s := fixture()
-	start := Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "w1"}
+	start := Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"}
 	s.Apply(start)
-	afterFirst := *s.Tasks["w1"]
+	attemptsAfterFirst := len(s.Tasks["W1"].Attempts)
+	startAfterFirst := s.Tasks["W1"].ActualStart
 
-	s.Apply(start) // exact replay
-	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(9), Subject: "w1"})
+	s.Apply(start)
+	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(9), Subject: "W1"})
 
-	got := s.Tasks["w1"]
-	if got.Attempts != afterFirst.Attempts {
-		t.Errorf("attempts = %d after replay, want %d; the count is not idempotent",
-			got.Attempts, afterFirst.Attempts)
+	got := s.Tasks["W1"]
+	if len(got.Attempts) != attemptsAfterFirst {
+		t.Errorf("attempts = %d after replay, want %d; the history is not idempotent",
+			len(got.Attempts), attemptsAfterFirst)
 	}
-	if !got.ActualStart.Equal(afterFirst.ActualStart) {
-		t.Errorf("actual_start moved on replay: %v -> %v; start must be first-write-wins",
-			afterFirst.ActualStart, got.ActualStart)
+	if !got.ActualStart.Equal(startAfterFirst) {
+		t.Errorf("actualStart moved on replay; start must be first-write-wins")
 	}
 }
 
-// D + E. a crash between the durable state write and the cursor write must
-// replay safely, and the cursor must never be ahead of durable state.
+// D + E. crash between the durable state write and the cursor write.
 func TestCrashBetweenStateAndCursorReplaysSafely(t *testing.T) {
 	statePath, cursorPath := paths(t)
 	s := fixture()
 	events := []Event{
-		{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "w1"},
-		{Seq: 2, Type: "work.finished", Ts: ts(5), Subject: "w1"},
+		{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"},
+		{Seq: 2, Type: "work.finished", Ts: ts(5), Subject: "W1"},
 	}
 
 	crash := errors.New("crash before the cursor write")
 	func() {
 		defer func() {
-			// recover() yields `any`, so this compares the recovered value to
-			// the sentinel directly. Re-panic on anything else: swallowing an
-			// unexpected panic here would turn a real defect into a green test.
 			r := recover()
 			if r == nil {
 				return
@@ -138,12 +126,9 @@ func TestCrashBetweenStateAndCursorReplaysSafely(t *testing.T) {
 		_, _ = Project(events, s, statePath, cursorPath, func() { panic(crash) })
 	}()
 
-	// The state is durable...
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("state was not durable before the crash: %v", err)
 	}
-	// ...and the cursor did NOT advance. A cursor ahead of durable state would
-	// skip events, which is the one unrecoverable outcome.
 	cur, err := LoadCursor(cursorPath)
 	if err != nil {
 		t.Fatalf("LoadCursor: %v", err)
@@ -152,60 +137,67 @@ func TestCrashBetweenStateAndCursorReplaysSafely(t *testing.T) {
 		t.Fatalf("cursor advanced to %d despite the crash; it must never lead durable state", cur.Seq)
 	}
 
-	// Replay from the un-advanced cursor reaches the same semantic state.
 	replayed := fixture()
 	if _, err := Project(events, replayed, statePath, cursorPath, nil); err != nil {
 		t.Fatalf("replay Project: %v", err)
 	}
-	if replayed.Tasks["w1"].Status != StatusDone {
-		t.Errorf("w1 status after replay = %q, want done", replayed.Tasks["w1"].Status)
-	}
-	if replayed.Tasks["w1"].Attempts != 1 {
-		t.Errorf("attempts after replay = %d, want 1", replayed.Tasks["w1"].Attempts)
+	if len(replayed.Tasks["W1"].Attempts) != 1 {
+		t.Errorf("attempts after replay = %d, want 1", len(replayed.Tasks["W1"].Attempts))
 	}
 }
 
-// F. tasks keep independent start/finish timestamps.
+// F. tasks keep independent start/finish.
 func TestTasksKeepIndependentActualTimes(t *testing.T) {
 	s := fixture()
-	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "w1"})
-	s.Apply(Event{Seq: 2, Type: "work.started", Ts: ts(2), Subject: "w2"})
-	s.Apply(Event{Seq: 3, Type: "work.finished", Ts: ts(7), Subject: "w2"})
-	s.Apply(Event{Seq: 4, Type: "work.finished", Ts: ts(9), Subject: "w1"})
+	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"})
+	s.Apply(Event{Seq: 2, Type: "work.started", Ts: ts(2), Subject: "W2"})
+	s.SetTerminalFinish("W2", ts(7))
+	s.SetTerminalFinish("W1", ts(9))
 
-	if got := s.Tasks["w1"]; !got.ActualStart.Equal(ts(1)) || !got.ActualFinish.Equal(ts(9)) {
-		t.Errorf("w1 times = %v..%v, want %v..%v", got.ActualStart, got.ActualFinish, ts(1), ts(9))
+	if got := s.Tasks["W1"]; !got.ActualStart.Equal(ts(1)) || !got.ActualFinish.Equal(ts(9)) {
+		t.Errorf("W1 times = %v..%v, want %v..%v", got.ActualStart, got.ActualFinish, ts(1), ts(9))
 	}
-	if got := s.Tasks["w2"]; !got.ActualStart.Equal(ts(2)) || !got.ActualFinish.Equal(ts(7)) {
-		t.Errorf("w2 times = %v..%v, want %v..%v", got.ActualStart, got.ActualFinish, ts(2), ts(7))
-	}
-	if got := s.Tasks["w1"].DurationSeconds(); got != 480 {
-		t.Errorf("w1 duration = %ds, want 480", got)
-	}
-	if got := s.Tasks["w2"].DurationSeconds(); got != 300 {
-		t.Errorf("w2 duration = %ds, want 300", got)
+	if got := s.Tasks["W2"]; !got.ActualStart.Equal(ts(2)) || !got.ActualFinish.Equal(ts(7)) {
+		t.Errorf("W2 times = %v..%v, want %v..%v", got.ActualStart, got.ActualFinish, ts(2), ts(7))
 	}
 }
 
-// G + H. evidence, owner, worktree and GitHub facts survive into the rendered
-// projection.
-func TestEvidenceAndGitHubFactsSurviveProjection(t *testing.T) {
+// The terminal-record join is the ONLY authoritative finish source, because the
+// city event log does not carry work-bead closures.
+func TestTerminalBeadRecordProducesActualFinish(t *testing.T) {
 	s := fixture()
-	s.Tasks["w1"].Evidence = Evidence{
-		AgentSession: "worker-w1-sc2-abc",
-		WorktreePath: "/city/.gc/worktrees/rig/worker-w1",
-		SourceCommit: "d75f28e57c8c8063d10667ceeb6571b09850d7af",
-		Ref:          "sb-20260810T171804Z",
+	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W1"})
+	if !s.Tasks["W1"].ActualFinish.IsZero() {
+		t.Fatalf("a started-but-unclosed task must have no finish")
 	}
-	s.Tasks["w1"].GitHub = GitHubFacts{
-		PRNumber: 13, PRState: "MERGED",
-		PRHeadSHA:   "d75f28e57c8c8063d10667ceeb6571b09850d7af",
-		CIState:     "success",
-		CITestedSHA: "d75f28e57c8c8063d10667ceeb6571b09850d7af",
-		MergeState:  "MERGED",
-		MergeSHA:    "3365da401bf5782bf923270735f9571d28451e83",
+
+	closedAt := time.Date(2026, 8, 10, 17, 20, 10, 0, time.UTC)
+	s.SetTerminalFinish("W1", closedAt)
+
+	if !s.Tasks["W1"].ActualFinish.Equal(closedAt) {
+		t.Errorf("actualFinish = %v, want the bead terminal closed_at %v", s.Tasks["W1"].ActualFinish, closedAt)
 	}
-	s.Tasks["w1"].Status = StatusMerged
+	if got := s.Tasks["W1"].Attempts[0].Outcome; got != "succeeded" {
+		t.Errorf("the attempt that reached a terminal record has outcome %q, want succeeded", got)
+	}
+	// A zero terminal record must never manufacture a finish.
+	s.SetTerminalFinish("W2", time.Time{})
+	if !s.Tasks["W2"].ActualFinish.IsZero() {
+		t.Errorf("an absent terminal record produced a finish timestamp")
+	}
+}
+
+// G. evidence and identifiers survive in the consumer's flat string shape.
+func TestEvidenceSurvivesInConsumerShape(t *testing.T) {
+	s := fixture()
+	s.Tasks["W1"].Evidence = []string{
+		"session=worker-w1-sc2-j1k",
+		"worktree=/city/.gc/worktrees/rig/worker-w1",
+		"run=sb-20260810T171804Z",
+	}
+	s.Tasks["W1"].ImplementationSha = "d75f28e57c8c8063d10667ceeb6571b09850d7af"
+	s.Tasks["W1"].PullRequest = 13
+	s.Tasks["W1"].Status = StatusMerged
 
 	out, err := Render(s)
 	if err != nil {
@@ -213,56 +205,67 @@ func TestEvidenceAndGitHubFactsSurviveProjection(t *testing.T) {
 	}
 	text := string(out)
 	for _, want := range []string{
-		"worker-w1-sc2-abc",
-		"/city/.gc/worktrees/rig/worker-w1",
-		"pr_number: 13",
-		"agent_session: \"worker-w1-sc2-abc\"",
-		"ci_tested_sha: \"d75f28e57c8c8063d10667ceeb6571b09850d7af\"",
-		"merge_sha: \"3365da401bf5782bf923270735f9571d28451e83\"",
+		`- "session=worker-w1-sc2-j1k"`,
+		`- "worktree=/city/.gc/worktrees/rig/worker-w1"`,
+		`implementationSha: "d75f28e57c8c8063d10667ceeb6571b09850d7af"`,
+		"pullRequest: 13",
 	} {
 		if !strings.Contains(text, want) {
-			t.Errorf("rendered projection is missing %q", want)
+			t.Errorf("rendered document is missing %q", want)
 		}
-	}
-	// CI must be reported as its own tested SHA, so a CI result can be checked
-	// against the PR head rather than assumed to match it.
-	if !strings.Contains(text, "pr_head_sha:") || !strings.Contains(text, "ci_tested_sha:") {
-		t.Errorf("PR head and CI tested SHA must both be projected as distinct facts")
 	}
 }
 
-// I. dependency readiness is projected from edges and terminal state, with no
-// invented unblock event.
+// Live GitHub state must NOT be snapshotted: the dashboard reads it from
+// GitHub, and a second structured copy goes stale the moment CI moves.
+func TestLiveGitHubStateIsNotSnapshotted(t *testing.T) {
+	out, err := Render(fixture())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, forbidden := range []string{"ci_state", "ciState", "merge_sha", "mergeSha", "pr_head_sha", "prHeadSha", "merge_state"} {
+		if strings.Contains(string(out), forbidden) {
+			t.Errorf("document carries %q; live GitHub state is the dashboard's authority, not this file's", forbidden)
+		}
+	}
+}
+
+// One fact, one authority: the consumer derives duration from start and finish.
+func TestNoDuplicateDurationAuthority(t *testing.T) {
+	out, err := Render(fixture())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, forbidden := range []string{"actual_duration_seconds", "durationSeconds", "actualDuration"} {
+		if strings.Contains(string(out), forbidden) {
+			t.Errorf("document carries %q; duration is derived from actualStart/actualFinish", forbidden)
+		}
+	}
+}
+
+// I. dependency readiness is projected, not evented.
 func TestDependencyReadinessIsProjectedNotEvented(t *testing.T) {
 	s := fixture()
 	s.RecomputeBlockers()
-	if s.Tasks["w3"].Status != StatusBlocked {
-		t.Errorf("w3 status = %q, want blocked while its dependencies are outstanding", s.Tasks["w3"].Status)
+	if s.Tasks["W3"].Status != StatusBlocked {
+		t.Errorf("W3 status = %q, want blocked while dependencies are outstanding", s.Tasks["W3"].Status)
 	}
-	if got := s.NextAuthorisedTask(); got != "w1" {
-		t.Errorf("next authorized = %q, want w1", got)
-	}
-
-	s.Tasks["w1"].Status = StatusMerged
-	s.RecomputeBlockers()
-	if len(s.Tasks["w3"].Blockers) != 1 || s.Tasks["w3"].Blockers[0] != "w2" {
-		t.Errorf("w3 blockers = %v, want [w2]", s.Tasks["w3"].Blockers)
+	if !strings.Contains(s.Tasks["W3"].Blocker, "W1") || !strings.Contains(s.Tasks["W3"].Blocker, "W2") {
+		t.Errorf("W3 blocker = %q, want both outstanding dependencies named", s.Tasks["W3"].Blocker)
 	}
 
-	s.Tasks["w2"].Status = StatusMerged
+	s.Tasks["W1"].Status = StatusMerged
+	s.Tasks["W2"].Status = StatusMerged
 	s.RecomputeBlockers()
-	if len(s.Tasks["w3"].Blockers) != 0 {
-		t.Errorf("w3 still blocked after both dependencies merged: %v", s.Tasks["w3"].Blockers)
+	if s.Tasks["W3"].Blocker != "" {
+		t.Errorf("W3 still blocked after both dependencies merged: %q", s.Tasks["W3"].Blocker)
 	}
-	if s.Tasks["w3"].Status != StatusNotStarted {
-		t.Errorf("w3 status = %q, want not-started once unblocked", s.Tasks["w3"].Status)
-	}
-	if got := s.NextAuthorisedTask(); got != "w3" {
-		t.Errorf("next authorized = %q, want w3", got)
+	if s.Tasks["W3"].Status != StatusPlanned {
+		t.Errorf("W3 status = %q, want planned once unblocked", s.Tasks["W3"].Status)
 	}
 }
 
-// J. the same authoritative state renders byte-identically.
+// J. deterministic rendering.
 func TestRenderIsDeterministic(t *testing.T) {
 	a, err := Render(fixture())
 	if err != nil {
@@ -279,8 +282,7 @@ func TestRenderIsDeterministic(t *testing.T) {
 	}
 }
 
-// K. the generated file announces that it is generated, so nobody edits it and
-// expects the edit to survive.
+// K. the generated file announces that it is generated.
 func TestGeneratedFileRefusesHandEditingByContract(t *testing.T) {
 	out, err := Render(fixture())
 	if err != nil {
@@ -291,17 +293,18 @@ func TestGeneratedFileRefusesHandEditingByContract(t *testing.T) {
 	}
 }
 
-// An unknown status must never render — silently becoming 0% progress is the
-// failure this refuses.
+// An unknown status must never render. The consumer holds it at 0% and reports
+// it, so emitting a near-miss is worse than emitting nothing.
 func TestUnknownStatusIsRefusedNotDefaulted(t *testing.T) {
 	s := fixture()
-	s.Tasks["w1"].Status = Status("pull-request-open") // a plausible near-miss
+	s.Tasks["W1"].Status = TaskStatus("pull-request-open")
 	if _, err := Render(s); !errors.Is(err, ErrUnknownStatus) {
-		t.Fatalf("Render error = %v, want ErrUnknownStatus; an unrecognized token must not render", err)
+		t.Fatalf("Render error = %v, want ErrUnknownStatus", err)
 	}
 }
 
-// The two tokens whose spelling is called out explicitly.
+// The canonical vocabulary, including the spellings whose near-misses are the
+// known failure mode.
 func TestCanonicalStatusSpelling(t *testing.T) {
 	if string(StatusPROpen) != "pr-open" {
 		t.Errorf("StatusPROpen = %q, want pr-open", StatusPROpen)
@@ -309,21 +312,121 @@ func TestCanonicalStatusSpelling(t *testing.T) {
 	if string(StatusDeployedUAT) != "deployed-uat" {
 		t.Errorf("StatusDeployedUAT = %q, want deployed-uat", StatusDeployedUAT)
 	}
-	for _, wrong := range []Status{"pr-open-scoring", "pull-request-open", "deployed-to-uat"} {
-		if err := ValidateStatus(wrong); err == nil {
-			t.Errorf("%q was accepted; near-miss spellings must be refused", wrong)
+	for _, wrong := range []TaskStatus{"pr-open-scoring", "pull-request-open", "deployed-to-uat", "done", "in-progress"} {
+		if err := ValidateTaskStatus(wrong); err == nil {
+			t.Errorf("%q was accepted; it is not in the canonical vocabulary", wrong)
+		}
+	}
+	for _, right := range []TaskStatus{
+		StatusPlanned, StatusActive, StatusBlocked, StatusChecksPassing,
+		StatusMerged, StatusVerified, StatusComplete,
+	} {
+		if err := ValidateTaskStatus(right); err != nil {
+			t.Errorf("canonical status %q was refused: %v", right, err)
 		}
 	}
 }
 
-// Absent timestamps render as null, never as an epoch that would read as a real
-// date the producer has no authority for.
-func TestAbsentTimesRenderAsNull(t *testing.T) {
+// THE NEGATIVE GATE CASE. merged is a publication fact, not an acceptance one:
+// the consumer scores it at 70% and reserves 100% for a met completion gate.
+// Deriving "met" from status alone would manufacture acceptance.
+func TestMergedStatusDoesNotImplyCompletionGateMet(t *testing.T) {
+	s := fixture()
+	s.Tasks["W1"].Status = StatusMerged
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(string(out), `completionGateStatus: "met"`) {
+		t.Errorf("a merged task rendered completionGateStatus met with no gate evidence")
+	}
+
+	// And when a real authority does assert it, it renders.
+	s.Tasks["W1"].CompletionGateStatus = GateMet
+	s.Tasks["W1"].CompletionGate = "required CI on exact head + independent assurance + governed merge"
+	out, err = Render(s)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(string(out), `completionGateStatus: "met"`) {
+		t.Errorf("a proven gate did not render as met")
+	}
+}
+
+// Absent optional values render as null, never as an epoch or a blank that
+// could read as a real answer.
+func TestAbsentValuesRenderAsNull(t *testing.T) {
 	out, err := Render(fixture())
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(string(out), "actual_start: null") {
-		t.Errorf("an unknown actual_start must render as null, not as an epoch")
+	for _, want := range []string{"actualStart: null", "actualFinish: null", "pullRequest: null", "implementationSha: null"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("expected %q for an unknown value", want)
+		}
+	}
+}
+
+// The structural compatibility rules the consumer enforces: schemaVersion 1, an
+// activeTasks array, and a project OBJECT. Failing any one makes the dashboard
+// refuse the whole document.
+func TestDocumentSatisfiesConsumerStructuralContract(t *testing.T) {
+	out, err := Render(fixture())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	text := string(out)
+	if !strings.Contains(text, "schemaVersion: 1") {
+		t.Errorf("missing schemaVersion: 1 — the consumer refuses any other version")
+	}
+	if !strings.Contains(text, "\nproject:\n  projectId:") {
+		t.Errorf("project must be an OBJECT with projectId; a bare string is refused")
+	}
+	if !strings.Contains(text, "\nactiveTasks:\n") {
+		t.Errorf("missing activeTasks — the consumer reads activeTasks, not tasks")
+	}
+	if strings.Contains(text, "\ntasks:\n") {
+		t.Errorf("document still emits a legacy tasks array")
+	}
+	for _, want := range []string{"taskId:", "dependencies:", "parallelGroup:", "currentBlockers:", "recentCompletedOutcomes:"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing consumer field %q", want)
+		}
+	}
+	for _, gone := range []string{"\n  - id:", "depends_on:", "actual_start:", "actual_finish:", "next_authorized_task:"} {
+		if strings.Contains(text, gone) {
+			t.Errorf("document still carries the legacy producer spelling %q", gone)
+		}
+	}
+}
+
+// Attempts must be a structured, dated array — a count cannot be plotted.
+func TestAttemptsAreStructuredAndDated(t *testing.T) {
+	s := fixture()
+	s.Apply(Event{Seq: 1, Type: "work.started", Ts: ts(1), Subject: "W3"})
+	s.Apply(Event{Seq: 2, Type: "work.started", Ts: ts(4), Subject: "W3"})
+	s.SetTerminalFinish("W3", ts(8))
+
+	got := s.Tasks["W3"].Attempts
+	if len(got) != 2 {
+		t.Fatalf("attempts = %d, want 2 dated entries", len(got))
+	}
+	if got[0].Date.IsZero() || got[1].Date.IsZero() {
+		t.Errorf("every attempt must carry an authoritative date")
+	}
+	if got[0].Outcome != "failed" || got[1].Outcome != "succeeded" {
+		t.Errorf("attempt outcomes = %q,%q; want the earlier failed and the terminal one succeeded",
+			got[0].Outcome, got[1].Outcome)
+	}
+
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(string(out), "attempts:\n      - date:") {
+		t.Errorf("attempts must render as a structured array")
+	}
+	if strings.Contains(string(out), "attempts: 2") {
+		t.Errorf("attempts must not render as a bare count")
 	}
 }

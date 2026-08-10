@@ -121,10 +121,20 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   606,
-			BaselineFiles:   172,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// 606/172 -> 608/173: the G7 bd-backed graph-claim conformance test
+			// (test/integration/bdstore_graph_claim_test.go) adds one
+			// integration-tagged file with two subprocess call sites — `git init`
+			// to build each throwaway bd workspace, and `pgrep` for the Dolt
+			// process census that fails the test if a server survives it.
+			// Raised deliberately: this is the audit baseline whose invariant is
+			// that real test source stays VISIBLE, so new process-owning test
+			// source belongs in the count rather than hidden from it. The
+			// untagged Debt baseline is untouched, which is the property that
+			// matters — the new file is integration-tagged.
+			BaselineCalls:   608,
+			BaselineFiles:   173,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
