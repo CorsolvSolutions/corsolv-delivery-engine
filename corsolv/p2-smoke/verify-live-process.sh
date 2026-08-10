@@ -50,15 +50,24 @@ echo
 
 # Collect argv of every live claude process for this city, NUL-delimited so
 # arguments containing spaces stay intact.
+# Capture each cmdline once, then match against the variable.
+#
+# The previous form was `tr < cmdline | grep -qF "$CITY"`, and under
+# `set -o pipefail` that is actively dangerous HERE of all places: grep -q exits
+# at the first match, `tr` takes SIGPIPE, pipefail promotes it, and the `if`
+# goes false -- so a process that DOES belong to this city is skipped. A
+# security verifier that silently omits workers is worse than one that fails,
+# because it still prints PASS.
 mapfile -t PIDS < <(
   for p in /proc/[0-9]*; do
     [ -r "$p/cmdline" ] || continue
-    exe="$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null | head -1)"
-    case "$exe" in
+    cmdline="$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null || true)"
+    [ -n "$cmdline" ] || continue
+    case "$(head -1 <<<"$cmdline")" in
       *claude) ;;
       *) continue ;;
     esac
-    if tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qF "$CITY"; then
+    if grep -qF "$CITY" <<<"$cmdline"; then
       basename "$p"
     fi
   done

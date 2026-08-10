@@ -128,6 +128,19 @@ bead_is_closed() {
   esac
 }
 
+# THE PIPEFAIL/SIGPIPE RULE FOR THIS FILE.
+#
+# Never write `if <producer> | grep -q ...`. With `set -o pipefail`, grep -q
+# exits at the first match, the producer takes SIGPIPE (141), and pipefail
+# promotes that to the pipeline status -- so a MATCH reads as failure. This bit
+# three separate times here: the bead-closed wait (which burned a 15-minute
+# deadline with both beads already closed), the required-artifact stamp check
+# (which reported "stamp did not land" for stamps that had landed), and the
+# rig-beads readiness wait.
+#
+# Capture first, then match against the variable with a herestring. `<<<` is a
+# redirect, not a pipe, so there is no second process to signal.
+
 # managed_worker_pids — pids of live managed-claude POOL workers for this city.
 # stderr is discarded per-process: /proc entries vanish mid-scan, and the
 # resulting "No such file or directory" noise is not a finding.
@@ -165,10 +178,12 @@ SOURCE_SHA="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
 
 gc supervisor stop >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
-  gc supervisor status 2>&1 | grep -q 'running' || break
+  sup="$(gc supervisor status 2>&1 || true)"
+  grep -q 'running' <<<"$sup" || break
   sleep 2
 done
-if gc supervisor status 2>&1 | grep -q 'running'; then
+sup="$(gc supervisor status 2>&1 || true)"
+if grep -q 'running' <<<"$sup"; then
   fail 'no stale supervisor' 'a supervisor is still running'
 else
   pass 'no stale supervisor'
@@ -194,15 +209,49 @@ pass 'disposable git target created'
 
 gc init "$CITY" --provider claude --yes >"$EVIDENCE/init.txt" 2>&1 || {
   fail 'gc init' 'see init.txt'; }
+
+# DELIVER WORK-RECORD ENFORCEMENT TO THE WORKERS THEMSELVES.
+#
+# Exporting GC_WORK_RECORD_ENFORCE in this shell governs only the `gc` calls
+# this script makes. Workers run in supervisor-spawned sessions that do not
+# inherit it, which is why earlier runs still produced beads closing `shipped`
+# with no commit, closing with no disposition at all, and twice closing as
+# `completed-uncommitted` -- a value that is not in the typed vocabulary.
+#
+# `[workspace] env` is the documented boundary: "workspace-wide environment
+# variables applied to every managed session", merged into the spawned agent's
+# environment in cmd/gc/template_resolve.go. Written before the rig is added
+# and before any session is spawned, so the first worker already has it.
+#
+# Measured effect of enforcement (7/7 controls, this tree):
+#   completed-uncommitted  REJECTED  invalid gc.work_outcome
+#   <absent>               REJECTED  missing gc.work_outcome
+#   shipped (no commit)    REJECTED  requires gc.work_commit
+#   blocked/no-op/abandoned ACCEPTED
+cat >> "$CITY/city.toml" <<'TOML'
+
+# Corsolv acceptance: make the typed work-record contract block rather than warn
+# for every managed session, so a worker cannot close a bead with an invented,
+# absent, or unearned disposition.
+[workspace.env]
+GC_WORK_RECORD_ENFORCE = "1"
+TOML
+if grep -q 'GC_WORK_RECORD_ENFORCE' "$CITY/city.toml"; then
+  pass 'work-record enforcement delivered to managed sessions'
+else
+  fail 'work-record enforcement delivered to managed sessions' 'city.toml not updated'
+fi
 cd "$CITY" && gc rig add "$TARGET" >"$EVIDENCE/rigadd.txt" 2>&1 || {
   fail 'gc rig add' 'see rigadd.txt'; }
 
 deadline=$(( $(date +%s) + 120 ))
 while true; do
-  if gc rig list 2>&1 | awk -v rig="$RIG_NAME:" '
+  riglist="$(gc rig list 2>&1 || true)"
+  rigbeads="$(awk -v rig="$RIG_NAME:" '
         $1 == rig {inrig = 1; next}
         inrig && /^  [^ ]/ && $0 !~ /^    / {inrig = 0}
-        inrig && /Beads:/ {print}' | grep -q 'initialized'; then
+        inrig && /Beads:/ {print}' <<<"$riglist")"
+  if grep -q 'initialized' <<<"$rigbeads"; then
     pass 'rig beads store initialized'; break
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -233,11 +282,44 @@ cd "$TARGET" || exit 70
 # `shipped`: it states that publication is the controller's, so a worker that
 # cannot commit records that honestly instead of claiming an artifact it never
 # produced.
-LIFECYCLE='Make the filesystem change, verify the exact file contents, then mark the assigned Gas City work complete. You are not permitted to run git; the controller publishes. Record the outcome truthfully -- do not report work as shipped if you did not commit it.'
+# `blocked` is named explicitly because it is the repository's own typed value,
+# not an invention: `shipped` is defined as requiring a commit reachable on the
+# work branch, and this policy withholds git from workers precisely so
+# publication stays with the controller. Under enforcement a worker that closes
+# `shipped` without a commit is refused ("requires gc.work_commit"), as is any
+# invented value. Telling the worker the correct typed word up front avoids it
+# guessing one that the gate will reject.
+#
+# No apostrophes in this single-quoted string. An apostrophe closes the quote,
+# and the first draft of it ("the controller's") silently corrupted every
+# construct after this line -- bash reported the failure 117 lines later, at an
+# unrelated `done`.
+#
+# Kept short on purpose: a bead title is capped at 500 characters, and the
+# first version pushed C to 578. `gc bd q` failed validation, the script threw
+# the error away with 2>/dev/null, and the run died reporting only an empty
+# bead id. mk_bead below now measures before creating and shows stderr, so the
+# limit can never fail silently again.
+LIFECYCLE='Make the change, verify the exact contents, then close the assigned bead. You cannot run git; the controller publishes. Close with gc.work_outcome=blocked plus a gc.work_blocked_reason; do NOT claim shipped.'
 
-A="$(gc bd q "Create the file ALPHA.md in the repository root containing exactly this single line: ALPHA_OK. $LIFECYCLE" 2>/dev/null | tail -1)"
-B="$(gc bd q "Create the file BETA.md in the repository root containing exactly this single line: BETA_OK. $LIFECYCLE" 2>/dev/null | tail -1)"
-C="$(gc bd q "Read ALPHA.md and Read BETA.md in the repository root. Create INDEX.md containing exactly two lines: the single line from ALPHA.md, then the single line from BETA.md. Do not invent the contents; read both files. $LIFECYCLE" 2>/dev/null | tail -1)"
+# mk_bead <text> — create a work bead, failing loudly on validation.
+mk_bead() {
+  local text="$1" out rc
+  if [ "${#text}" -gt 500 ]; then
+    fail 'work bead title within the 500-char limit' "${#text} chars: ${text:0:60}..."
+    return 1
+  fi
+  out="$(gc bd q "$text" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail 'work bead created' "$(printf '%s' "$out" | tail -1)"
+    return 1
+  fi
+  printf '%s' "$out" | tail -1
+}
+
+A="$(mk_bead "Create ALPHA.md in the repository root containing exactly this single line: ALPHA_OK. $LIFECYCLE")"
+B="$(mk_bead "Create BETA.md in the repository root containing exactly this single line: BETA_OK. $LIFECYCLE")"
+C="$(mk_bead "Read ALPHA.md and BETA.md in the repository root, then create INDEX.md containing exactly two lines: the line from ALPHA.md, then the line from BETA.md. Do not invent the contents; read both files. $LIFECYCLE")"
 
 echo "  A=$A  B=$B  C=$C"
 if [ -z "$A" ] || [ -z "$B" ] || [ -z "$C" ]; then
@@ -245,6 +327,30 @@ if [ -z "$A" ] || [ -z "$B" ] || [ -z "$C" ]; then
   exit 70
 fi
 pass 'three work beads created'
+
+# REQUIRED ARTIFACT PER BEAD.
+#
+# The deterministic controller-side guard against silent scope drift: the bead
+# itself declares what the work must produce, so "the worker said it was done"
+# and "the thing exists" are separate claims that can disagree. Without it, a
+# worker that closes cleanly having written nothing, or having written
+# something else, is indistinguishable from one that did the job.
+stamp_required() {
+  local id="$1" artifact="$2" out shown
+  out="$(gc bd update "$id" --set-metadata "gc.required_artifact=$artifact" 2>&1)" || {
+    fail "$id declares its required artifact" "update failed: $(printf '%s' "$out" | tail -1)"
+    return
+  }
+  shown="$(gc bd show "$id" 2>/dev/null || true)"
+  if grep -qF "gc.required_artifact: $artifact" <<<"$shown"; then
+    pass "$id declares its required artifact ($artifact)"
+  else
+    fail "$id declares its required artifact" "stamp did not land for $artifact"
+  fi
+}
+stamp_required "$A" ALPHA.md
+stamp_required "$B" BETA.md
+stamp_required "$C" INDEX.md
 
 gc bd dep "$A" --blocks "$C" >/dev/null 2>&1
 gc bd dep "$B" --blocks "$C" >/dev/null 2>&1
@@ -336,6 +442,13 @@ AB_ELAPSED=$(( $(date +%s) - DISPATCH_START ))
 if [ "$closed_a" -eq 1 ] && [ "$closed_b" -eq 1 ]; then
   pass 'A and B both closed'
 fi
+# MAXPAR is recorded durably at the moment it is observed, not just printed.
+# Concurrency is the one property here that cannot be reconstructed after the
+# fact: once the workers exit, no artifact on disk distinguishes "ran together"
+# from "ran one after the other", and near-adjacent timestamps are not evidence
+# of overlap. Two distinct pids alive in the same sample are.
+printf 'maxpar=%s pids=%s observed_at=%s\n' \
+  "$MAXPAR" "$PARPIDS" "$(date -u +%FT%TZ)" > "$EVIDENCE/parallelism.result"
 if [ "$MAXPAR" -ge 2 ]; then
   pass "parallel execution observed (${MAXPAR} concurrent workers:$PARPIDS)"
 else
@@ -386,6 +499,37 @@ check_file() {
 }
 check_file ALPHA.md 'ALPHA_OK'
 check_file BETA.md 'BETA_OK'
+
+# REQUIRED-ARTIFACT CONTAINMENT.
+#
+# Each bead declared an artifact before dispatch; each declared artifact must
+# now exist, and must sit INSIDE the rig the bead was routed to. The
+# containment half is what makes this a scope guard rather than a existence
+# check: a worker that satisfied its brief by writing outside its assigned
+# tree has escaped the boundary even though the file it names is present.
+for pair in "$A:ALPHA.md" "$B:BETA.md" "$C:INDEX.md"; do
+  bid="${pair%%:*}"; want="${pair##*:}"
+  declared="$(gc bd show "$bid" 2>/dev/null \
+    | grep -oE 'gc.required_artifact: \S+' | head -1 | awk '{print $2}')"
+  if [ "$declared" != "$want" ]; then
+    fail "$bid required artifact survived dispatch" "declared '${declared:-<none>}', expected '$want'"
+    continue
+  fi
+  resolved="$(cd "$TARGET" && readlink -f "$declared" 2>/dev/null)"
+  rigreal="$(readlink -f "$TARGET")"
+  case "$resolved" in
+    "$rigreal"/*)
+      if [ -f "$resolved" ]; then
+        pass "$bid required artifact present and inside its rig ($declared)"
+      else
+        fail "$bid required artifact present" "$declared declared but absent"
+      fi
+      ;;
+    *)
+      fail "$bid required artifact contained in its rig" \
+           "resolved to '${resolved:-<unresolvable>}', outside $rigreal" ;;
+  esac
+done
 
 # INDEX.md must carry BOTH upstream results. C could not produce this without
 # reading what the other two workers wrote.
@@ -463,7 +607,8 @@ cd "$TARGET" || exit 70
 # ---------------------------------------------------------------------------
 section '7. merge governance'
 
-if git -C "$TARGET" log --oneline | grep -qiE 'ALPHA|BETA|INDEX'; then
+gitlog="$(git -C "$TARGET" log --oneline 2>/dev/null || true)"
+if grep -qiE 'ALPHA|BETA|INDEX' <<<"$gitlog"; then
   fail 'no worker commit in history' 'a worker appears to have committed'
 else
   pass 'no worker commit in history (git withheld from workers)'

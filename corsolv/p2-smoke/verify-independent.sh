@@ -260,7 +260,8 @@ fi
 
 # The worker must have been refused git; if the transcript shows a successful
 # commit, the policy leaked.
-if [ -d "$PROJ" ] && git -C "$RIG" log --oneline -n 5 2>/dev/null | grep -qi 'CORSOLV_GASCITY_SMOKE'; then
+RIG_LOG="$(git -C "$RIG" log --oneline -n 5 2>/dev/null || true)"
+if [ -d "$PROJ" ] && grep -qi 'CORSOLV_GASCITY_SMOKE' <<<"$RIG_LOG"; then
   fail 'worker did not commit' 'a worker commit is present in git history'
 else
   pass 'worker did not commit (git withheld by policy)'

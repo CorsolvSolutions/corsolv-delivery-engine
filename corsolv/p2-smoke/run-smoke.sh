@@ -54,15 +54,20 @@ echo
 echo "Retiring any supervisor running an older binary:"
 gc supervisor stop 2>&1 | tail -2 || true
 
+# Capture then match: `gc ... | grep -q` inverts under `set -o pipefail`
+# (grep -q exits early, gc takes SIGPIPE, pipefail promotes it), so a running
+# supervisor could read as "not running".
 for _ in $(seq 1 30); do
-    if gc supervisor status 2>&1 | grep -q 'running'; then
+    SUP_STATUS="$(gc supervisor status 2>&1 || true)"
+    if grep -q 'running' <<<"$SUP_STATUS"; then
         sleep 2
     else
         break
     fi
 done
 
-if gc supervisor status 2>&1 | grep -q 'running'; then
+SUP_STATUS="$(gc supervisor status 2>&1 || true)"
+if grep -q 'running' <<<"$SUP_STATUS"; then
     echo "FAIL: a supervisor is still running; it would serve stale provider config."
     gc supervisor status
     exit 56
