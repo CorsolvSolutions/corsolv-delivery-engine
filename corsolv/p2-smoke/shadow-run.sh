@@ -102,10 +102,30 @@ EVIDENCE="$HOME/corsolv-p2/shadow-evidence-$TIMESTAMP"
 mkdir -p "$EVIDENCE"
 
 FAILURES=0
+
+# D1/E3 — EVERY ASSERTION GETS A DURABLE IDENTITY.
+#
+# The console is not evidence: it is not committed, not attached to the run, and
+# gone once the terminal scrolls. A report that says only "OVERALL: FAIL (2)"
+# cannot tell a reader WHICH controls failed or why, so the durable artefact was
+# strictly weaker than the transcript nobody kept.
+#
+# Every pass/fail/info is appended to a TSV ledger as it happens -- control,
+# status, reason, and the bead/session/worktree it concerns -- so the report can
+# name each failure exactly, and a run that dies mid-flight still leaves the
+# controls it reached.
+CONTROLS="$EVIDENCE/controls.tsv"
+printf 'control\tstatus\treason\tsubject\n' > "$CONTROLS"
+record() { # record <control> <status> <reason> [subject]
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-}" "${4:-}" >> "$CONTROLS"
+}
+
 note() { printf '  %-56s %s\n' "$1" "$2"; }
-fail() { note "$1" "FAIL — $2"; FAILURES=$((FAILURES + 1)); }
-pass() { note "$1" 'PASS'; }
-info() { note "$1" "INFO — $2"; }
+fail() { note "$1" "FAIL — $2"; record "$1" FAIL "$2" "${3:-}"; FAILURES=$((FAILURES + 1)); }
+pass() { note "$1" 'PASS'; record "$1" PASS '' "${2:-}"; }
+info() { note "$1" "INFO — $2"; record "$1" INFO "$2" "${3:-}"; }
+# not_reached: a mandatory control that could not be evaluated. Never a pass.
+not_reached() { note "$1" "NOT REACHED — $2"; record "$1" NOT_REACHED "$2" "${3:-}"; FAILURES=$((FAILURES + 1)); }
 section() { printf '\n--- %s ---\n' "$1"; }
 
 # bead_is_closed <id> — true when the bead reads CLOSED.
@@ -183,23 +203,62 @@ echo "evidence: $EVIDENCE"
 # ---------------------------------------------------------------------------
 section '0. foundation'
 
+# E1 — SOURCE INTEGRITY. Refuse to run from a dirty tracked tree.
+#
+# An acceptance report that names a source SHA must have executed that source.
+# An earlier report recorded SHA 7c99403 while containing behaviour from later
+# uncommitted edits: the SHA was true of HEAD and false of what ran. That is an
+# evidence-integrity failure, not a cosmetic one, so this is a HARD ABORT before
+# anything is dispatched rather than one failure among many.
+SOURCE_SHA="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
+SOURCE_BRANCH="$(git -C "$SOURCE_REPO" rev-parse --abbrev-ref HEAD)"
+DIRTY="$(git -C "$SOURCE_REPO" status --porcelain)"
+if [ -n "$DIRTY" ]; then
+  fail 'source tree is clean' 'refusing to dispatch from a dirty tracked tree'
+  printf '%s\n' "$DIRTY" | sed 's/^/      /' | head -20
+  echo
+  echo 'ABORT: acceptance requires a clean committed source tree (E1).'
+  exit 70
+fi
+pass "source tree is clean ($SOURCE_BRANCH @ ${SOURCE_SHA:0:9})"
+
 install -m 755 "$SOURCE_REPO/bin/gc" "$HOME/.local/bin/gc"
 BIN_SHA="$(sha256sum "$SOURCE_REPO/bin/gc" | awk '{print $1}')"
-SOURCE_SHA="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
 
+# E2 — STALE SUPERVISOR IS A HARD ABORT, adjudicated by fingerprint.
+#
+# The supervisor materializes every session's launch command, so one running an
+# older image silently proves the previous build. But "is a supervisor running"
+# is the wrong test: the supervisor is a systemd user service here
+# (gascity-supervisor-gc-*.service) and is restarted within seconds of every
+# stop, so a wait-for-none loop can only time out -- which is exactly how a run
+# aborted while the supervisor was already executing the correct image.
+#
+# Require instead that the running image is byte-equal to the binary just
+# installed, read from /proc/<pid>/exe (the inode the kernel gave the process,
+# so it survives PATH being replaced underneath it). Not converging aborts
+# BEFORE dispatch; no later assertion is allowed to report PASS against an
+# unknown image.
 gc supervisor stop >/dev/null 2>&1 || true
-for _ in $(seq 1 30); do
-  sup="$(gc supervisor status 2>&1 || true)"
-  grep -q 'running' <<<"$sup" || break
+SUP_OK=0
+for _ in $(seq 1 45); do
+  SUP_PID="$(pgrep -f 'gc supervisor run' | head -1)"
+  if [ -n "$SUP_PID" ]; then
+    RUNNING_SHA="$(sha256sum "/proc/$SUP_PID/exe" 2>/dev/null | awk '{print $1}')"
+    [ "$RUNNING_SHA" = "$BIN_SHA" ] && { SUP_OK=1; break; }
+  fi
   sleep 2
 done
-sup="$(gc supervisor status 2>&1 || true)"
-if grep -q 'running' <<<"$sup"; then
-  fail 'no stale supervisor' 'a supervisor is still running'
-else
-  pass 'no stale supervisor'
+if [ "$SUP_OK" -ne 1 ]; then
+  fail 'supervisor runs the fingerprinted build' \
+       "expected $BIN_SHA, running ${RUNNING_SHA:-<none>} (pid ${SUP_PID:-none})"
+  echo
+  echo 'ABORT: refusing to dispatch against a supervisor of unknown provenance (E2).'
+  exit 70
 fi
-info 'gc version' "$(gc version 2>&1 | head -1)"
+pass "supervisor runs the fingerprinted build (pid $SUP_PID)"
+
+info 'gc version' "$(gc version 2>&1 | head -1) (dev is expected on an untagged branch)"
 info 'source sha' "$SOURCE_SHA"
 info 'binary sha256' "$BIN_SHA"
 
@@ -625,8 +684,9 @@ for id in "$A" "$B" "$C"; do
   wd_seen="$wd_seen${wd:-<unstamped>} "
 done
 info 'gc.work_dir per bead' "$wd_seen"
-fail 'distinct worktree ownership per parallel task' \
-     'NOT REACHED — pool target leaves gc.work_dir unstamped; needs per-task worktrees'
+not_reached 'distinct worktree ownership per parallel task' \
+     'pool target leaves gc.work_dir unstamped; needs per-task worktrees' \
+     "$A,$B,$C"
 
 cd "$CITY" && gc session list > "$EVIDENCE/sessions.txt" 2>&1
 cd "$TARGET" || exit 70
@@ -767,9 +827,28 @@ $(cat "$EVIDENCE/ready-after.txt")
 $(cat "$EVIDENCE/sessions.txt")
 \`\`\`
 
+## Control ledger
+
+Every mandatory assertion, with its own identity and result. Generated from
+\`controls.tsv\`, not from the console.
+
+| Control | Status | Reason | Subject |
+| --- | --- | --- | --- |
+$(awk -F'\t' 'NR>1 {printf "| %s | %s | %s | %s |\n", $1, $2, ($3==""?"—":$3), ($4==""?"—":$4)}' "$CONTROLS")
+
+### Failures and unreached controls
+
+$(awk -F'\t' 'NR>1 && ($2=="FAIL" || $2=="NOT_REACHED") {printf "- **%s** — %s: %s%s\n", $2, $1, ($3==""?"(no reason recorded)":$3), ($4==""?"":" [" $4 "]")}' "$CONTROLS" | grep . || echo 'None. Every mandatory control passed.')
+
 ## Evidence directory
 
 \`$EVIDENCE\`
+
+- \`controls.tsv\` — the control ledger above, machine-readable
+- \`parallelism.result\` — max concurrent workers, with pids and observation time
+- \`live-process.result\` — live permission-posture verdict, captured pre-drain
+- \`dep-tree.txt\`, \`ready-before.txt\`, \`ready-after.txt\` — the dependency gate
+- \`bead-*.txt\` — per-bead metadata as read back from the store
 EOF
 
 echo

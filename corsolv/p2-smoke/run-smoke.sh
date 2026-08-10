@@ -52,27 +52,48 @@ install -m 755 "$SOURCE_REPO/bin/gc" "$HOME/.local/bin/gc"
 # earlier was still resolving providers.
 echo
 echo "Retiring any supervisor running an older binary:"
-gc supervisor stop 2>&1 | tail -2 || true
+gc supervisor stop >/dev/null 2>&1 || true
 
-# Capture then match: `gc ... | grep -q` inverts under `set -o pipefail`
-# (grep -q exits early, gc takes SIGPIPE, pipefail promotes it), so a running
-# supervisor could read as "not running".
-for _ in $(seq 1 30); do
-    SUP_STATUS="$(gc supervisor status 2>&1 || true)"
-    if grep -q 'running' <<<"$SUP_STATUS"; then
-        sleep 2
-    else
-        break
+# STALENESS IS A FINGERPRINT QUESTION, NOT A PRESENCE QUESTION.
+#
+# The hazard this guards is stated in this file already: "A supervisor started
+# from an older binary keeps running that older code, and the supervisor -- not
+# this script -- is what materializes each session's launch command." The thing
+# that matters is therefore WHICH IMAGE the supervisor is executing, not whether
+# one exists.
+#
+# Testing for absence is also unsatisfiable here. The supervisor is a systemd
+# user service (cgroup gascity-supervisor-gc-*.service), so systemd restarts it
+# within seconds of every `gc supervisor stop`. A wait-for-none loop can only
+# ever time out, and this run aborted on exactly that -- with the supervisor
+# already executing the correct, freshly built image.
+#
+# So: stop it, let it come back, and require its running image to be byte-equal
+# to the binary just installed. /proc/<pid>/exe is the inode the kernel gave the
+# process, so it stays correct even though PATH was replaced underneath it.
+# Never converging is a HARD ABORT -- dispatching against an unknown image is
+# the failure this check exists to prevent.
+EXPECTED_GC_SHA="$(sha256sum "$HOME/.local/bin/gc" | awk '{print $1}')"
+SUP_OK=0
+for _ in $(seq 1 45); do
+    SUP_PID="$(pgrep -f 'gc supervisor run' | head -1)"
+    if [ -n "$SUP_PID" ]; then
+        RUNNING_SHA="$(sha256sum "/proc/$SUP_PID/exe" 2>/dev/null | awk '{print $1}')"
+        if [ "$RUNNING_SHA" = "$EXPECTED_GC_SHA" ]; then
+            SUP_OK=1
+            break
+        fi
     fi
+    sleep 2
 done
 
-SUP_STATUS="$(gc supervisor status 2>&1 || true)"
-if grep -q 'running' <<<"$SUP_STATUS"; then
-    echo "FAIL: a supervisor is still running; it would serve stale provider config."
-    gc supervisor status
+if [ "$SUP_OK" -ne 1 ]; then
+    echo "FAIL: no supervisor is running the expected binary; it would serve stale provider config."
+    echo "  expected: $EXPECTED_GC_SHA"
+    echo "  running : ${RUNNING_SHA:-<none>} (pid ${SUP_PID:-none})"
     exit 56
 fi
-echo "PASS - no stale supervisor"
+echo "PASS - supervisor runs the fingerprinted build (pid $SUP_PID, $EXPECTED_GC_SHA)"
 
 echo
 echo "Gas City:"
@@ -133,6 +154,28 @@ echo "$CITY"
 
 gc init "$CITY" --provider claude --yes
 
+# Make the typed work-record contract BLOCK rather than warn, for every managed
+# session in this city.
+#
+# `[workspace] env` is the documented boundary -- "workspace-wide environment
+# variables applied to every managed session" -- merged into the spawned agent's
+# environment in cmd/gc/template_resolve.go. Setting the variable in this shell
+# instead would govern only the harness's own `gc` calls, which is exactly how
+# the earlier P2.1 acceptance bead r2-xm1 came to record
+# `gc.work_outcome: shipped` while its own transcript shows `git commit` denied
+# by policy: an untruthful work record that nothing rejected.
+#
+# Written before the rig is added and before any session spawns, so the first
+# worker already has it.
+cat >> "$CITY/city.toml" <<'TOML'
+
+# Corsolv acceptance: a worker may not close a bead with an invented, absent, or
+# unearned disposition. `shipped` requires a reachable commit, which this policy
+# withholds from workers by design.
+[workspace.env]
+GC_WORK_RECORD_ENFORCE = "1"
+TOML
+
 echo
 echo "City status after init:"
 
@@ -189,7 +232,13 @@ done
 
 cd "$TARGET"
 
-TASK="Create the file CORSOLV_GASCITY_SMOKE.txt in the repository root. The file must contain exactly this single line: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS. Do not merely describe the change. Make the filesystem change, verify the exact file contents, and then mark the assigned Gas City work complete."
+# The closing sentences name the correct typed disposition. Under enforcement a
+# `shipped` claim without a commit is refused ("requires gc.work_commit"), and
+# this policy withholds git from workers, so `blocked` is the honest terminal
+# outcome for a worker that produced an artifact the controller must publish.
+# Naming it avoids the worker guessing a value the gate will reject -- earlier
+# runs invented `completed-uncommitted`, which is outside the vocabulary.
+TASK="Create the file CORSOLV_GASCITY_SMOKE.txt in the repository root. The file must contain exactly this single line: CORSOLV_GASCITY_MANAGED_CLAUDE_PASS. Do not merely describe the change. Make the filesystem change, verify the exact file contents, and then mark the assigned Gas City work complete. You are not permitted to run git; the controller performs publication. Close with gc.work_outcome=blocked plus a gc.work_blocked_reason; do NOT claim shipped, because you did not commit."
 
 echo
 echo "============================================================"
