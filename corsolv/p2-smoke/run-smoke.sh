@@ -14,6 +14,8 @@ export GOTOOLCHAIN=auto
 # burns down to the safety deadline.
 
 SOURCE_REPO="/mnt/d/Development/corsolv-delivery-engine"
+# shellcheck source=lib/sa-lib.sh
+. "$SOURCE_REPO/corsolv/p2-smoke/lib/sa-lib.sh"
 # engdocs/, not docs/: everything under docs/ publishes to the Mintlify site
 # and must appear in docs/docs.json navigation, which TestEveryDocsPageIsPublished
 # enforces. This is an engineering record, so it belongs in engdocs/.
@@ -287,7 +289,24 @@ START_EPOCH="$(date +%s)"
 DEADLINE_SECONDS=1200
 
 FINAL_WORK_STATE=""
+
+# LAST_SHOW is a MID-FLIGHT capture and must never reach the durable report.
+#
+# The defect it caused: this loop rendered the bead, then adjudicated closure
+# from a separate structured read. A bead that closed between those two reads
+# left LAST_SHOW holding the pre-close render, so the committed report could
+# state OPEN for a bead that had demonstrably closed — and the typed
+# gc.work_outcome, which only exists once the bead closes, was missing from the
+# evidence entirely. The predicate was right; the evidence path was stale.
+#
+# It is kept only for the deadline diagnostic, where a non-final render is the
+# correct thing to show. Everything the report publishes comes from
+# capture_final_bead_state, which re-reads the bead AFTER the terminal
+# predicate holds and refuses to store a non-terminal record as final.
 LAST_SHOW=""
+FINAL_SNAPSHOT_DIR="$CITY/.gc/corsolv-final-state"
+FINAL_SHOW=""
+FINAL_WORK_OUTCOME=""
 
 # Where the live-posture verdict is recorded. The independent assurance refuses
 # to pass without it, because after drain there is no worker left to inspect.
@@ -361,7 +380,28 @@ echo "============================================================"
 echo "GAS CITY WORK CLOSED"
 echo "============================================================"
 
-printf '%s\n' "$LAST_SHOW"
+# Re-read the authoritative record now that the terminal predicate holds. This
+# read — not anything captured while the bead was still open — is the run's
+# durable evidence.
+FINAL_STATUS="$(capture_final_bead_state "$WORK_ID" "$FINAL_SNAPSHOT_DIR" || true)"
+if [ "$FINAL_STATUS" != 'closed' ]; then
+    echo "FAIL: final authoritative read did not observe a closed bead (got '${FINAL_STATUS:-<none>}')."
+    exit 57
+fi
+FINAL_SHOW="$(final_render "$WORK_ID" "$FINAL_SNAPSHOT_DIR")"
+FINAL_WORK_OUTCOME="$(final_meta "$WORK_ID" "$FINAL_SNAPSHOT_DIR" 'gc.work_outcome')"
+
+# A close with no typed disposition is a silent close. It is only observable at
+# all because the evidence now comes from the post-transition record.
+if [ -z "$FINAL_WORK_OUTCOME" ]; then
+    echo "FAIL: closed bead carries no typed gc.work_outcome in its final state."
+    printf '%s\n' "$FINAL_SHOW"
+    exit 58
+fi
+
+printf '%s\n' "$FINAL_SHOW"
+echo
+echo "Final typed work outcome: $FINAL_WORK_OUTCOME"
 
 # ------------------------------------------------------------
 # Independent filesystem verification.
@@ -459,9 +499,15 @@ $CHANGED_FILES
 
 ## Gas City work evidence
 
+Read back from the store AFTER the closure predicate held, so this is the
+bead's terminal record rather than the last render taken while it was still
+open. The typed disposition below only exists on the closed record.
+
 \`\`\`
-$LAST_SHOW
+$FINAL_SHOW
 \`\`\`
+
+Typed work outcome: \`$FINAL_WORK_OUTCOME\`
 
 ## Gas City status
 
@@ -485,6 +531,8 @@ $RIG_STATUS
 - Required filesystem artifact exists: PASS
 - Artifact contents independently verified: PASS
 - No human continuation command during dispatched task: PASS
+- Durable evidence read from the terminal bead state: PASS
+- Typed work outcome present on the closed record: PASS
 
 ## Next gate
 
