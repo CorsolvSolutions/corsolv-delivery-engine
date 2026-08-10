@@ -119,13 +119,24 @@ section() { printf '\n--- %s ---\n' "$1"; }
 #
 # Command substitution reads the producer to completion first, and `case`
 # avoids a second pipeline, so neither the exit status nor SIGPIPE is in play.
+# bead_is_closed <id> — closure adjudicated by the STORE's status field.
+#
+# Never free text. The previous form matched *CLOSED* anywhere in the rendered
+# bead, and the rendering includes the worker-authored title and notes, so a
+# bead titled "this task is CLOSED ..." satisfied it while its status was
+# `open`. That was demonstrated, not theorised: bead mr2-c5n, status open,
+# passed the old predicate. Worker-controlled text must not be able to make a
+# non-closed bead look closed to an acceptance gate.
+#
+# `gc bd show --json` returns an ARRAY; [0].status is the authority. Absent or
+# unparseable status fails CLOSED (returns "not closed") rather than guessing.
 bead_is_closed() {
-  local show
-  show="$(gc bd show "$1" 2>/dev/null || true)"
-  case "$show" in
-    *CLOSED*|*Closed*|*closed*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local json status
+  json="$(gc bd show "$1" --json 2>/dev/null || true)"
+  [ -n "$json" ] || return 1
+  status="$(jq -r '.[0].status // empty' <<<"$json" 2>/dev/null)"
+  [ -n "$status" ] || return 1
+  [ "$status" = "closed" ]
 }
 
 # THE PIPEFAIL/SIGPIPE RULE FOR THIS FILE.
@@ -351,6 +362,24 @@ stamp_required() {
 stamp_required "$A" ALPHA.md
 stamp_required "$B" BETA.md
 stamp_required "$C" INDEX.md
+
+# M3 NEGATIVE CONTROL, run against this very rig.
+#
+# The closure predicate is the single most load-bearing assertion in this
+# harness: everything downstream keys off "the bead closed". Prove here, every
+# run, that worker-controlled free text cannot forge it. The spoof bead carries
+# CLOSED in its title while its status is open; the predicate must say no.
+SPOOF="$(mk_bead 'M3 control: this bead says CLOSED in its title but its status is open')"
+if [ -n "$SPOOF" ]; then
+  if bead_is_closed "$SPOOF"; then
+    fail 'closure predicate rejects free-text CLOSED' \
+         "$SPOOF has status open but the predicate reported closed"
+  else
+    pass 'closure predicate rejects free-text CLOSED (structured status only)'
+  fi
+else
+  fail 'closure predicate rejects free-text CLOSED' 'could not create the control bead'
+fi
 
 gc bd dep "$A" --blocks "$C" >/dev/null 2>&1
 gc bd dep "$B" --blocks "$C" >/dev/null 2>&1

@@ -271,17 +271,19 @@ while true; do
         gc bd show "$WORK_ID" 2>&1 || true
     )"
 
-    # `case`, not `printf ... | grep -q`. Under `set -o pipefail` that pipeline
-    # is inverted by its own success: grep -q exits at the first match, the
-    # producer takes SIGPIPE (141), and pipefail promotes that to the pipeline
-    # status -- so a MATCH can read as "not closed" and the wait runs to its
-    # deadline with the bead already closed. Pattern matching avoids the pipe.
-    case "$LAST_SHOW" in
-      *CLOSED*|*Closed*|*closed*)
+    # Closure is adjudicated by the STORE's status field, never by matching
+    # CLOSED in the rendered bead. That rendering includes the worker-authored
+    # title and notes, so a bead titled "... is CLOSED ..." satisfied the old
+    # text match while its status was `open` (demonstrated on bead mr2-c5n).
+    #
+    # `gc bd show --json` returns an ARRAY; [0].status is the authority. An
+    # absent or unparseable status keeps waiting rather than declaring success.
+    WORK_STATUS="$(jq -r '.[0].status // empty' \
+        <<<"$(gc bd show "$WORK_ID" --json 2>/dev/null)" 2>/dev/null)"
+    if [ "$WORK_STATUS" = 'closed' ]; then
         FINAL_WORK_STATE="CLOSED"
         break
-        ;;
-    esac
+    fi
 
     if [ "$ELAPSED" -ge "$DEADLINE_SECONDS" ]; then
 

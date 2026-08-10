@@ -119,10 +119,18 @@ fi
 # --- 4. worker lifecycle completion ---------------------------------------
 section '4. worker lifecycle completion'
 bead="$(cd "$CITY" && gc bd show "$WORK_ID" 2>&1)"
-if printf '%s' "$bead" | grep -q 'CLOSED'; then
-  pass 'work bead is CLOSED'
+# Closure comes from the store's status field, never from the rendered bead.
+# The rendering includes worker-authored title and notes, so matching CLOSED
+# anywhere in it let a bead titled "... is CLOSED ..." pass while its status was
+# `open` (demonstrated on bead mr2-c5n). An absent or unparseable status fails
+# rather than falling back to text.
+bead_status="$(jq -r '.[0].status // empty' <<<"$(gc bd show "$WORK_ID" --json 2>/dev/null)" 2>/dev/null)"
+if [ "$bead_status" = 'closed' ]; then
+  pass 'work bead is CLOSED (structured status)'
+elif [ -z "$bead_status" ]; then
+  fail 'work bead is CLOSED' 'no structured status available; refusing to adjudicate on rendered text'
 else
-  fail 'work bead is CLOSED' "$(printf '%s' "$bead" | head -1)"
+  fail 'work bead is CLOSED' "status=$bead_status"
 fi
 if printf '%s' "$bead" | grep -q 'gc.outcome: pass'; then
   pass 'control-plane outcome is pass'
