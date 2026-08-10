@@ -777,6 +777,30 @@ calculator — W3 dependent on both being **merged**).
 
 Per the POC brief, NOT REACHED is never reported as PASS.
 
+### What "merged" means, and why this is a recorded decision rather than a finding
+
+Criterion 10 says *"W3 started automatically only after W1 and W2 merged"*, and in the
+POC that word is unambiguously **remote**: the brief requires W3 to stay PENDING
+"until both W1 and W2 are merged", and permits a merge only after local tests,
+exact-SHA CI, and independent assurance all pass — a GitHub squash merge.
+
+The POC had no local/remote stage split. This programme introduces one, and no
+acceptance document in this repository defines it: the strings "S-A" and "S-B"
+appear nowhere in the tree. So the split is a scope decision layered on top of
+the authority, and it is written down here so it cannot quietly drift into a
+weakening:
+
+| Stage | "merged" means | Proves |
+| --- | --- | --- |
+| local coordination run | controller integrates validated A/B commits into the run base | dependency ordering, isolation, autonomous dispatch |
+| promoted run | remote GitHub merge after PR + exact-head CI + assurance | criteria 7, 11, and the remote half of 10 |
+
+**Criterion 10 is therefore satisfied only across BOTH stages.** The local run may
+not claim it: it proves the ordering property (C cannot start until A and B are
+integrated) against a controller-owned base, while the remote-merge half remains
+NOT REACHED until the promoted run. Reading the local half alone as criterion 10
+would be exactly the reinterpretation this table exists to prevent.
+
 P2.1 proved one bead end-to-end, which cannot show whether the engine holds
 project state. This uses a three-bead graph where C depends on A and B.
 
