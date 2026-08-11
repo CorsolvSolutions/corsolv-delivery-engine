@@ -99,23 +99,61 @@ about `D:/repo/.git` would say "relative" and be wrong in the way that matters.
 
 ## Acceptance
 
+The regression drives **both gits**: WSL git at `/usr/bin/git` creates the
+worktree, Windows git at `/mnt/c/Program Files/Git/cmd/git.exe` runs the prune.
+It is integration-tagged and skips where either git or a shared location is
+absent.
+
 | Criterion | Test |
 | --- | --- |
+| **The defect reproduces: a Windows prune destroys the WSL-native worktree** | `TestTheDefectiveStrategyLosesItsWorktreeToAWindowsPrune` |
+| **The repair holds: the same prune leaves the shared worktree registered** | `TestTheRepairedStrategySurvivesAWindowsPrune` |
+| Both gits resolve the same worktree to the same HEAD | same test |
+| Branch and HEAD unchanged across the prune | same test |
+| **The writer lock survives the prune** | same test |
+| A resumed run can still re-establish ownership | same test |
+| Cleanup stays deterministic | same test, and `TestSanctionedRemovalStillWorksOnADurableWorktree` |
 | Both namespaces recognised as absolute | `TestIsAbsoluteAnyOSSeesBothNamespaces` |
 | The failing shape is reported, with the remedy | `TestAWorktreeWithAbsolutePointersIsReportedNotDurable` |
 | Relative pointers are produced and pass | `TestAWorktreeWithRelativePointersIsDurable` |
-| **A prune does not remove a live worktree** | `TestARelativeWorktreeSurvivesAPruneAndKeepsItsIdentity` |
-| Branch and HEAD unchanged across a prune | same test |
-| **The writer lock survives a prune** | same test |
-| Cleanup stays deterministic | `TestSanctionedRemovalStillWorksOnADurableWorktree` |
+| An ordinary clone is not flagged | `TestAMainWorktreeHasNothingToBreak` |
 | The convention cannot be forgotten | `TestCrossOSWorktreeArgsAlwaysRequestRelativePaths` |
 
-The prune test runs the very command that caused the incident.
+### The regression discriminates, and that was measured
 
-## Standing limitation
+An earlier version of this section credited a **same-OS** prune test as the
+regression. It was not one. Measured directly:
 
-The regression runs `git worktree prune` within one OS. The real event needed
-two, which a test here cannot have — and does not need: git decides staleness by
-resolving the recorded pointer, so a pointer only one namespace can resolve is
-the entire mechanism, and that is what these tests exercise. The two-OS half was
-verified by hand and is recorded above.
+```
+ABSOLUTE pointers (the defective strategy), same-OS prune  -> SURVIVED
+RELATIVE pointers (the repaired strategy),  same-OS prune  -> SURVIVED
+```
+
+The git that recorded an absolute path resolves it perfectly well, so a same-OS
+prune never removes anything and the test passed against the defective strategy
+too. It proved nothing about the fix, and the only thing still distinguishing
+the two strategies was the pointer inspection in `CheckWorktreeCrossOSDurable` —
+a useful preflight guard, but an assertion about a string, not evidence that the
+failure mode is gone. That test is now named
+`TestARelativeWorktreeIsNotDisturbedBySameOSHousekeeping` and claims only what it
+earns.
+
+The cross-OS regression was then verified by mutation — the check the acceptance
+actually rests on. With `--relative-paths` removed from `CrossOSWorktreeArgs`:
+
+```
+--- FAIL: TestTheRepairedStrategySurvivesAWindowsPrune
+    windows git cannot read the shared worktree: exit status 128
+    (fatal: not a git repository: (NULL))
+```
+
+and with the fix restored it passes. Windows git's own view names the defect
+before the prune even runs:
+
+```
+D:/Development/.../repo         24595ab [main]
+/home/corsolvtech/...-wt        24595ab [defective] prunable   <-- about to be deleted
+```
+
+After that prune the worktree is unusable from WSL with the identical error the
+incident produced — `fatal: not a git repository: .../worktrees/<name>`.

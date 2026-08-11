@@ -118,9 +118,17 @@ func TestAWorktreeWithRelativePointersIsDurable(t *testing.T) {
 	}
 }
 
-func TestARelativeWorktreeSurvivesAPruneAndKeepsItsIdentity(t *testing.T) {
-	// The regression proper. `git worktree prune` is precisely the command that
-	// removed the pilot and D8 registrations, so it is the one run here.
+func TestARelativeWorktreeIsNotDisturbedBySameOSHousekeeping(t *testing.T) {
+	// NOT the regression for the cross-OS defect, despite running the command
+	// that caused it. Measured: a worktree with absolute pointers survives this
+	// same-OS prune too, because the git that recorded those paths resolves them
+	// perfectly well. So this test would pass against the defective strategy and
+	// proves nothing about the repair.
+	//
+	// What it does earn: relative pointers are not themselves a regression —
+	// ordinary housekeeping still leaves the worktree, its identity and a held
+	// writer lock alone. The discriminating evidence, which drives both gits,
+	// is in worktree_crossos_test.go.
 	repo := newRepo(t, testOrigin)
 	linked := filepath.Join(filepath.Dir(repo), "linked-prune")
 	t.Cleanup(func() { os.RemoveAll(linked) }) //nolint:errcheck
