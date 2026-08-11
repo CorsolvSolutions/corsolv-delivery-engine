@@ -115,3 +115,24 @@ reason  = "a dependency-tree or workspace fault rather than a defect in the chan
 pattern = "supabase.*(connection refused|not running)|ECONNREFUSED .*54322"
 class   = "environment"
 reason  = "the local Supabase stack is not up; a host condition, not a code fault"
+
+# Found by the pilot's first run. scripts/validate-uat-environment.ps1.test.mjs
+# shells out to `pwsh` on purpose — it runs the real PowerShell gate rather than
+# a re-implementation of it, so it cannot drift from what CI executes. This host's
+# WSL has no pwsh, so execFileSync returns empty stdout and five assertions fail.
+# GUK BPM's own CI runs ubuntu-latest, where pwsh is preinstalled, so this passes
+# there. That is an environment condition on this host, not a defect in the code
+# under test, and filing it as a code defect would send someone to fix working
+# software.
+[[classify]]
+pattern = "validate-uat-environment\\.ps1\\.test\\.mjs|execFileSync.*pwsh|expected '' to contain 'FAIL - Currently logged-in Azure"
+class   = "environment"
+reason  = "the PowerShell-gate tests need pwsh, which this host's WSL does not have; GUK BPM's CI runs ubuntu-latest where it is preinstalled"
+
+# The publisher refuses to overwrite a delivery projection it did not author.
+# That refusal is a decision for a person, not a fault to retry: the path was
+# authorised, the act was not, and asking again cannot change either.
+[[classify]]
+pattern = "REFUSING TO PUBLISH"
+class   = "human-decision"
+reason  = "the publish target belongs to the project rather than to this run; only a person can choose to replace it"

@@ -546,6 +546,36 @@ func TestCompletionEventIsWrittenForANotificationLayerToFind(t *testing.T) {
 	}
 }
 
+func TestDeliveryProjectionExistsWhileTheRunIsStillRunning(t *testing.T) {
+	// The GUK BPM pilot found this. Its evidence task exists to commit the
+	// delivery projection into the target repository, and a projection written
+	// only after the run has ended does not exist while the run is still
+	// executing the task that needs it.
+	f := newRunFixture(t)
+	f.spec.PublishPath = filepath.Join(f.stateDir, "PROJECT-STATE.yml")
+	s := f.begin(t, Plan{RunID: "run-projection", Tasks: []Task{
+		{
+			ID: "ship", Title: "ship", Band: BandPrimary, Argv: sh("true"),
+			DeliveryStatus: "merged", CompletionGate: "a gate", Phase: "p",
+		},
+		{
+			// Reads the projection the way the pilot's evidence task does.
+			ID: "consume", Title: "consume the projection", Band: BandEvidence,
+			Argv:  sh("test -s " + filepath.Join(f.stateDir, "PROJECT-STATE.yml")),
+			Needs: []string{"ship"},
+		},
+	}})
+
+	event, err := s.Runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	consume, _ := s.Queue.Task("consume")
+	if consume.State != TaskSucceeded {
+		t.Fatalf("a task consuming the projection mid-run = %s, want succeeded (%s)", consume.State, event.Reason)
+	}
+}
+
 func TestFailureOutputIsCapturedWhereAPersonCanReadIt(t *testing.T) {
 	// The journal keeps one line per record, so a failure's actual output has
 	// nowhere to go in it. Without this the run says a task failed and cannot
