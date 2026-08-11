@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // --- helper lookPath functions ---
@@ -145,7 +147,7 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", cs, "claude")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
-	wantArgs := []string{"--dangerously-skip-permissions", "--effort", "max"}
+	wantArgs := []string{"--permission-mode", "dontAsk", claudeBoundedAutoArg, "--effort", "max"}
 	if len(defaultArgs) != len(wantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
 	} else {
@@ -2623,4 +2625,524 @@ provider = "codex"
 	if workerProvider.PromptFlag != "--message" {
 		t.Errorf("worker prompt flag = %q, want %q", workerProvider.PromptFlag, "--message")
 	}
+}
+
+// --- Corsolv bounded-worker permission policy ------------------------------
+//
+// The literals below are written out rather than referencing
+// workerbuiltin.ClaudeBoundedAutoAllowedToolsArg on purpose. Asserting against
+// the production constant would make every expectation move with it, so a
+// change that widened the grant would still pass. That is not hypothetical: an
+// earlier revision of this suite did reference the constant and a mutation
+// adding bare Bash went undetected.
+
+// claudeMandatoryBashGrants is the complete set of shell grants the autonomous
+// policy permits -- the mandatory pool-worker lifecycle and nothing else.
+//
+// Two entries are scoped tighter than their command family deliberately:
+//
+//   - `gc hook --claim`, not `gc hook`, because `gc hook run -- <gc args...>`
+//     re-executes the binary with arbitrary arguments and would be
+//     `Bash(gc:*)` by another name.
+//   - `gc runtime drain-ack`, not `gc runtime`, because that family also holds
+//     the controller-side `drain` and `undrain`.
+//
+// Optional paths are excluded: `gc mail inbox` / `gc mail send` (escalation)
+// and `gc runtime request-restart` (context exhaustion) are conditional, not
+// lifecycle.
+var claudeMandatoryBashGrants = []string{
+	"Bash(gc hook --claim:*)",
+	"Bash(gc bd show:*)",
+	"Bash(gc bd mol current:*)",
+	"Bash(gc bd mol progress:*)",
+	"Bash(gc bd heartbeat:*)",
+	"Bash(gc bd update:*)",
+	"Bash(gc bd close:*)",
+	"Bash(gc convoy status:*)",
+	"Bash(gc runtime drain-ack:*)",
+}
+
+var claudeBoundedAutoTools = append(
+	[]string{"Read", "Write", "Edit", "Glob", "Grep"},
+	claudeMandatoryBashGrants...,
+)
+
+const claudeBoundedAutoArg = "--allowedTools=Read,Write,Edit,Glob,Grep," +
+	"Bash(gc hook --claim:*)," +
+	"Bash(gc bd show:*)," +
+	"Bash(gc bd mol current:*)," +
+	"Bash(gc bd mol progress:*)," +
+	"Bash(gc bd heartbeat:*)," +
+	"Bash(gc bd update:*)," +
+	"Bash(gc bd close:*)," +
+	"Bash(gc convoy status:*)," +
+	"Bash(gc runtime drain-ack:*)"
+
+// claudeBoundedAutoShellArg is claudeBoundedAutoArg as it appears inside a
+// rendered command STRING. The grants contain spaces, so shellquote.Join wraps
+// the token in single quotes -- which is exactly what keeps it a single argv
+// element when the command is split again.
+const claudeBoundedAutoShellArg = `'` + claudeBoundedAutoArg + `'`
+
+func parseAllowedToolsArg(tok string) ([]string, bool) {
+	const prefix = "--allowedTools="
+	if !strings.HasPrefix(tok, prefix) {
+		return nil, false
+	}
+	return strings.Split(strings.TrimPrefix(tok, prefix), ","), true
+}
+
+func allowedToolsIn(argv []string) ([]string, bool) {
+	for _, arg := range argv {
+		if tools, ok := parseAllowedToolsArg(arg); ok {
+			return tools, true
+		}
+	}
+	return nil, false
+}
+
+// assertNoPermissionBypass fails when argv grants a blanket permission bypass,
+// or carries any shell grant outside the approved set. Exact-match allow, not a
+// pattern heuristic: bare `Bash`, `Bash(gc:*)`, `Bash(gc hook:*)` and
+// `Bash(git:*)` all fail.
+func assertNoPermissionBypass(t *testing.T, argv []string) {
+	t.Helper()
+	assertNoPermissionBypassBeyond(t, argv, claudeMandatoryBashGrants)
+}
+
+// assertNoPermissionBypassBeyond is assertNoPermissionBypass parameterised by
+// the approved shell set, so a second mode can be pinned just as exactly as the
+// first instead of loosening the shared helper. bounded-auto keeps the
+// lifecycle-only set; bounded-project passes lifecycle + project gates. Neither
+// mode can drift into the other's surface without failing.
+func assertNoPermissionBypassBeyond(t *testing.T, argv []string, approved []string) {
+	t.Helper()
+	for _, arg := range argv {
+		if arg == "--dangerously-skip-permissions" || arg == "--allow-dangerously-skip-permissions" {
+			t.Errorf("argv %v must not contain a permission bypass (%s)", argv, arg)
+		}
+	}
+	tools, ok := allowedToolsIn(argv)
+	if !ok {
+		return
+	}
+	for _, tool := range tools {
+		if !strings.HasPrefix(tool, "Bash") {
+			continue
+		}
+		if !slices.Contains(approved, tool) {
+			t.Errorf("argv %v grants shell access %q, which is not in the approved set %v",
+				argv, tool, approved)
+		}
+	}
+}
+
+// assertLifecycleGrantsPresent fails when any mandatory lifecycle permission is
+// missing. Each gates a step the worker cannot skip: without the claim grant it
+// never starts, without show/heartbeat/update/close it cannot finish the bead,
+// and without drain-ack the controller never reclaims the session.
+func assertLifecycleGrantsPresent(t *testing.T, argv []string) {
+	t.Helper()
+	tools, ok := allowedToolsIn(argv)
+	if !ok {
+		t.Errorf("argv %v has no --allowedTools= token; no lifecycle grant is present", argv)
+		return
+	}
+	for _, want := range claudeMandatoryBashGrants {
+		if !slices.Contains(tools, want) {
+			t.Errorf("argv %v is missing mandatory lifecycle grant %q", argv, want)
+		}
+	}
+}
+
+// TestClaudeBoundedAutoIsTheAutonomousDefault pins that an autonomous claude
+// worker launches bounded rather than with a blanket bypass.
+func TestClaudeBoundedAutoIsTheAutonomousDefault(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+
+	args := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--permission-mode", "dontAsk", claudeBoundedAutoArg, "--effort", "max"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", args, wantArgs)
+	}
+	assertNoPermissionBypass(t, args)
+	assertLifecycleGrantsPresent(t, args)
+}
+
+// TestClaudeBoundedAutoGrantsOnlyLifecycleTools pins the exact tool surface.
+// Widening it is a deliberate policy change and must break this test.
+func TestClaudeBoundedAutoGrantsOnlyLifecycleTools(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+
+	args := rp.ResolveDefaultArgs()
+	var found []string
+	seen := 0
+	for _, arg := range args {
+		if tools, ok := parseAllowedToolsArg(arg); ok {
+			found = tools
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want exactly one --allowedTools= token, got %d", args, seen)
+	}
+	if !reflect.DeepEqual(found, claudeBoundedAutoTools) {
+		t.Errorf("allowed tools = %v, want %v", found, claudeBoundedAutoTools)
+	}
+	assertNoPermissionBypass(t, args)
+}
+
+// TestClaudeBoundedAutoSurvivesIntoLaunchCommand proves the policy reaches the
+// command the managed process actually runs.
+func TestClaudeBoundedAutoSurvivesIntoLaunchCommand(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	got, err := BuildProviderLaunchCommand("", rp, nil, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+
+	argv := shellquote.Split(got.Command)
+	wantArgv := []string{
+		"claude",
+		"--permission-mode", "dontAsk",
+		claudeBoundedAutoArg,
+		"--effort", "max",
+	}
+	if !reflect.DeepEqual(argv, wantArgv) {
+		t.Fatalf("argv = %v, want %v", argv, wantArgv)
+	}
+	assertNoPermissionBypass(t, argv)
+	assertLifecycleGrantsPresent(t, argv)
+}
+
+// TestClaudeAllowedToolsCannotSwallowPositionalPrompt pins the one ordering
+// property that is a real CLI contract rather than cosmetic adjacency.
+//
+// `--allowedTools <tools...>` is variadic: written as separate tokens it
+// consumes every following non-flag argument. Claude's prompt_mode is "arg",
+// so the startup prompt is appended as a bare positional -- and the allowlist
+// is not always followed by another flag (`--settings` is only appended when
+// the settings file exists, and a city may configure effort away). Emitting the
+// grants as one `=`-bound token is what keeps the prompt intact.
+//
+// Verified against claude 2.1.226: `--allowedTools A B C PROMPT` loses PROMPT,
+// while `--allowedTools=A,B,C PROMPT` preserves it.
+func TestClaudeAllowedToolsCannotSwallowPositionalPrompt(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	// Worst case: no settings file on disk, and effort configured away, so
+	// nothing follows the allowlist.
+	got, err := BuildProviderLaunchCommand("", rp, map[string]string{"effort": ""}, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+
+	argv := shellquote.Split(got.Command)
+	if len(argv) == 0 {
+		t.Fatal("empty launch command")
+	}
+	if _, trailing := parseAllowedToolsArg(argv[len(argv)-1]); !trailing {
+		t.Fatalf("argv = %v, want the allowlist trailing in this configuration -- "+
+			"if the launch shape changed, re-derive the hazard", argv)
+	}
+	for _, arg := range argv {
+		if !strings.HasPrefix(arg, "--allowedTools") {
+			continue
+		}
+		if _, ok := parseAllowedToolsArg(arg); !ok {
+			t.Fatalf("allowlist token %q must bind its tools with '=' so the variadic "+
+				"cannot swallow the appended positional prompt (argv %v)", arg, argv)
+		}
+	}
+	assertNoPermissionBypass(t, argv)
+}
+
+// --- Corsolv bounded-project permission policy -----------------------------
+//
+// bounded-project is bounded-auto plus three deterministic project validation
+// gates, so a worker can check its own work before closing a bead. It is
+// OPT-IN: the autonomous default stays bounded-auto.
+//
+// As above, the literals here are written out rather than referencing
+// workerbuiltin.ClaudeBoundedProjectAllowedToolsArg. Asserting against the
+// production constant would make every expectation move with it, so a change
+// that widened the grant would still pass — the exact failure this suite
+// already suffered once.
+
+// claudeProjectValidationGrants is the project half of bounded-project, and
+// nothing else. Each is a named script, never a family:
+//
+//   - `Bash(npm run:*)` is absent because it grants every script in
+//     package.json — including one the worker just added — and `npm run` is a
+//     general execution surface, not a validation gate.
+//   - `Bash(npm:*)` is absent because it would carry `npm install` (dependency
+//     mutation) and `npm publish` (package publication).
+//   - `npx` is absent because it fetches and executes arbitrary packages.
+var claudeProjectValidationGrants = []string{
+	"Bash(npm run typecheck:*)",
+	"Bash(npm run build:*)",
+	"Bash(npm test:*)",
+}
+
+var claudeBoundedProjectBashGrants = append(
+	append([]string{}, claudeMandatoryBashGrants...),
+	claudeProjectValidationGrants...,
+)
+
+var claudeBoundedProjectTools = append(
+	append([]string{"Read", "Write", "Edit", "Glob", "Grep"}, claudeMandatoryBashGrants...),
+	claudeProjectValidationGrants...,
+)
+
+const claudeBoundedProjectArg = claudeBoundedAutoArg +
+	",Bash(npm run typecheck:*)" +
+	",Bash(npm run build:*)" +
+	",Bash(npm test:*)"
+
+// claudeDeniedShellSurfaces are grants whose presence would hand a worker
+// authority the controller must keep. They are asserted absent by exact string
+// AND by subsumption, because the danger is usually a widened family rather
+// than the literal rule: `Bash(npm:*)` never says "install", it merely permits
+// it.
+var claudeDeniedShellSurfaces = []string{
+	"Bash",
+	"Bash(:*)",
+	"Bash(gc:*)",
+	"Bash(gc hook:*)",
+	"Bash(gc runtime:*)",
+	"Bash(git:*)",
+	"Bash(gh:*)",
+	"Bash(npm:*)",
+	"Bash(npm run:*)",
+	"Bash(npm install:*)",
+	"Bash(npm publish:*)",
+	"Bash(npx:*)",
+}
+
+// boundedProjectResolved resolves a claude agent that has explicitly opted in
+// to bounded-project, which is the only way to reach the mode.
+func boundedProjectResolved(t *testing.T) *ResolvedProvider {
+	t.Helper()
+	agent := &Agent{
+		Name:           "project-worker",
+		Provider:       "claude",
+		OptionDefaults: map[string]string{"permission_mode": "bounded-project"},
+	}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+	return rp
+}
+
+// TestClaudeBoundedProjectIsOptInNotTheDefault pins the opt-in property: a
+// worker gains project commands because an operator selected them for that
+// agent, never by default. If this fails, every autonomous claude worker in
+// every city has silently acquired the ability to run project builds.
+func TestClaudeBoundedProjectIsOptInNotTheDefault(t *testing.T) {
+	defaultAgent := &Agent{Name: "worker", Provider: "claude"}
+	rp, err := ResolveProvider(defaultAgent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+	args := rp.ResolveDefaultArgs()
+	tools, ok := allowedToolsIn(args)
+	if !ok {
+		t.Fatalf("ResolveDefaultArgs() = %v, want an --allowedTools= token", args)
+	}
+	for _, grant := range claudeProjectValidationGrants {
+		if slices.Contains(tools, grant) {
+			t.Errorf("the DEFAULT autonomous mode granted %q; project gates must be opt-in", grant)
+		}
+	}
+	if !reflect.DeepEqual(tools, claudeBoundedAutoTools) {
+		t.Errorf("default allowed tools = %v, want the bounded-auto set %v", tools, claudeBoundedAutoTools)
+	}
+	// The opt-in must actually reach a different surface, or "opt-in" is
+	// vacuous.
+	optedIn := boundedProjectResolved(t).ResolveDefaultArgs()
+	optedInTools, ok := allowedToolsIn(optedIn)
+	if !ok {
+		t.Fatalf("opted-in args %v carry no --allowedTools= token", optedIn)
+	}
+	for _, grant := range claudeProjectValidationGrants {
+		if !slices.Contains(optedInTools, grant) {
+			t.Errorf("opting in did not grant %q (tools %v)", grant, optedInTools)
+		}
+	}
+}
+
+// TestClaudeBoundedProjectGrantsExactSurface pins the whole tool list. Widening
+// it is a deliberate policy change and must break this test.
+func TestClaudeBoundedProjectGrantsExactSurface(t *testing.T) {
+	args := boundedProjectResolved(t).ResolveDefaultArgs()
+
+	var found []string
+	seen := 0
+	for _, arg := range args {
+		if tools, ok := parseAllowedToolsArg(arg); ok {
+			found = tools
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("args = %v, want exactly one --allowedTools= token, got %d", args, seen)
+	}
+	if !reflect.DeepEqual(found, claudeBoundedProjectTools) {
+		t.Errorf("allowed tools = %v, want %v", found, claudeBoundedProjectTools)
+	}
+	for _, want := range []string{"Read", "Write", "Edit", "Glob", "Grep"} {
+		if !slices.Contains(found, want) {
+			t.Errorf("bounded-project is missing required tool %q", want)
+		}
+	}
+	assertLifecycleGrantsPresent(t, args)
+	assertNoPermissionBypassBeyond(t, args, claudeBoundedProjectBashGrants)
+}
+
+// TestClaudeBoundedProjectPreservesDontAskAndSingleSelection proves the opt-in
+// reaches the command the managed process actually runs, exactly once, with
+// dontAsk intact.
+//
+// "Exactly once" is load-bearing: a second --allowedTools token would make the
+// effective surface depend on which one the CLI honors, which is not something
+// an acceptance run should have to reason about.
+func TestClaudeBoundedProjectPreservesDontAskAndSingleSelection(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	got, err := BuildProviderLaunchCommand("", rp, map[string]string{"permission_mode": "bounded-project"}, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	argv := shellquote.Split(got.Command)
+
+	wantArgv := []string{
+		"claude",
+		"--permission-mode", "dontAsk",
+		claudeBoundedProjectArg,
+		"--effort", "max",
+	}
+	if !reflect.DeepEqual(argv, wantArgv) {
+		t.Fatalf("argv = %v, want %v", argv, wantArgv)
+	}
+	if !slices.Contains(argv, "dontAsk") {
+		t.Errorf("argv %v lost --permission-mode dontAsk", argv)
+	}
+	assertLifecycleGrantsPresent(t, argv)
+	assertNoPermissionBypassBeyond(t, argv, claudeBoundedProjectBashGrants)
+}
+
+// TestClaudeBoundedProjectDeniesPublicationAndInstallAuthority is the negative
+// half, stated as its own test so a regression names the thing that broke.
+//
+// Publication authority is the controller's. A worker that could run git, gh,
+// or an arbitrary shell would be able to commit, push, open a PR or merge —
+// which is not a stricter version of this policy, it is the absence of one.
+// npm install / publish / npx are denied for a different reason: they mutate
+// dependencies or execute fetched code, and neither is validation.
+func TestClaudeBoundedProjectDeniesPublicationAndInstallAuthority(t *testing.T) {
+	args := boundedProjectResolved(t).ResolveDefaultArgs()
+	tools, ok := allowedToolsIn(args)
+	if !ok {
+		t.Fatalf("args = %v, want an --allowedTools= token", args)
+	}
+
+	for _, denied := range claudeDeniedShellSurfaces {
+		if slices.Contains(tools, denied) {
+			t.Errorf("bounded-project grants %q; publication and install authority must stay with the controller", denied)
+		}
+	}
+
+	// Subsumption, not just literal absence: a granted rule must never be a
+	// prefix-family of a denied command. `Bash(npm:*)` would permit
+	// `npm install` without the string "install" appearing anywhere.
+	for _, tool := range tools {
+		if !strings.HasPrefix(tool, "Bash") {
+			continue
+		}
+		if !slices.Contains(claudeBoundedProjectBashGrants, tool) {
+			t.Errorf("bounded-project grants unapproved shell surface %q", tool)
+			continue
+		}
+		inner, hadParen := strings.CutPrefix(tool, "Bash(")
+		if !hadParen {
+			t.Errorf("bounded-project grants bare shell access %q", tool)
+			continue
+		}
+		prefix := strings.TrimSuffix(strings.TrimSuffix(inner, ")"), ":*")
+		for _, forbidden := range []string{"git", "gh", "npm install", "npm publish", "npx"} {
+			if prefix == forbidden || strings.HasPrefix(forbidden, prefix+" ") {
+				t.Errorf("granted rule %q subsumes forbidden command %q", tool, forbidden)
+			}
+		}
+	}
+
+	for _, arg := range args {
+		if arg == "--dangerously-skip-permissions" || arg == "--allow-dangerously-skip-permissions" {
+			t.Errorf("bounded-project must never carry a permission bypass (%s)", arg)
+		}
+	}
+}
+
+// TestClaudeBoundedProjectAllowsTheAuthorisedProjectGates is the positive
+// counterpart: the three gates the mode exists to permit must be present, or an
+// opted-in worker cannot validate its own work and will close beads it never
+// checked.
+func TestClaudeBoundedProjectAllowsTheAuthorisedProjectGates(t *testing.T) {
+	args := boundedProjectResolved(t).ResolveDefaultArgs()
+	tools, ok := allowedToolsIn(args)
+	if !ok {
+		t.Fatalf("args = %v, want an --allowedTools= token", args)
+	}
+	for _, want := range claudeProjectValidationGrants {
+		if !slices.Contains(tools, want) {
+			t.Errorf("bounded-project is missing authorized project gate %q", want)
+		}
+	}
+}
+
+// TestClaudeBoundedProjectAllowlistCannotSwallowPositionalPrompt applies the
+// same variadic hazard already pinned for bounded-auto. The grant list is
+// longer here, which changes nothing about the hazard and everything about how
+// much is lost if the encoding regresses.
+func TestClaudeBoundedProjectAllowlistCannotSwallowPositionalPrompt(t *testing.T) {
+	spec := BuiltinProviders()["claude"]
+	rp := specToResolved("claude", &spec)
+
+	got, err := BuildProviderLaunchCommand("", rp, map[string]string{
+		"permission_mode": "bounded-project",
+		"effort":          "",
+	}, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	argv := shellquote.Split(got.Command)
+	if len(argv) == 0 {
+		t.Fatal("empty launch command")
+	}
+	if _, trailing := parseAllowedToolsArg(argv[len(argv)-1]); !trailing {
+		t.Fatalf("argv = %v, want the allowlist trailing in this configuration -- "+
+			"if the launch shape changed, re-derive the hazard", argv)
+	}
+	for _, arg := range argv {
+		if !strings.HasPrefix(arg, "--allowedTools") {
+			continue
+		}
+		if _, ok := parseAllowedToolsArg(arg); !ok {
+			t.Fatalf("allowlist token %q must bind its tools with '=' (argv %v)", arg, argv)
+		}
+	}
+	assertNoPermissionBypassBeyond(t, argv, claudeBoundedProjectBashGrants)
 }

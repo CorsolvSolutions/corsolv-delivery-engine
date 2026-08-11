@@ -76,6 +76,101 @@ type BuiltinProviderSpec struct {
 
 func boolPtr(b bool) *bool { return &b }
 
+// ClaudeBoundedAutoAllowedToolsArg is the tool surface granted by the
+// `bounded-auto` permission mode: the mode an autonomous pool worker launches
+// with by default.
+//
+// `--permission-mode dontAsk` is deny-by-default rather than "permit without
+// prompting", so this list is the entire surface the worker gets. Three
+// properties are load-bearing, each verified against the Claude CLI (v2.1.226):
+//
+//   - Edit-and-inspect tools, plus shell grants enumerated per `gc` subcommand.
+//     Bare `Bash` and `Bash(gc:*)` are both absent, so the mode is never a
+//     blanket shell or blanket `gc` grant, and no `git` grant exists at all —
+//     commit, push, merge, and release stay with the controller.
+//   - The shell grants are exactly the mandatory pool-worker lifecycle, derived
+//     from `packs/core/assets/prompts/pool-worker.md` (claim → show → molecule
+//     steps → close → drain-ack) and `packs/core/formulas/mol-do-work.toml`
+//     (convoy status → bd show → heartbeat → bd update --status=closed →
+//     drain-ack). Optional paths are excluded: `gc mail inbox`/`gc mail send`
+//     (escalation) and `gc runtime request-restart` (context exhaustion).
+//   - `gc hook` is scoped to `--claim`, NOT the whole subcommand. `gc hook run
+//     -- <gc args...>` re-executes this binary with arbitrary arguments, so
+//     `Bash(gc hook:*)` would be equivalent to `Bash(gc:*)`. Likewise
+//     `gc runtime` is scoped to `drain-ack`, because the same family carries
+//     the controller-side `drain` and `undrain`.
+//   - The tools are attached with `=` as a SINGLE argv token rather than
+//     `--allowedTools A B C`. `--allowedTools <tools...>` is variadic: in the
+//     space-separated form it greedily consumes every following non-flag token,
+//     so if it ever lands last it swallows the positional prompt that Claude's
+//     `prompt_mode = "arg"` appends. The `=` form binds the value to one token
+//     and is immune to that, which keeps the flag order-independent.
+//
+// The allow/deny behavior of every rule is verified against the real
+// permission engine by corsolv/p2-smoke/policy-matrix.sh.
+const ClaudeBoundedAutoAllowedToolsArg = "--allowedTools=Read,Write,Edit,Glob,Grep," +
+	"Bash(gc hook --claim:*)," +
+	"Bash(gc bd show:*)," +
+	"Bash(gc bd mol current:*)," +
+	"Bash(gc bd mol progress:*)," +
+	"Bash(gc bd heartbeat:*)," +
+	"Bash(gc bd update:*)," +
+	"Bash(gc bd close:*)," +
+	"Bash(gc convoy status:*)," +
+	"Bash(gc runtime drain-ack:*)"
+
+// ClaudeBoundedProjectAllowedToolsArg is `bounded-auto` plus the deterministic
+// project validation gates a worker needs to check its own work before closing:
+// typecheck, build, test. It is OPT-IN — an operator selects it per agent via
+// `option_defaults`; the autonomous default stays `bounded-auto`, which grants
+// no project commands at all.
+//
+// WHAT THIS IS NOT. This is not an arbitrary-code sandbox, and describing it as
+// one would be false. `Write` and `Edit` let the worker alter package.json, and
+// `npm run build` / `npm test` execute whatever that file names — `npm test`
+// here even runs `npm run build` first. So these three grants can transitively
+// execute worker-modified project code. Enumerating script names buys scope
+// clarity, not containment.
+//
+// The boundary that actually holds is the AUTHORITY split, which no amount of
+// worker-side scripting can cross:
+//
+//   - the worker may mutate authorized repository content and run permitted
+//     project validation;
+//   - the controller alone reviews, stages, commits, pushes, opens the PR and
+//     merges — and inspects the changed-file set before publishing. A change to
+//     package.json, or to any file the bead did not authorize, must stop
+//     publication rather than ride along with it.
+//
+// That is why no git, gh, or `gc` shell family appears below and why widening
+// this list is never the fix for a worker that "needs to publish".
+//
+// Scoping notes, each deliberate:
+//
+//   - Script names are enumerated (`npm run typecheck`, `npm run build`), never
+//     `Bash(npm run:*)` — that would grant every script in package.json,
+//     including ones the worker just added, and `npm run` is a general
+//     execution surface.
+//   - `Bash(npm:*)` is absent, so `npm install` and `npm publish` are denied:
+//     dependency mutation and package publication are not validation.
+//   - `npx` is absent — it fetches and executes arbitrary packages.
+//   - `npm test` is granted as its own top-level form because that is how the
+//     POC project invokes tests; it is not reachable through the two `npm run`
+//     grants.
+//
+// The allow/deny behavior of every rule is verified against the real permission
+// engine by corsolv/p2-smoke/policy-matrix.sh, and the assertions that pin this
+// list are proved capable of failing by corsolv/p2-smoke/policy-mutations.sh.
+const ClaudeBoundedProjectAllowedToolsArg = ClaudeBoundedAutoAllowedToolsArg +
+	"," + ClaudeProjectValidationGrants
+
+// ClaudeProjectValidationGrants is the project half of `bounded-project`, kept
+// separate so the lifecycle half and the project half can be reasoned about —
+// and mutated in the policy proofs — independently.
+const ClaudeProjectValidationGrants = "Bash(npm run typecheck:*)," +
+	"Bash(npm run build:*)," +
+	"Bash(npm test:*)"
+
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
 type ProfileIdentity struct {
@@ -108,8 +203,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamBaseURLEnv:   "ANTHROPIC_BASE_URL",
 		UpstreamAPIKeyEnv:    "ANTHROPIC_API_KEY",
 		UpstreamAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN",
+		// Autonomous launches run bounded rather than with a blanket bypass.
+		// `bounded-auto` is dontAsk plus exactly the pool-worker lifecycle
+		// grants; see ClaudeBoundedAutoAllowedToolsArg.
 		OptionDefaults: map[string]string{
-			"permission_mode": "unrestricted",
+			"permission_mode": "bounded-auto",
 			"effort":          "max",
 		},
 		PromptMode:             "arg",
@@ -132,6 +230,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			"plan":         "--permission-mode plan",
 			"auto-edit":    "--permission-mode acceptEdits",
 			"full-auto":    "--permission-mode dontAsk",
+			"bounded-auto": "--permission-mode dontAsk " + ClaudeBoundedAutoAllowedToolsArg,
+			// Opt-in only. OptionDefaults above deliberately stays
+			// "bounded-auto": a worker gains project commands because an
+			// operator selected them for that agent, never by default.
+			"bounded-project": "--permission-mode dontAsk " + ClaudeBoundedProjectAllowedToolsArg,
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -142,6 +245,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
 					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
+					// bounded-auto is full-auto's dontAsk plus the enumerated
+					// pool-worker lifecycle grants. It is a distinct choice
+					// rather than a change to full-auto so the plain mode keeps
+					// its existing meaning for anyone already selecting it.
+					{Value: "bounded-auto", Label: "Bounded autonomous", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeBoundedAutoAllowedToolsArg}},
+					// bounded-project adds the three deterministic project
+					// gates (typecheck/build/test) to bounded-auto. Selecting
+					// it is an operator decision per agent; it is never the
+					// default, and it grants no publication authority — see
+					// ClaudeBoundedProjectAllowedToolsArg for why the boundary
+					// is the controller's, not the allowlist's.
+					{Value: "bounded-project", Label: "Bounded autonomous + project gates", FlagArgs: []string{"--permission-mode", "dontAsk", ClaudeBoundedProjectAllowedToolsArg}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},
