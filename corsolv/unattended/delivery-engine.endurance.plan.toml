@@ -1,0 +1,120 @@
+# Unattended work plan — the long readiness run.
+#
+# The first run proved the mechanism end to end in four minutes. That is a good
+# proof of the machinery and a poor proof of endurance, which is a different
+# property: a run that survives a quarter of an hour of green unit tests has not
+# been shown to survive an hour of heavy, flaky, infrastructure-touching work.
+#
+# This plan is the endurance proof. Every task is a documented quality gate this
+# project already has -- the sharded targets TESTING.md tells contributors to use
+# for broad local sweeps -- rather than work invented to consume time. If this
+# run stops early, something real stopped it.
+
+runId = "delivery-engine-endurance-2026-08-11"
+
+# ---------------------------------------------------------------------------
+# primary
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "build-binary"
+title          = "build the gc binary the way the project builds it"
+band           = "primary"
+argv           = ["make", "build"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "race-control-layer"
+title          = "the control layer under the race detector"
+band           = "primary"
+argv           = ["go", "test", "./internal/unattended/", "-count=1", "-race"]
+needs          = ["build-binary"]
+timeoutSeconds = 1800
+deliveryStatus = "tests-review-passed"
+completionGate = "the writer lock and fence hold under the race detector, not merely under sequential tests"
+phase          = "unattended-readiness"
+
+# ---------------------------------------------------------------------------
+# validation
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "vet-tree"
+title          = "vet the whole tree"
+band           = "validation"
+argv           = ["go", "vet", "./..."]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "unit-baseline"
+title          = "the project's fast unit baseline across every package"
+band           = "validation"
+argv           = ["make", "test"]
+timeoutSeconds = 2400
+
+[[task]]
+id             = "cross-compile-fork"
+title          = "the fork-owned packages compile for Windows and Darwin"
+band           = "validation"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/cross-build.sh"]
+timeoutSeconds = 900
+
+# ---------------------------------------------------------------------------
+# assurance — the long pole, and the part most likely to find something
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "process-shards"
+title          = "the cmd/gc process shards"
+band           = "assurance"
+argv           = ["make", "test-cmd-gc-process-parallel"]
+timeoutSeconds = 3000
+
+[[task]]
+id             = "integration-shards"
+title          = "the integration shards"
+band           = "assurance"
+argv           = ["make", "test-integration-shards-parallel"]
+timeoutSeconds = 3000
+
+[[task]]
+id             = "regress-projector"
+title          = "the dashboard producer still emits the consumer schema"
+band           = "assurance"
+argv           = ["go", "test", "./internal/projector/", "-count=1", "-race"]
+timeoutSeconds = 900
+deliveryStatus = "checks-passing"
+completionGate = "the delivery projection the dashboard reads is unchanged by this work"
+phase          = "unattended-readiness"
+
+# ---------------------------------------------------------------------------
+# evidence
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "write-evidence"
+title          = "record the run's own evidence and commit it"
+band           = "evidence"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/record-evidence.sh"]
+mutates        = true
+timeoutSeconds = 1800
+maxAttempts    = 1
+
+# ---------------------------------------------------------------------------
+# next-stage
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "guk-readiness-probe"
+title          = "read-only readiness probe of the GUK BPM pilot target"
+band           = "next-stage"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/guk-probe.sh"]
+timeoutSeconds = 600
+
+[[task]]
+id             = "guk-deploy-dry-run"
+title          = "GUK BPM deployment dry run"
+band           = "next-stage"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/guk-probe.sh", "--deploy-dry-run"]
+requiresChecks = ["credential.guk-deployment"]
+timeoutSeconds = 600

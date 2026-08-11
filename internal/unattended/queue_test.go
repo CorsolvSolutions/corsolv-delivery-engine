@@ -229,6 +229,45 @@ func TestRestoreIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPrimaryWorkOutstandingSeparatesBlockedFromFinished(t *testing.T) {
+	// Lower-band work while the primary path is stuck, and lower-band work
+	// after it finished, look identical from the band alone and mean opposite
+	// things. The first real run published the wrong one.
+	q := NewQueue(planOf(
+		task("primary", BandPrimary),
+		task("docs", BandDocumentation),
+	), nil)
+
+	if !q.PrimaryWorkOutstanding() {
+		t.Fatal("an unattempted primary task is outstanding")
+	}
+	primary, _ := q.Task("primary")
+	q.RecordAttempt(primary, TaskAttempt{Succeeded: true})
+	if q.PrimaryWorkOutstanding() {
+		t.Fatal("a succeeded primary task is not outstanding — the run is on plan, not on a detour")
+	}
+}
+
+func TestPrimaryWorkStaysOutstandingWhenItFailedOrIsHeld(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hold bool
+	}{{"failed", false}, {"held", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := NewQueue(planOf(task("primary", BandPrimary), task("docs", BandDocumentation)), nil)
+			primary, _ := q.Task("primary")
+			if tc.hold {
+				q.Hold(primary, "behind a boundary")
+			} else {
+				q.RecordAttempt(primary, TaskAttempt{Succeeded: false, Class: FailureAuth})
+			}
+			if !q.PrimaryWorkOutstanding() {
+				t.Fatalf("a %s primary task must still count as outstanding", tc.name)
+			}
+		})
+	}
+}
+
 func TestQueueSummaryReportsEveryState(t *testing.T) {
 	q := NewQueue(planOf(task("a", BandPrimary), task("b", BandValidation)), nil)
 	a, _ := q.Task("a")

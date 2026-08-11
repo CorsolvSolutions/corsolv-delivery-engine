@@ -488,6 +488,31 @@ func TestProgressSaysWhenTheRunIsOnFallbackWork(t *testing.T) {
 	}
 }
 
+func TestProgressDoesNotCallOrdinaryWorkAFallback(t *testing.T) {
+	// The converse. Once every primary task has succeeded, validation and
+	// documentation work is the plan. Reporting it as fallback tells a person
+	// reading the heartbeat that the run is in trouble when it is doing exactly
+	// what it should — which the first real run did.
+	f := newRunFixture(t)
+	s := f.begin(t, Plan{RunID: "run-not-fallback", Tasks: []Task{
+		{ID: "primary", Title: "primary", Band: BandPrimary, Argv: sh("true")},
+		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
+	}})
+
+	claimedFallback := false
+	s.Runner.OnProgress = func(p Progress) {
+		if p.CurrentTask == "docs" && p.UsingFallback {
+			claimedFallback = true
+		}
+	}
+	if _, err := s.Runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if claimedFallback {
+		t.Fatal("lower-band work after the primary path succeeded was reported as a fallback")
+	}
+}
+
 func TestCompletionEventIsWrittenForANotificationLayerToFind(t *testing.T) {
 	f := newRunFixture(t)
 	s := f.begin(t, Plan{RunID: "run-event", Tasks: []Task{

@@ -385,7 +385,10 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 	if current != nil {
 		p.CurrentTask = current.Task.ID
 		p.CurrentBand = current.Task.Band
-		p.UsingFallback = current.Task.Band != BandPrimary
+		// Lower-band work is only a fallback while primary work is still
+		// outstanding. Once every primary task has succeeded, validation and
+		// documentation work is the plan, not a detour.
+		p.UsingFallback = current.Task.Band != BandPrimary && r.Queue.PrimaryWorkOutstanding()
 	}
 	if next, ok := r.Queue.Next(); ok {
 		p.NextAction = next.Task.ID + " (" + string(next.Task.Band) + ")"

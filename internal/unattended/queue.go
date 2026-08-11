@@ -255,6 +255,25 @@ func (q *Queue) Exhausted() bool {
 	return !ok
 }
 
+// PrimaryWorkOutstanding reports whether any primary-band task has yet to
+// succeed.
+//
+// It is what separates "doing lower-band work because the primary path is
+// blocked" from "doing lower-band work because the primary path is finished".
+// From the band alone those look identical and mean opposite things, and the
+// first unattended run published the wrong one of them: it reported validation
+// work as fallback while every primary task had in fact already succeeded,
+// which would tell a person reading the heartbeat that the run was in trouble
+// when it was doing exactly what it should.
+func (q *Queue) PrimaryWorkOutstanding() bool {
+	for _, qt := range q.tasks {
+		if qt.Task.Band == BandPrimary && qt.State != TaskSucceeded {
+			return true
+		}
+	}
+	return false
+}
+
 // Summary renders the queue for a progress report.
 func (q *Queue) Summary() string {
 	counts := q.Counts()
