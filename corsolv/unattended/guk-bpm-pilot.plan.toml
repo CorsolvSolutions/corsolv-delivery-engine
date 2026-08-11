@@ -1,0 +1,122 @@
+# GUK BPM pilot — proposed first work package.
+#
+# Every task is a script this project already declares in package.json. Nothing
+# was invented for the pilot, nothing deploys, nothing writes to Supabase, and
+# nothing touches live traffic. The single mutating task establishes the delivery
+# projection the dashboard reads, which is additive, reversible and immediately
+# visible.
+
+runId = "guk-bpm-pilot-004"
+
+# --- primary: what the pilot exists to do ---------------------------------
+
+[[task]]
+id             = "install"
+title          = "install the exact declared dependency set"
+band           = "primary"
+argv           = ["npm", "ci", "--no-audit", "--no-fund"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "build"
+title          = "the production build"
+band           = "primary"
+argv           = ["npm", "run", "build"]
+needs          = ["install"]
+timeoutSeconds = 1800
+deliveryStatus = "checks-passing"
+completionGate = "the project builds from a clean dependency install on the pinned Node major"
+phase          = "pilot"
+
+# --- validation -----------------------------------------------------------
+
+[[task]]
+id             = "lint"
+title          = "eslint"
+band           = "validation"
+argv           = ["npm", "run", "lint"]
+needs          = ["install"]
+timeoutSeconds = 1200
+
+[[task]]
+id             = "unit"
+title          = "the vitest unit suite"
+band           = "validation"
+argv           = ["npm", "run", "test"]
+needs          = ["install"]
+timeoutSeconds = 2400
+
+[[task]]
+id             = "readonly-guards"
+title          = "the read-only guard check"
+band           = "validation"
+argv           = ["npm", "run", "check:readonly-guards"]
+needs          = ["install"]
+timeoutSeconds = 900
+
+# --- assurance ------------------------------------------------------------
+
+[[task]]
+id             = "mutation-audit"
+title          = "the mutation audit"
+band           = "assurance"
+argv           = ["npm", "run", "audit:mutations"]
+needs          = ["install"]
+timeoutSeconds = 1200
+
+[[task]]
+id             = "dab-contract"
+title          = "the DAB endpoint contract check"
+band           = "assurance"
+argv           = ["npm", "run", "check:dab-contract"]
+needs          = ["install"]
+timeoutSeconds = 1200
+
+[[task]]
+id             = "controlled-write-coverage"
+title          = "controlled-write coverage"
+band           = "assurance"
+argv           = ["npm", "run", "check:controlled-write-coverage"]
+needs          = ["install"]
+timeoutSeconds = 1200
+
+[[task]]
+id             = "mutation-count"
+title          = "mutation-count consistency"
+band           = "assurance"
+argv           = ["npm", "run", "check:mutation-count-consistency"]
+needs          = ["install"]
+timeoutSeconds = 1200
+
+[[task]]
+id             = "assurance-suite"
+title          = "the assurance suite"
+band           = "assurance"
+argv           = ["npm", "run", "test:assurance"]
+needs          = ["install"]
+timeoutSeconds = 2400
+
+# --- evidence: the pilot's ONLY mutating task -----------------------------
+
+[[task]]
+id             = "publish-projection"
+title          = "establish delivery/PROJECT-STATE.yml and commit it"
+band           = "evidence"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/publish-projection.sh"]
+mutates        = true
+maxAttempts    = 1
+timeoutSeconds = 1800
+deliveryStatus = "pr-open"
+completionGate = "the dashboard reads this project from its authoritative ref"
+phase          = "pilot"
+
+# --- next-stage: held behind the declared boundary ------------------------
+
+[[task]]
+id             = "uat-environment-validation"
+title          = "read-only UAT environment validation"
+band           = "next-stage"
+argv           = ["npm", "run", "validate:uat-environment"]
+needs          = ["install"]
+requiresChecks = ["credential.guk-deployment"]
+timeoutSeconds = 900

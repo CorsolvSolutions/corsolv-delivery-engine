@@ -440,6 +440,20 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 			Kind: RecordPreflight, Outcome: "progress-publication-failed", Detail: err.Error(),
 		})
 	}
+
+	// The delivery projection is refreshed here rather than only after the run.
+	//
+	// The GUK BPM pilot found the reason: its evidence task exists to commit the
+	// projection into the target repository, and a projection written after the
+	// run has ended does not exist while the run is still executing the task
+	// that needs it. Refreshing it alongside the heartbeat also means the
+	// dashboard sees delivery state *during* a long run instead of only once it
+	// is over, which is the more useful behavior anyway.
+	if _, err := PublishDelivery(r.Spec, r.Queue, r.Fence, now); err != nil {
+		r.Journal.Append(Record{ //nolint:errcheck
+			Kind: RecordPreflight, Outcome: "delivery-projection-failed", Detail: err.Error(),
+		})
+	}
 }
 
 func readFileIfPresent(path string) ([]byte, error) {

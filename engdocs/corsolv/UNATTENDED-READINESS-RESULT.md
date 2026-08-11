@@ -8,12 +8,33 @@ never reported as `PASS`.
 
 ## Verdict
 
-**GAS CITY UNATTENDED EXECUTION READINESS: PASS on every mechanical criterion.**
+# GAS CITY UNATTENDED EXECUTION READINESS: PASS
 
-The acceptance contract's gate has one clause this record cannot close by
-itself: *merged to `main` under normal governance*. That merge is deliberately
-not automated, and its being outstanding is not a gap in the work — it is the
-work behaving as designed. The run spec declares
+| | |
+| --- | --- |
+| Merged main SHA | **`65f115b763bc28d9a56fb195a962c54c973addad`** |
+| Merge commit parents | `7b00ef944` (previous main) + `807f808d8` (the exact CI-validated head) |
+| PR | #2, `MERGED` 2026-08-11T10:54:29Z by `Corsolv` |
+| Verified against | a dedicated worktree checked out at `65f115b76`, clean |
+| Regression at merged main | control layer, integration-tagged control layer, dashboard publication contract, and the resource-census ratchet — all green |
+
+The gate's last clause — *merged to `main` under normal governance* — is closed.
+The merge was performed by a person through the normal GitHub path, which is
+exactly what the run spec's `needMerge = false` and its named `mergeHumanAction`
+predicted and planned for from the first preflight onward.
+
+### How the gate was closed
+
+Everything below was met mechanically and is evidenced above: writer locking,
+repository ownership, preflight, auth and governance pre-detection,
+branch-movement detection, fallback work, retry handling, human-boundary
+handling, crash recovery, progress publication, a 47-minute meaningful
+autonomous run, the dashboard-state regression, and CI green at the exact
+delivered SHA.
+
+### Why the merge was a person's to make
+
+The merge was deliberately not automated. The run spec declares
 
 ```toml
 needMerge        = false
@@ -27,15 +48,9 @@ instead of walking into it. The account holds `ADMIN` and `main` is unprotected;
 the boundary is a policy this programme chose, not a permission it lacks.
 
 The delivery agent's own execution layer independently refused the merge when it
-was attempted, which is the same answer arrived at from the other direction.
-
-Everything the gate can mechanically require is met: writer locking, repository
-ownership, preflight, auth and governance pre-detection, branch-movement
-detection, fallback work, retry handling, human-boundary handling, crash
-recovery, progress publication, a 47-minute meaningful autonomous run, the
-dashboard-state regression, and CI green at the exact delivered SHA.
-
-**The one remaining action is a person merging PR #2.**
+was attempted, which is the same answer arrived at from the other direction. The
+boundary was then cleared the way a boundary is supposed to be cleared: a person
+read the evidence and the exact-head CI result, and merged.
 
 ## What was built
 
@@ -194,7 +209,7 @@ are fixed and `make test` is green.
 | Local gates | `make test` green; `make test-fast-parallel` (the pre-push gate) green; `make test-integration-shards-parallel` green |
 | Force pushes | none |
 | Checks bypassed | none |
-| Merge | **outstanding — the declared human boundary.** PR #2 is `MERGEABLE`/`CLEAN` and green; a person merges it |
+| Merge | `65f115b763bc28d9a56fb195a962c54c973addad` — merged by `Corsolv` at 2026-08-11T10:54:29Z, after CI was green at the exact head |
 
 The endurance run's two failures both resolved to causes outside this change:
 the unit baseline to three real defects in this work, all since fixed and green;
