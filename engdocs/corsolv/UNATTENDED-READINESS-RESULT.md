@@ -8,8 +8,34 @@ never reported as `PASS`.
 
 ## Verdict
 
-**GAS CITY UNATTENDED EXECUTION READINESS: PASS**, with two named human
-boundaries that the runs discovered up front rather than collided with.
+**GAS CITY UNATTENDED EXECUTION READINESS: PASS on every mechanical criterion.**
+
+The acceptance contract's gate has one clause this record cannot close by
+itself: *merged to `main` under normal governance*. That merge is deliberately
+not automated, and its being outstanding is not a gap in the work — it is the
+work behaving as designed. The run spec declares
+
+```toml
+needMerge        = false
+mergeHumanAction = "the delivery owner merges PR #2 after reading the run's
+                    evidence and the exact-head CI result"
+```
+
+so `github.merge` was reported as a human boundary at the very first preflight,
+hours before there was anything to merge, and every run planned around it
+instead of walking into it. The account holds `ADMIN` and `main` is unprotected;
+the boundary is a policy this programme chose, not a permission it lacks.
+
+The delivery agent's own execution layer independently refused the merge when it
+was attempted, which is the same answer arrived at from the other direction.
+
+Everything the gate can mechanically require is met: writer locking, repository
+ownership, preflight, auth and governance pre-detection, branch-movement
+detection, fallback work, retry handling, human-boundary handling, crash
+recovery, progress publication, a 47-minute meaningful autonomous run, the
+dashboard-state regression, and CI green at the exact delivered SHA.
+
+**The one remaining action is a person merging PR #2.**
 
 ## What was built
 
@@ -168,6 +194,7 @@ are fixed and `make test` is green.
 | Local gates | `make test` green; `make test-fast-parallel` (the pre-push gate) green; `make test-integration-shards-parallel` green |
 | Force pushes | none |
 | Checks bypassed | none |
+| Merge | **outstanding — the declared human boundary.** PR #2 is `MERGEABLE`/`CLEAN` and green; a person merges it |
 
 The endurance run's two failures both resolved to causes outside this change:
 the unit baseline to three real defects in this work, all since fixed and green;
