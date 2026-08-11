@@ -73,6 +73,8 @@ func run() int {
 		code = cmdStatus(os.Args[2:])
 	case "owner":
 		code = cmdOwner(os.Args[2:])
+	case "publish":
+		code = cmdPublish(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -97,6 +99,10 @@ func usage() {
 
   owner -worktree <dir>
       Print who holds the worktree's writer lock.
+
+  publish -state <dir> -repo <dir> -target <repo-relative-path>
+      Install the run's delivery projection into a target repository. Refuses
+      any target this projector did not write.
 
 Exit: 0 ready/completed  3 human boundary remains  4 not ready/stopped  5 usage
 `)
@@ -330,6 +336,56 @@ func fallbackNote(usingFallback bool) string {
 		return " — fallback work; the primary path is blocked"
 	}
 	return ""
+}
+
+// cmdPublish installs the run's delivery projection into a target repository.
+//
+// It is a separate verb rather than something the run does implicitly, because
+// writing into a project's own repository is a different kind of act from
+// writing into the run's state directory, and the GUK BPM pilot showed how
+// different: the projection the run publishes for itself is always safe, while
+// installing it into a project can collide with a document that project
+// maintains by hand.
+func cmdPublish(args []string) int {
+	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
+	stateDir := fs.String("state", "", "the run's state directory, holding the rendered projection")
+	repo := fs.String("repo", "", "the target repository's worktree root")
+	target := fs.String("target", "", "publication path, relative to the repository")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *stateDir == "" || *repo == "" || *target == "" {
+		return fail("publish needs -state, -repo and -target")
+	}
+
+	projection, err := os.ReadFile(filepath.Join(*stateDir, "PROJECT-STATE.yml"))
+	if err != nil {
+		return fail("reading the run's projection: %v", err)
+	}
+
+	res, err := unattended.PublishProjection(*repo, *target, projection)
+	switch {
+	case errors.Is(err, unattended.ErrTargetNotOurs):
+		fmt.Fprintf(os.Stderr, "REFUSING TO PUBLISH\n\n%v\n\n"+
+			"An authorized path is not an authorized act. Choose a publication path this\n"+
+			"projector owns, or have a person decide to replace the existing document.\n", err)
+		return exitHumanBoundary
+	case err != nil:
+		return fail("%v", err)
+	}
+
+	switch {
+	case res.Unchanged:
+		fmt.Printf("unchanged: %s\n", res.Target)
+	case res.Created:
+		fmt.Printf("created: %s\n", res.Target)
+	default:
+		fmt.Printf("updated: %s\n", res.Target)
+	}
+	if res.ReplacedMalformed {
+		fmt.Println("note: the previous file carried this projector's marker but was not readable; it was replaced")
+	}
+	return exitOK
 }
 
 func cmdOwner(args []string) int {

@@ -1,0 +1,48 @@
+# GUK BPM — short publication proof.
+#
+# Deliberately not a repeat of the first pilot. Its only job is to close the one
+# criterion pilot 004 refused: that the Gas City execution projection is actually
+# committed, at a path of its own, without touching the project's governance
+# record. Everything the first pilot already proved — the full script surface,
+# fallback across five bands, retry on an ordinary failure — is not re-run.
+
+runId = "guk-bpm-publication-001"
+
+[[task]]
+id             = "install"
+title          = "install the exact declared dependency set"
+band           = "primary"
+argv           = ["npm", "ci", "--no-audit", "--no-fund"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "readonly-guards"
+title          = "the read-only guard check"
+band           = "validation"
+argv           = ["npm", "run", "check:readonly-guards"]
+needs          = ["install"]
+timeoutSeconds = 900
+
+# The one mutating task, and the point of this run. It writes the Gas City
+# execution projection to a path of its own and commits it. The publisher
+# refuses any target it did not author, so the project's hand-maintained
+# delivery/PROJECT-STATE.yml cannot be reached from here.
+[[task]]
+id             = "publish-projection"
+title          = "publish the Gas City execution projection and commit it"
+band           = "evidence"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/publish-projection.sh", "delivery/gascity/PROJECT-STATE.yml"]
+mutates        = true
+maxAttempts    = 1
+timeoutSeconds = 1800
+deliveryStatus = "pr-open"
+completionGate = "the dashboard reads this project's execution state from its own path, alongside the governance record"
+phase          = "pilot"
+
+[[task]]
+id             = "guk-deploy-dry-run"
+title          = "GUK BPM deployment dry run"
+band           = "next-stage"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/guk-probe.sh", "--deploy-dry-run"]
+requiresChecks = ["credential.guk-deployment"]
+timeoutSeconds = 600

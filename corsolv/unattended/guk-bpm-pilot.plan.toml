@@ -6,7 +6,7 @@
 # projection the dashboard reads, which is additive, reversible and immediately
 # visible.
 
-runId = "guk-bpm-pilot-004"
+runId = "guk-bpm-pilot-005"
 
 # --- primary: what the pilot exists to do ---------------------------------
 
@@ -100,9 +100,9 @@ timeoutSeconds = 2400
 
 [[task]]
 id             = "publish-projection"
-title          = "establish delivery/PROJECT-STATE.yml and commit it"
+title          = "publish the Gas City execution projection and commit it"
 band           = "evidence"
-argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/publish-projection.sh"]
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/publish-projection.sh", "delivery/gascity/PROJECT-STATE.yml"]
 mutates        = true
 maxAttempts    = 1
 timeoutSeconds = 1800
