@@ -94,8 +94,11 @@ func Begin(ctx context.Context, spec Spec, plan Plan) (*Session, error) {
 		return nil, err
 	}
 	s.TruncatedTail = truncated
-	resume := Replay(records)
-	s.Resumed = len(records) > 0
+	resume := Replay(records, plan.RunID)
+	// Resumed means this run has been here before — not that the journal has
+	// other runs in it. A state directory belongs to a project and accumulates
+	// every run it has had.
+	s.Resumed = resume.LastSeq > 0 && (len(resume.Succeeded) > 0 || len(resume.Attempts) > 0)
 
 	s.Queue = NewQueue(plan, s.Report.Boundaries())
 	if s.Resumed {

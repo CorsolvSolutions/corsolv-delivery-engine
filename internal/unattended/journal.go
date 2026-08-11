@@ -214,11 +214,22 @@ type ResumeState struct {
 	LastSeq int
 }
 
-// Replay folds a journal into resume state.
+// Replay folds one run's records into its resume state.
 //
 // It is a pure fold with no side effects, so replaying twice produces the same
 // answer as replaying once — which is what makes resuming a resumed run safe.
-func Replay(records []Record) ResumeState {
+//
+// Records belonging to other runs are skipped, and that filter is not
+// bookkeeping. A state directory belongs to a project, not to a run, so one
+// journal accumulates every run that project has had. The endurance run found
+// this the hard way: it started against the same state directory as the run
+// before it, and three of its tasks shared IDs with tasks that run had already
+// completed, so it began by skipping work it had never done. Resuming means
+// continuing *this* run; another run's history is history.
+//
+// LastSeq is deliberately taken across every record, because the sequence is a
+// property of the journal file rather than of any one run.
+func Replay(records []Record, runID string) ResumeState {
 	st := ResumeState{
 		Succeeded:   map[string]bool{},
 		Attempts:    map[string]int{},
@@ -227,6 +238,9 @@ func Replay(records []Record) ResumeState {
 	for _, r := range records {
 		if r.Seq > st.LastSeq {
 			st.LastSeq = r.Seq
+		}
+		if r.RunID != runID {
+			continue
 		}
 		switch r.Kind {
 		case RecordTaskStarted:

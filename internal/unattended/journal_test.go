@@ -146,7 +146,7 @@ func TestReplayReconstructsWhatWasDurablyTrue(t *testing.T) {
 		{Seq: 5, Kind: RecordTaskFailed, TaskID: "b"},
 		{Seq: 6, Kind: RecordTaskStarted, TaskID: "c"}, // crashed here
 	}
-	st := Replay(records)
+	st := Replay(records, "")
 
 	if !st.Succeeded["a"] {
 		t.Fatal("a durably succeeded task must be known succeeded")
@@ -173,10 +173,38 @@ func TestReplayIsIdempotent(t *testing.T) {
 		{Seq: 1, Kind: RecordTaskStarted, TaskID: "a"},
 		{Seq: 2, Kind: RecordTaskSucceeded, TaskID: "a"},
 	}
-	once := Replay(records)
-	twice := Replay(append([]Record{}, records...))
+	once := Replay(records, "")
+	twice := Replay(append([]Record{}, records...), "")
 	if once.Attempts["a"] != twice.Attempts["a"] || once.Succeeded["a"] != twice.Succeeded["a"] {
 		t.Fatal("replaying the same records twice produced different state")
+	}
+}
+
+func TestReplayIgnoresOtherRunsInTheSameJournal(t *testing.T) {
+	// A state directory belongs to a project, not to a run, so one journal
+	// accumulates every run the project has had. The endurance run found this
+	// the hard way: it shared a state directory with the run before it, three
+	// task IDs matched, and it began by skipping work it had never done.
+	records := []Record{
+		{Seq: 1, Kind: RecordTaskSucceeded, RunID: "an-earlier-run", TaskID: "shared-id"},
+		{Seq: 2, Kind: RecordTaskStarted, RunID: "an-earlier-run", TaskID: "also-shared"},
+		{Seq: 3, Kind: RecordTaskSucceeded, RunID: "this-run", TaskID: "mine"},
+	}
+	st := Replay(records, "this-run")
+
+	if st.Succeeded["shared-id"] {
+		t.Fatal("another run's success was credited to this one; it would skip work it never did")
+	}
+	if st.Attempts["also-shared"] != 0 || st.Interrupted["also-shared"] {
+		t.Fatal("another run's attempts were charged to this one")
+	}
+	if !st.Succeeded["mine"] {
+		t.Fatal("this run's own success was lost")
+	}
+	// The sequence is a property of the file, not of a run: continuing must not
+	// re-use numbers another run already wrote.
+	if st.LastSeq != 3 {
+		t.Fatalf("last seq = %d, want 3 across the whole journal", st.LastSeq)
 	}
 }
 
@@ -187,7 +215,7 @@ func TestReplayCountsEveryAttemptSoACrashLoopIsBounded(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		records = append(records, Record{Seq: i, Kind: RecordTaskStarted, TaskID: "crashy"})
 	}
-	if got := Replay(records).Attempts["crashy"]; got != 3 {
+	if got := Replay(records, "").Attempts["crashy"]; got != 3 {
 		t.Fatalf("attempts = %d, want 3", got)
 	}
 }
