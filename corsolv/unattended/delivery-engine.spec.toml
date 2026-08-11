@@ -1,0 +1,136 @@
+# Unattended run spec — Corsolv Delivery Engine, host CSDEV.
+#
+# This file is the whole of what is machine-specific about a run here. Every
+# absolute path, port, binary and repository URL the control layer needs is
+# named in it, and nothing is inferred from the host. Moving this run to another
+# machine is a change to this file and to nothing else — which is the direct
+# answer to the "machine-specific paths" failure, where the same facts were
+# embedded in the logic of harness scripts and made them unrunnable anywhere but
+# where they were written.
+#
+# The execution host is WSL2 Ubuntu; the checkout lives on the Windows D: drive
+# and is reached through /mnt/d. The forge CLI is a Windows install, which is why
+# github.command points into /mnt/c rather than assuming `gh` on PATH.
+
+projectId = "corsolv-delivery-engine"
+
+# Outside the worktree, deliberately. A checkout, a branch switch or the
+# cleanliness check would otherwise touch the run's own record of what it was
+# doing — and preflight refuses a stateDir inside the mutable worktree.
+stateDir    = "/home/corsolvtech/corsolv-unattended/delivery-engine"
+publishPath = "/home/corsolvtech/corsolv-unattended/delivery-engine/PROJECT-STATE.yml"
+
+[ownership]
+projectId      = "corsolv-delivery-engine"
+worktree       = "/mnt/d/Development/corsolv-delivery-engine"
+expectedOrigin = "https://github.com/CorsolvSolutions/corsolv-delivery-engine.git"
+expectedBranch = "corsolv/p2-gascity-main-reconcile"
+role           = "writer"
+session        = "gascity-unattended-readiness"
+
+[github]
+repo    = "CorsolvSolutions/corsolv-delivery-engine"
+account = "Corsolv"
+branch  = "main"
+
+# The execution host is WSL and the only authenticated gh is a Windows install.
+# Declaring it here rather than assuming `gh` on PATH is the point of this file.
+command = "/mnt/c/Program Files/GitHub CLI/gh.exe"
+
+needPush   = true
+needPr     = true
+needChecks = true
+
+# The run does not claim merge authority. The account has it, but a merge to
+# main is a delivery decision, and declaring it here would let an unattended run
+# take one. Naming it as a boundary is what lets the queue finish everything
+# short of the merge instead of either stopping early or merging unasked.
+needMerge        = false
+mergeHumanAction = "the delivery owner merges PR #2 after reading the run's evidence and the exact-head CI result"
+
+[[tool]]
+name        = "git"
+minVersion  = "2.30"
+versionArgs = ["--version"]
+purpose     = "every repository operation the run performs"
+
+[[tool]]
+name        = "go"
+minVersion  = "1.26"
+versionArgs = ["version"]
+purpose     = "building and testing the engine"
+
+[[tool]]
+name        = "/mnt/c/Program Files/GitHub CLI/gh.exe"
+minVersion  = "2.40"
+versionArgs = ["--version"]
+purpose     = "forge readiness: auth, permissions, branch protection, CI"
+
+[[tool]]
+name        = "dolt"
+minVersion  = "1.0"
+versionArgs = ["version"]
+purpose     = "the beads store's backend; the bdstore suite needs it"
+
+[[tool]]
+name        = "tmux"
+minVersion  = "3.0"
+versionArgs = ["-V"]
+purpose     = "the runtime provider the session integration tests use"
+
+[[path]]
+path    = "/mnt/d/Development/corsolv-delivery-engine"
+kind    = "dir"
+purpose = "the worktree this run owns"
+
+[[path]]
+path    = "/mnt/d/Development/corsolv-delivery-engine/internal/unattended"
+kind    = "dir"
+purpose = "the control layer under test"
+
+[[path]]
+path    = "/mnt/d/Development/corsolv-delivery-engine/Makefile"
+kind    = "file"
+purpose = "the project's own quality gates"
+
+[[path]]
+path     = "/home/corsolvtech/corsolv-unattended/delivery-engine"
+kind     = "dir"
+writable = true
+create   = true
+purpose  = "durable run state: journal, heartbeat, completion, projection"
+
+[[env]]
+name    = "HOME"
+purpose = "resolves the Go module and build caches"
+
+[[env]]
+name    = "PATH"
+purpose = "resolves every declared tool"
+
+# The credential the GUK BPM pilot will need and this host does not yet hold.
+# It is declared now so the boundary is a planned one rather than something the
+# first pilot run discovers at its deployment step.
+[[credential]]
+id          = "guk-deployment"
+title       = "GUK BPM deployment credential"
+env         = "GUK_BPM_DEPLOY_TOKEN"
+humanAction = "obtain a GUK BPM deployment credential before the pilot's deploy stage; nothing in this run needs it"
+
+# Signatures this project's own tooling produces, which the built-in rules
+# cannot be expected to know. A project knows what its tooling's output means;
+# Go does not, which is why these live in configuration.
+[[classify]]
+pattern = "native_store_unavailable|bd version differs from linked beads library"
+class   = "environment"
+reason  = "the bd/beads version skew this fork runs with; it degrades the store, it is not a defect in the change under test"
+
+[[classify]]
+pattern = "dolt: command not found|dolt sql-server.*already in use"
+class   = "environment"
+reason  = "a stale or absent Dolt server, which is a host condition rather than a code fault"
+
+[[classify]]
+pattern = "GOCACHE|no space left on device|cannot allocate memory"
+class   = "environment"
+reason  = "build-cache and disk exhaustion, the failure mode the shared-cache incident produced"

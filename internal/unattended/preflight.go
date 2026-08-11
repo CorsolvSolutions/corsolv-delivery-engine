@@ -172,24 +172,39 @@ func competingWriterCheck(state RepoState) Check {
 		return notReached(id, CategoryConcurrency, title,
 			"the worktree could not be probed, so its lock could not be read")
 	}
-	owner, found, err := ReadOwner(WriterLockDir(state))
+	owner, recorded, live, err := ProbeOwner(WriterLockDir(state))
 	switch {
 	case err != nil:
-		return fail(id, CategoryConcurrency, title, "a readable lock record", err.Error(),
+		return fail(id, CategoryConcurrency, title, "a readable lock", err.Error(),
 			"inspect the lock directory by hand")
-	case !found:
-		return pass(id, CategoryConcurrency, title, "no owner recorded")
-	default:
+	case live:
 		return Check{
 			ID: id, Category: CategoryConcurrency, Title: title, Outcome: OutcomeFail,
-			Expected: "no recorded owner",
-			Observed: fmt.Sprintf("run %q (session %q, pid %d on %s) since %s",
-				owner.RunID, owner.Session, owner.PID, owner.Host,
-				owner.AcquiredAt.UTC().Format(time.RFC3339)),
-			Detail: "a recorded owner is not proof of a live one; the run still tries to acquire, and only the OS lock decides",
-			Remedy: "wait for the other session to finish, or clear a provably dead record with a stated reason",
+			Expected: "no live owner",
+			Observed: describeOwner(owner, recorded),
+			Detail:   "the lock is held right now, so another session is genuinely working in this worktree",
+			Remedy:   "wait for the other session to finish; do not break a live lock",
 		}
+	case recorded:
+		// A record with no lock behind it is a previous run that died. Saying so
+		// is the whole point: treating the record as authority would make every
+		// crashed run unrestartable until a person deleted a file.
+		return Check{
+			ID: id, Category: CategoryConcurrency, Title: title, Outcome: OutcomePass,
+			Observed: "no live owner; a stale record from " + describeOwner(owner, true),
+			Detail:   "the previous owner's record outlived its lock, so it will be archived when this run acquires",
+		}
+	default:
+		return pass(id, CategoryConcurrency, title, "no owner recorded and the lock is free")
 	}
+}
+
+func describeOwner(o Owner, recorded bool) string {
+	if !recorded {
+		return "an unrecorded holder"
+	}
+	return fmt.Sprintf("run %q (session %q, pid %d on %s) since %s",
+		o.RunID, o.Session, o.PID, o.Host, o.AcquiredAt.UTC().Format(time.RFC3339))
 }
 
 // stateChecks verify the run has somewhere durable to keep its own evidence.

@@ -245,6 +245,46 @@ func ReadOwner(dir string) (Owner, bool, error) {
 	return o, true, nil
 }
 
+// ProbeOwner reports what a lock directory records, and whether a live process
+// is actually holding the lock.
+//
+// It exists because "a record is present" and "somebody is here" are different
+// facts, and confusing them makes a crashed run unrestartable: the dead run's
+// record outlives it, and a check that treated the record as authority would
+// refuse every subsequent run until a person deleted a file. The lock is the
+// authority here exactly as it is in Acquire — this only asks without claiming.
+//
+// The lock is taken and released immediately, so a live holder is detected
+// without being disturbed. The tiny window this opens does not matter: nothing
+// is decided on the strength of it, and the run's real claim moments later is
+// the exclusive acquire that actually arbitrates.
+func ProbeOwner(dir string) (owner Owner, recorded bool, live bool, err error) {
+	owner, recorded, err = ReadOwner(dir)
+	if err != nil {
+		return owner, recorded, false, err
+	}
+	f, ferr := os.OpenFile(filepath.Join(dir, lockFile), os.O_CREATE|os.O_RDWR, 0o644)
+	if ferr != nil {
+		if os.IsNotExist(ferr) {
+			return owner, recorded, false, nil
+		}
+		return owner, recorded, false, fmt.Errorf("opening worktree lock in %q: %w", dir, ferr)
+	}
+	defer f.Close() //nolint:errcheck
+
+	got, lerr := tryLockFile(f, true)
+	if lerr != nil {
+		return owner, recorded, false, fmt.Errorf("probing the worktree lock in %q: %w", dir, lerr)
+	}
+	if !got {
+		return owner, recorded, true, nil
+	}
+	if uerr := unlockFile(f); uerr != nil {
+		return owner, recorded, false, fmt.Errorf("releasing the probe lock in %q: %w", dir, uerr)
+	}
+	return owner, recorded, false, nil
+}
+
 func writeOwner(dir string, o Owner) error {
 	data, err := json.MarshalIndent(o, "", "  ")
 	if err != nil {

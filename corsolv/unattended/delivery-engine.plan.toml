@@ -1,0 +1,143 @@
+# Unattended work plan — Corsolv Delivery Engine readiness run.
+#
+# The bands are the answer to the failure that produced this milestone: a run
+# that stopped at its first dependency. When the primary path cannot proceed the
+# queue drops a band and keeps doing declared work, so a blocked build still
+# leaves the tree vetted, the cross-platform paths compiled, the dashboard
+# producer regression-tested and the evidence written.
+#
+# Nothing here is busywork. Every task is work somebody would otherwise do by
+# hand before calling this branch deliverable.
+
+runId = "delivery-engine-readiness-2026-08-11"
+
+# ---------------------------------------------------------------------------
+# primary — what the run exists to do
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "build-all"
+title          = "compile the whole tree"
+band           = "primary"
+argv           = ["go", "build", "./..."]
+timeoutSeconds = 900
+
+[[task]]
+id             = "test-control-layer"
+title          = "the unattended control layer's own suite"
+band           = "primary"
+argv           = ["go", "test", "./internal/unattended/", "-count=1"]
+needs          = ["build-all"]
+timeoutSeconds = 900
+deliveryStatus = "tests-review-passed"
+completionGate = "every acceptance scenario in internal/unattended passes against real git worktrees and real processes"
+phase          = "unattended-readiness"
+
+# ---------------------------------------------------------------------------
+# validation — proves the change is correct
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "vet-fork"
+title          = "vet the fork-owned packages"
+band           = "validation"
+argv           = ["go", "vet", "./internal/unattended/...", "./internal/projector/...", "./corsolv/..."]
+timeoutSeconds = 600
+
+[[task]]
+id             = "cross-compile-windows"
+title          = "the Windows lock path compiles"
+band           = "validation"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/cross-build.sh", "windows"]
+timeoutSeconds = 900
+
+[[task]]
+id             = "cross-compile-darwin"
+title          = "the Darwin path compiles"
+band           = "validation"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/cross-build.sh", "darwin"]
+timeoutSeconds = 900
+
+# ---------------------------------------------------------------------------
+# assurance — proves nothing else broke
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "regress-projector"
+title          = "the dashboard producer still emits the consumer schema"
+band           = "assurance"
+argv           = ["go", "test", "./internal/projector/", "-count=1"]
+timeoutSeconds = 900
+deliveryStatus = "checks-passing"
+completionGate = "the delivery projection the dashboard reads is unchanged by this work"
+phase          = "unattended-readiness"
+
+[[task]]
+id             = "regress-config-beads"
+title          = "config and beads regression"
+band           = "assurance"
+argv           = ["go", "test", "./internal/config/...", "./internal/beads/...", "-count=1"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "regress-orchestration"
+title          = "formula, sling, dispatch and orders regression"
+band           = "assurance"
+argv           = ["go", "test", "./internal/formula/...", "./internal/sling/...", "./internal/dispatch/...", "./internal/orders/...", "-count=1"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "regress-session-worker"
+title          = "session and worker boundary regression"
+band           = "assurance"
+argv           = ["go", "test", "./internal/session/...", "./internal/worker/...", "./internal/agentutil/...", "-count=1"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "regress-events-convoy"
+title          = "event bus, convoy and mail regression"
+band           = "assurance"
+argv           = ["go", "test", "./internal/events/...", "./internal/convoy/...", "./internal/mail/...", "-count=1"]
+timeoutSeconds = 1800
+
+[[task]]
+id             = "regress-api"
+title          = "the HTTP and SSE control plane regression"
+band           = "assurance"
+argv           = ["go", "test", "./internal/api/", "-count=1"]
+timeoutSeconds = 1800
+
+# ---------------------------------------------------------------------------
+# evidence — records what actually happened, and commits it
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "write-evidence"
+title          = "record the run's own evidence and commit it"
+band           = "evidence"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/record-evidence.sh"]
+mutates        = true
+timeoutSeconds = 1800
+maxAttempts    = 1
+
+# ---------------------------------------------------------------------------
+# next-stage — prepares the pilot that follows
+# ---------------------------------------------------------------------------
+
+[[task]]
+id             = "guk-readiness-probe"
+title          = "read-only readiness probe of the GUK BPM pilot target"
+band           = "next-stage"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/guk-probe.sh"]
+timeoutSeconds = 600
+
+# A task that genuinely cannot run here: the credential it needs does not exist
+# on this host. It is held before the run starts and never attempted, which is
+# what a discovered boundary is supposed to buy.
+[[task]]
+id             = "guk-deploy-dry-run"
+title          = "GUK BPM deployment dry run"
+band           = "next-stage"
+argv           = ["/mnt/d/Development/corsolv-delivery-engine/corsolv/unattended/guk-probe.sh", "--deploy-dry-run"]
+requiresChecks = ["credential.guk-deployment"]
+timeoutSeconds = 600

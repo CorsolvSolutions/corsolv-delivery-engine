@@ -54,6 +54,15 @@ var mergeCapablePermissions = map[string]bool{
 // point at it without this package knowing anything about hosts.
 var GitHubCommand = "gh"
 
+// command is the forge CLI this requirement uses: its own declaration when it
+// has one, and the package default otherwise.
+func (r GitHubRequirement) command() string {
+	if strings.TrimSpace(r.Command) != "" {
+		return r.Command
+	}
+	return GitHubCommand
+}
+
 // ProbeGitHub asks the forge, before the run starts, every question the run
 // will later depend on.
 //
@@ -63,7 +72,7 @@ var GitHubCommand = "gh"
 // the merge permission is discovered at merge time, after all the work.
 func ProbeGitHub(ctx context.Context, req GitHubRequirement) GitHubProbe {
 	var p GitHubProbe
-	gh := GitHubCommand
+	gh := req.command()
 
 	out, ok, err := runProbe(ctx, defaultProbeTimeout, "", []string{gh, "auth", "status"})
 	switch {
@@ -154,7 +163,7 @@ func GitHubChecks(req GitHubRequirement, p GitHubProbe) Checks {
 		cs = append(cs, Check{
 			ID: "github.auth", Category: CategoryGitHub, Title: "the forge CLI is authenticated",
 			Outcome: OutcomeHumanBoundary, Expected: "authenticated", Observed: "not authenticated",
-			Boundary: "run `" + GitHubCommand + " auth login` — an interactive login cannot be performed by the run",
+			Boundary: "run `" + req.command() + " auth login` — an interactive login cannot be performed by the run",
 		})
 		return append(cs, ghNotReached("the forge CLI is not authenticated, so this could not be asked")...)
 	}
@@ -168,7 +177,7 @@ func GitHubChecks(req GitHubRequirement, p GitHubProbe) Checks {
 		} else {
 			cs = append(cs, fail("github.account", CategoryGitHub, "authenticated as the declared account",
 				req.Account, orNone(p.Account),
-				"switch accounts with `"+GitHubCommand+" auth switch` before starting a run that pushes"))
+				"switch accounts with `"+req.command()+" auth switch` before starting a run that pushes"))
 		}
 	}
 

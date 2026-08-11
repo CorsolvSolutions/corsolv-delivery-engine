@@ -159,6 +159,12 @@ type CredentialRequirement struct {
 type GitHubRequirement struct {
 	// Repo is `owner/name`.
 	Repo string `toml:"repo" json:"repo"`
+	// Command is the forge CLI to use. It belongs here because where `gh` lives
+	// is machine-specific — on this host the execution environment is WSL and
+	// the only authenticated `gh` is a Windows install reached through /mnt/c —
+	// and the whole purpose of this file is that such facts are declared rather
+	// than assumed. Empty means `gh` on PATH.
+	Command string `toml:"command,omitempty" json:"command,omitempty"`
 	// Account, when set, is the login the run must be authenticated as. A
 	// session authenticated as the wrong account is the ownership failure in
 	// forge form.
