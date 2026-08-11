@@ -81,15 +81,26 @@ func ReadWorktreePointers(worktree string) (WorktreePointers, error) {
 	var wp WorktreePointers
 
 	dotGit := filepath.Join(worktree, ".git")
+
+	// A main worktree has a .git *directory*, not a pointer file. That shape is
+	// durable by construction — there is no cross-repository pointer to break —
+	// so it reports nothing to check rather than an error. Reading it as a file
+	// would fail with "is a directory", which is how the first version of this
+	// wrongly failed every main worktree in the suite.
+	info, err := os.Stat(dotGit)
+	if err != nil {
+		return wp, fmt.Errorf("reading %q: %w", dotGit, err)
+	}
+	if info.IsDir() {
+		return wp, nil
+	}
+
 	raw, err := os.ReadFile(dotGit)
 	if err != nil {
 		return wp, fmt.Errorf("reading %q: %w", dotGit, err)
 	}
 	value, ok := strings.CutPrefix(strings.TrimSpace(string(raw)), "gitdir:")
 	if !ok {
-		// A main worktree has a .git *directory*, not this file. That shape is
-		// durable by construction — there is no cross-repository pointer to
-		// break — so it is not an error, just nothing to check.
 		return wp, nil
 	}
 	wp.DotGit = strings.TrimSpace(value)

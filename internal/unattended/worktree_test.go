@@ -46,6 +46,21 @@ func TestIsAbsoluteAnyOSSeesBothNamespaces(t *testing.T) {
 	}
 }
 
+func TestAMainWorktreeHasNothingToBreak(t *testing.T) {
+	// The first version of this check read .git as a file and failed with "is a
+	// directory" for every main worktree, which took the whole preflight suite
+	// down with it. A main worktree holds no cross-repository pointer, so there
+	// is nothing here that a prune on the other side could invalidate.
+	repo := newRepo(t, testOrigin)
+	c := CheckWorktreeCrossOSDurable(repo)
+	if c.Outcome != OutcomePass {
+		t.Fatalf("main worktree = %s (%s), want pass", c.Outcome, c.Observed)
+	}
+	if !strings.Contains(c.Observed, "main worktree") {
+		t.Fatalf("the check must say why it passed, got %q", c.Observed)
+	}
+}
+
 func TestAWorktreeWithAbsolutePointersIsReportedNotDurable(t *testing.T) {
 	// This is the pilot/D8 shape: git recorded an absolute path that only one
 	// OS can resolve, and the other one pruned it.
