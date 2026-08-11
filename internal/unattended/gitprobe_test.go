@@ -1,7 +1,6 @@
 package unattended
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -185,14 +184,20 @@ func TestNormalizeRemoteURLTreatsEquivalentFormsAsOne(t *testing.T) {
 
 func TestRunGitDoesNotWaitOnACredentialPrompt(t *testing.T) {
 	// GIT_TERMINAL_PROMPT=0 is what turns an unattended credential prompt from
-	// an unbounded hang into an error. Assert the environment carries it.
+	// an unbounded hang into an error, so this asserts the child process
+	// actually receives it rather than asserting anything about this process.
+	//
+	// It reads the value back out of a real git subprocess through a `!`-alias,
+	// because that is the only place the guarantee is worth anything. An earlier
+	// version asked git for GIT_EDITOR and inspected this process's own
+	// environment; it proved nothing about the child, and it failed under the
+	// project's stripped test environment where git can resolve no editor at all.
 	dir := newRepo(t, "")
-	out, err := runGit(dir, "var", "GIT_EDITOR")
+	out, err := runGit(dir, "-c", "alias.showprompt=!printf '%s' \"${GIT_TERMINAL_PROMPT-unset}\"", "showprompt")
 	if err != nil {
-		t.Fatalf("git var: %v", err)
+		t.Fatalf("reading the child's environment: %v", err)
 	}
-	_ = out
-	if got := os.Getenv("GIT_TERMINAL_PROMPT"); got != "" && got != "0" {
-		t.Fatalf("test environment leaks GIT_TERMINAL_PROMPT=%q", got)
+	if out != "0" {
+		t.Fatalf("the child saw GIT_TERMINAL_PROMPT=%q, want \"0\" — a credential prompt would hang the run", out)
 	}
 }

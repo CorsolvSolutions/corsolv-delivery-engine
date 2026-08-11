@@ -278,25 +278,37 @@ func cmdStatus(args []string) int {
 		return fail("status needs -state")
 	}
 
-	if event, ok, err := unattended.ReadCompletion(*stateDir); err == nil && ok {
+	p, live, perr := unattended.ReadProgress(*stateDir)
+	if perr != nil {
+		return fail("%v", perr)
+	}
+	event, finished, cerr := unattended.ReadCompletion(*stateDir)
+	if cerr != nil {
+		return fail("%v", cerr)
+	}
+
+	// A state directory belongs to a project and outlives any one run, so a
+	// completion record from a previous run sits there while the next one is
+	// still working. Reporting it would answer a question about the live run
+	// with a fact about a dead one — which this command did, during the very
+	// run that found it. The completion record is terminal only for the run it
+	// names, and only while nothing newer has published progress.
+	stale := live && (p.RunID != event.RunID || p.UpdatedAt.After(event.FinishedAt))
+	if finished && !stale {
 		fmt.Println(event.String())
 		for _, a := range event.HumanActions {
 			fmt.Printf("  human: %s\n", a)
 		}
-		if event.Outcome == unattended.RunCompleted {
+		switch event.Outcome {
+		case unattended.RunCompleted:
 			return exitOK
-		}
-		if event.Outcome == unattended.RunFailed {
+		case unattended.RunFailed:
 			return exitNotReady
+		default:
+			return exitHumanBoundary
 		}
-		return exitHumanBoundary
 	}
-
-	p, ok, err := unattended.ReadProgress(*stateDir)
-	if err != nil {
-		return fail("%v", err)
-	}
-	if !ok {
+	if !live {
 		return fail("no run has published state in %s", *stateDir)
 	}
 	fmt.Printf("run %s (%s) — %s for %s\n", p.RunID, p.ProjectID, p.Stage, p.Elapsed)

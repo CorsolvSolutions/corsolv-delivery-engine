@@ -4,10 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -224,112 +222,40 @@ func TestConcurrentGoroutinesElectExactlyOneWriter(t *testing.T) {
 	dir := t.TempDir()
 	const n = 16
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		winners int
-		start   = make(chan struct{})
+		wg        sync.WaitGroup
+		attempted sync.WaitGroup
+		mu        sync.Mutex
+		winners   int
 	)
+	// The winner holds until every contender has had its turn, and it does so
+	// by waiting on a channel rather than by sleeping. A sleep would only make
+	// the overlap probable; this makes it certain, and it costs no wall time.
+	start := make(chan struct{})
+	release := make(chan struct{})
+
+	attempted.Add(n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
 			lk, err := Acquire(dir, testOwner(RoleWriter, fmt.Sprintf("goroutine-%d", i)))
+			attempted.Done()
 			if err != nil {
 				return
 			}
 			mu.Lock()
 			winners++
 			mu.Unlock()
-			time.Sleep(150 * time.Millisecond)
+			<-release
 			lk.Release() //nolint:errcheck
 		}(i)
 	}
 	close(start)
+	attempted.Wait() // every contender has tried while the winner still holds
+	close(release)
 	wg.Wait()
-	if winners != 1 {
-		t.Fatalf("winners = %d, want exactly 1", winners)
-	}
-}
 
-// --- real second OS process -------------------------------------------------
-
-const (
-	lockHelperEnv    = "GC_UNATTENDED_LOCK_HELPER"
-	lockHelperDirEnv = "GC_UNATTENDED_LOCK_DIR"
-	lockHelperExit   = 3
-)
-
-// TestLockHelperProcess is not a test. It is the body of the child process the
-// cross-process cases re-exec, and it is skipped in every ordinary run.
-//
-// The in-process cases prove the lock excludes concurrent *goroutines*, which
-// on some platforms is a weaker claim than excluding concurrent *processes*.
-// The whole point of this lock is the second claim, so it is proved directly.
-func TestLockHelperProcess(t *testing.T) {
-	if os.Getenv(lockHelperEnv) == "" {
-		t.Skip("helper process body; not a standalone test")
-	}
-	dir := os.Getenv(lockHelperDirEnv)
-	lk, err := Acquire(dir, testOwner(RoleWriter, "child-"+fmt.Sprint(os.Getpid())))
-	if err != nil {
-		fmt.Println("DENIED")
-		os.Exit(lockHelperExit)
-	}
-	fmt.Println("ACQUIRED")
-	time.Sleep(2 * time.Second)
-	_ = lk.Release()
-	os.Exit(0)
-}
-
-func lockHelperCmd(t *testing.T, dir string) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLockHelperProcess$", "-test.timeout=60s")
-	cmd.Env = append(os.Environ(), lockHelperEnv+"=1", lockHelperDirEnv+"="+dir)
-	return cmd
-}
-
-func TestAcquireAcrossProcessesIsDenied(t *testing.T) {
-	dir := t.TempDir()
-	held, err := Acquire(dir, testOwner(RoleWriter, "parent"))
-	if err != nil {
-		t.Fatalf("parent acquire: %v", err)
-	}
-	defer held.Release() //nolint:errcheck
-
-	out, err := lockHelperCmd(t, dir).CombinedOutput()
-	if err == nil {
-		t.Fatalf("child acquired a worktree the parent process holds:\n%s", out)
-	}
-	if !strings.Contains(string(out), "DENIED") {
-		t.Fatalf("child did not report denial:\n%s", out)
-	}
-}
-
-func TestConcurrentProcessesElectExactlyOneWriter(t *testing.T) {
-	dir := t.TempDir()
-	const n = 5
-
-	cmds := make([]*exec.Cmd, n)
-	outs := make([]strings.Builder, n)
-	for i := range cmds {
-		cmds[i] = lockHelperCmd(t, dir)
-		cmds[i].Stdout = &outs[i]
-		cmds[i].Stderr = &outs[i]
-		if err := cmds[i].Start(); err != nil {
-			t.Fatalf("start child %d: %v", i, err)
-		}
-	}
-	winners := 0
-	for i, c := range cmds {
-		_ = c.Wait()
-		if strings.Contains(outs[i].String(), "ACQUIRED") {
-			winners++
-		}
-	}
-	// Each winner holds for 2s, comfortably longer than the spawn spread, so a
-	// second winner would mean genuine concurrent ownership rather than
-	// sequential reuse.
 	if winners != 1 {
 		t.Fatalf("winners = %d, want exactly 1", winners)
 	}

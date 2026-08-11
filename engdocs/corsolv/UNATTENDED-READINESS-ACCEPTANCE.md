@@ -1,9 +1,16 @@
 # Gas City unattended execution readiness — acceptance contract
 
 This document is written **before** the implementation and is the standard the
-implementation is judged against. The `RESULT` column starts at `NOT REACHED`
-for every row. A row moves to `PASS` only when the named acceptance test exists,
-has been executed, and passed. `NOT REACHED` is never reported as `PASS`.
+implementation is judged against.
+
+> **Results are recorded in `UNATTENDED-READINESS-RESULT.md`.** The `RESULT`
+> columns below are deliberately left at their pre-implementation values, and
+> this pointer is the only edit this file has received since it was written. A
+> standard that gets updated as the work proceeds stops being a standard and
+> becomes a description of whatever was built.
+
+A row moves to `PASS` only when the named acceptance test exists, has been
+executed, and passed. `NOT REACHED` is never reported as `PASS`.
 
 ## Why this milestone exists
 

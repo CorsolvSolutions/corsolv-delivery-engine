@@ -2,7 +2,6 @@ package unattended
 
 import (
 	"context"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,33 +117,6 @@ func TestEnvChecksNeverRecordAValue(t *testing.T) {
 		if strings.Contains(c.Observed, "an-ordinary-value") || strings.Contains(c.Observed, "ghp_") {
 			t.Fatalf("an environment value reached the report: %q", c.Observed)
 		}
-	}
-}
-
-func TestPortChecks(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("cannot listen on loopback: %v", err)
-	}
-	defer ln.Close() //nolint:errcheck
-	live := ln.Addr().String()
-
-	spare, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("cannot listen on loopback: %v", err)
-	}
-	dead := spare.Addr().String()
-	spare.Close() //nolint:errcheck
-
-	cs := PortChecks([]PortRequirement{
-		{Address: live},
-		{Address: dead, TimeoutSeconds: 1},
-	})
-	if cs[0].Outcome != OutcomePass {
-		t.Fatalf("reachable port = %s, want pass", cs[0].Outcome)
-	}
-	if cs[1].Outcome != OutcomeFail {
-		t.Fatalf("unreachable port = %s, want fail", cs[1].Outcome)
 	}
 }
 

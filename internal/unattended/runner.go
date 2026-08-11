@@ -178,6 +178,12 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 		text = err.Error() + "\n" + out
 	}
 	class := Classify(text, r.Spec.Classification)
+	// The journal keeps one line per record so a truncated tail stays
+	// recoverable, which means a failure's actual output has nowhere to go in
+	// it. Without this the run says a task failed and cannot say why — and
+	// "it failed at three in the morning and I need to know why" is the entire
+	// point of running unattended.
+	outputPath := r.captureFailure(qt.Task.ID, attemptNumber, text)
 	delay, willRetry := r.Queue.RecordAttempt(qt, TaskAttempt{
 		StartedAt: started, Duration: elapsed.Round(time.Millisecond).String(),
 		Succeeded: false, Class: class.Class, Reason: class.Reason, Output: truncate(Redact(text)),
@@ -185,7 +191,7 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 	r.Journal.Append(Record{ //nolint:errcheck
 		Kind: RecordTaskFailed, TaskID: qt.Task.ID, Attempt: attemptNumber,
 		Class: class.Class, Outcome: string(qt.State), DurationMS: elapsed.Milliseconds(),
-		Detail: class.Reason + " | " + truncate(Redact(firstLine(text))),
+		Detail: class.Reason + " | " + firstLine(Redact(text)) + " | output: " + outputPath,
 	})
 
 	policy := PolicyFor(class.Class)
@@ -266,6 +272,31 @@ func (r *Runner) execute(ctx context.Context, t Task) (out string, ok bool, err 
 		return out, false, runErr
 	}
 	return out, true, nil
+}
+
+// FailuresDirName is where a run keeps the output of every failed attempt.
+const FailuresDirName = "failures"
+
+// captureFailure writes a failed attempt's output where a person can read it,
+// and returns the path it used.
+//
+// It is redacted before it is written. A failing command's output is arbitrary
+// text from arbitrary tooling, it is being written to a file that outlives the
+// run, and a token that reaches it stays there.
+//
+// A capture that cannot be written is reported into the journal and otherwise
+// ignored: losing the diagnostic is bad, and failing the run because the
+// diagnostic could not be filed would be worse.
+func (r *Runner) captureFailure(taskID string, attempt int, text string) string {
+	path := stateDirPath(r.Spec.StateDir, fmt.Sprintf("%s/%s-attempt-%d.log", FailuresDirName, taskID, attempt))
+	if err := writeFileAtomic(path, []byte(Redact(text)+"\n")); err != nil {
+		r.Journal.Append(Record{ //nolint:errcheck
+			Kind: RecordTaskFailed, TaskID: taskID, Attempt: attempt,
+			Outcome: "failure-output-not-captured", Detail: err.Error(),
+		})
+		return "not captured"
+	}
+	return path
 }
 
 func truncate(s string) string {

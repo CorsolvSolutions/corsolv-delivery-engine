@@ -546,6 +546,53 @@ func TestCompletionEventIsWrittenForANotificationLayerToFind(t *testing.T) {
 	}
 }
 
+func TestFailureOutputIsCapturedWhereAPersonCanReadIt(t *testing.T) {
+	// The journal keeps one line per record, so a failure's actual output has
+	// nowhere to go in it. Without this the run says a task failed and cannot
+	// say why — and "it failed at three in the morning and I need to know why"
+	// is the entire point of running unattended.
+	f := newRunFixture(t)
+	s := f.begin(t, Plan{RunID: "run-capture", Tasks: []Task{
+		{
+			ID: "loud", Title: "a task that explains itself before failing", Band: BandPrimary,
+			MaxAttempts: 1,
+			Argv:        sh(`echo "line one of the explanation"; echo "line two names a token ghp_0123456789abcdefghijklmnopqrstuvwxyz"; exit 1`),
+		},
+		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
+	}})
+
+	if _, err := s.Runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	path := filepath.Join(f.stateDir, FailuresDirName, "loud-attempt-1.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failure output was not captured: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "line one of the explanation") || !strings.Contains(body, "line two") {
+		t.Fatalf("the capture lost the output that explains the failure:\n%s", body)
+	}
+	// It outlives the run, so it must not carry credential material out of it.
+	if strings.Contains(body, "ghp_0123456789") {
+		t.Fatalf("a credential reached durable failure output:\n%s", body)
+	}
+
+	records, _, err := ReadJournal(stateDirPath(f.stateDir, JournalName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range records {
+		if r.Kind == RecordTaskFailed && r.TaskID == "loud" && strings.Contains(r.Detail, path) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the journal must point at the captured output, or nobody will find it")
+	}
+}
+
 func TestATaskThatOverrunsItsTimeoutIsAFailureNotAHang(t *testing.T) {
 	f := newRunFixture(t)
 	s := f.begin(t, Plan{RunID: "run-timeout", Tasks: []Task{
