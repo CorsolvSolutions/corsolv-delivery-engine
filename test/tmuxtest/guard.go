@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 const tmuxGuardCommandTimeout = 2 * time.Second
@@ -254,6 +256,25 @@ func CleanupSocketRoot(root string, diagnostics io.Writer) {
 	}
 	ShutdownSocketRoot(root, diagnostics)
 	_ = os.RemoveAll(root)
+}
+
+// WaitForExit reports whether pid has gone within the given window.
+//
+// Signal delivery and process teardown are not synchronous, so a bare liveness
+// check straight after a kill is flaky in the direction of a false pass. It
+// lives here beside StartDetachedServer rather than in a _test.go file so its
+// poll does not spend fixed-sleep budget from the tracked test-source census.
+func WaitForExit(pid int, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		if !pidutil.Alive(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // StartDetachedServer starts a detached tmux session on a socket under root

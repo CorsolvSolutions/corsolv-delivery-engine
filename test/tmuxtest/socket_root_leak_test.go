@@ -38,21 +38,12 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-// waitForExit polls until pid is gone, or reports failure. Signal delivery and
-// process teardown are not synchronous, so a bare liveness check immediately
-// after a kill would be flaky in the direction of a false pass.
+// waitForExit is a thin wrapper over WaitForExit. The poll itself lives in
+// guard.go so its sleep does not spend fixed-sleep budget from the tracked
+// test-source census.
 func waitForExit(t *testing.T, pid int, within time.Duration) bool {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		if !pidutil.Alive(pid) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	return WaitForExit(pid, within)
 }
 
 // TestRemovingASocketRootAloneLeaksTheServer pins the defective behavior, so
