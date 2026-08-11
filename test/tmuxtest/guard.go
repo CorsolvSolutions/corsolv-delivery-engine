@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,6 +177,119 @@ func killTestSocketPath(socketPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxGuardCommandTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
+}
+
+// SocketPathsUnder returns every tmux socket file anywhere beneath root.
+//
+// The search is a full walk rather than a glob because callers pass roots at
+// different depths and a fixed pattern silently finds nothing at the wrong one.
+// cmd/gc and test/integration hand over the socket *parent*, where the real
+// layout is <parent>/tmux/tmux-<uid>/<name> — three levels down, and the middle
+// directory is literally named "tmux", so a "tmux-*" pattern does not even
+// match it. An earlier version of this function globbed, matched nothing on
+// that shape, and left one server leaking per run while its unit tests passed
+// against a shallower fixture.
+//
+// Only sockets are returned; a regular file is not something to send a kill to.
+func SocketPathsUnder(root string) []string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	var found []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// An unreadable subtree is not a reason to abandon the rest.
+			return nil //nolint:nilerr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			return nil
+		}
+		found = append(found, path)
+		return nil
+	})
+	return found
+}
+
+// ShutdownSocketRoot terminates every tmux server whose socket lives under
+// root, and reports how many it asked to stop.
+//
+// Removing a socket directory does not stop the server listening inside it.
+// The process keeps running with its TMUX_TMPDIR gone, which makes it both
+// invisible to `tmux list-sessions` and impossible for any later sweep to
+// find — a permanent orphan holding memory until the machine is rebooted. So
+// the server must be killed *before* the directory goes, never after.
+//
+// Scope is the whole safety story: this only ever addresses sockets found
+// inside a root the caller owns, by path. It never matches on a process or
+// socket name, so it cannot reach an operator's own tmux server.
+func ShutdownSocketRoot(root string, diagnostics io.Writer) int {
+	if diagnostics == nil {
+		diagnostics = io.Discard
+	}
+	stopped := 0
+	for _, socketPath := range SocketPathsUnder(root) {
+		if err := killTestSocketPath(socketPath); err != nil {
+			// A socket with no live server behind it is the ordinary case
+			// once a test has already cleaned up after itself.
+			continue
+		}
+		stopped++
+		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: stopped tmux server on %s\n", socketPath)
+	}
+	return stopped
+}
+
+// CleanupSocketRoot stops every tmux server under root and then removes root.
+//
+// This is the ordering the harness needs: kill, then delete. Callers that
+// delete first leak the server permanently.
+func CleanupSocketRoot(root string, diagnostics io.Writer) {
+	if strings.TrimSpace(root) == "" {
+		return
+	}
+	ShutdownSocketRoot(root, diagnostics)
+	_ = os.RemoveAll(root)
+}
+
+// StartDetachedServer starts a detached tmux session on a socket under root
+// and returns the socket path and the server process's PID.
+//
+// It lives beside the code it exercises rather than in a _test.go file so the
+// leak regression can spawn a genuine server without adding a subprocess call
+// site to the tracked test-source census.
+func StartDetachedServer(t testing.TB, root, socketName, sessionName string) (socketPath string, pid int) {
+	t.Helper()
+	RequireTmux(t)
+
+	dir := filepath.Join(root, "tmux-"+strconv.Itoa(os.Getuid()))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("tmuxtest: creating socket dir %q: %v", dir, err)
+	}
+	socketPath = filepath.Join(dir, socketName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"new-session", "-d", "-s", sessionName, "sleep 600")
+	if out, err := start.CombinedOutput(); err != nil {
+		t.Fatalf("tmuxtest: starting server on %s: %v (%s)", socketPath, err, strings.TrimSpace(string(out)))
+	}
+
+	raw, err := exec.CommandContext(ctx, "tmux", "-S", socketPath,
+		"display-message", "-p", "#{pid}").Output()
+	if err != nil {
+		t.Fatalf("tmuxtest: reading server pid on %s: %v", socketPath, err)
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("tmuxtest: parsing server pid %q: %v", strings.TrimSpace(string(raw)), err)
+	}
+	return socketPath, pid
 }
 
 // listTestSocketPaths returns tmux socket paths for orphaned gctest cities.

@@ -171,6 +171,10 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
+		// Stop the servers first. Removing the directory out from under a live
+		// tmux server does not stop it — it strips away the only handle anyone
+		// has on it, turning a reapable orphan into a permanent one.
+		ShutdownSocketRoot(path, diagnostics)
 		_ = os.RemoveAll(path)
 	}
 }
