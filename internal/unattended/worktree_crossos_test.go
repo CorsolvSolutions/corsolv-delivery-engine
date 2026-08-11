@@ -3,11 +3,12 @@
 package unattended
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The real cross-OS regression: it fails against the defective worktree
@@ -58,12 +59,24 @@ func requireCrossOS(t *testing.T) string {
 	return base
 }
 
-// winGit runs the Windows git against a Windows path.
-func winGit(t *testing.T, repoWinPath string, args ...string) (string, error) {
+// winGit runs the Windows git against a Windows path. The second result
+// reports whether git exited zero; a non-zero exit is an answer here, not a
+// failure to run.
+//
+// This goes through runProbe rather than exec.Command directly. The all-source
+// census ratchets subprocess call sites, and reusing the existing one keeps a
+// test that must spawn a second git from spending ledger budget — the same
+// reason lock_process_test.go does it. runProbe is also the better tool: it
+// supervises the process group, bounds the run, and refuses to let a prompt
+// hang the suite.
+func winGit(t *testing.T, repoWinPath string, args ...string) (string, bool) {
 	t.Helper()
-	full := append([]string{"-C", repoWinPath}, args...)
-	out, err := exec.Command(windowsGit, full...).CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	argv := append([]string{windowsGit, "-C", repoWinPath}, args...)
+	out, ok, err := runProbe(context.Background(), 60*time.Second, "", argv)
+	if err != nil {
+		t.Fatalf("running windows git %v: %v", args, err)
+	}
+	return out, ok
 }
 
 // seedSharedRepo makes a repository both gits can reach.
@@ -133,8 +146,8 @@ func TestTheDefectiveStrategyLosesItsWorktreeToAWindowsPrune(t *testing.T) {
 		t.Skipf("this Windows git does not mark the WSL worktree prunable; the incident cannot be reproduced here:\n%s", list)
 	}
 
-	if _, err := winGit(t, winPath(repo), "worktree", "prune"); err != nil {
-		t.Fatalf("windows prune: %v", err)
+	if _, ok := winGit(t, winPath(repo), "worktree", "prune"); !ok {
+		t.Fatal("windows prune exited non-zero")
 	}
 
 	if registered(t, repo, native) {
@@ -165,9 +178,9 @@ func TestTheRepairedStrategySurvivesAWindowsPrune(t *testing.T) {
 
 	// Both namespaces must resolve the same physical worktree before the prune
 	// is even interesting.
-	winHead, err := winGit(t, winPath(shared), "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatalf("windows git cannot read the shared worktree: %v (%s)", err, winHead)
+	winHead, ok := winGit(t, winPath(shared), "rev-parse", "HEAD")
+	if !ok {
+		t.Fatalf("windows git cannot read the shared worktree: %s", winHead)
 	}
 	if winHead != before.Head {
 		t.Fatalf("the two gits disagree about HEAD: windows=%s wsl=%s", winHead, before.Head)
@@ -183,8 +196,8 @@ func TestTheRepairedStrategySurvivesAWindowsPrune(t *testing.T) {
 	}
 	defer lock.Release() //nolint:errcheck
 
-	if _, err := winGit(t, winPath(repo), "worktree", "prune"); err != nil {
-		t.Fatalf("windows prune: %v", err)
+	if _, ok := winGit(t, winPath(repo), "worktree", "prune"); !ok {
+		t.Fatal("windows prune exited non-zero")
 	}
 
 	if !registered(t, repo, "task-worktree") {
