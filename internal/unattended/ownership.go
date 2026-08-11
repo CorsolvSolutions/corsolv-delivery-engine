@@ -17,21 +17,21 @@ import (
 // directory it was launched in, and an environment variable all say what
 // someone intended, not what is actually under the cursor.
 type Ownership struct {
-	ProjectID string `json:"projectId"`
+	ProjectID string `toml:"projectId" json:"projectId"`
 	// Worktree is the exact directory this session may mutate.
-	Worktree string `json:"worktree"`
+	Worktree string `toml:"worktree" json:"worktree"`
 	// ExpectedOrigin is the origin remote the worktree must have. Empty means
 	// the session declares no expectation, which is only correct for a target
 	// with no remote at all.
-	ExpectedOrigin string `json:"expectedOrigin,omitempty"`
+	ExpectedOrigin string `toml:"expectedOrigin,omitempty" json:"expectedOrigin,omitempty"`
 	// ExpectedBranch is the branch the worktree must be on. Empty means any
 	// branch is acceptable, which a mutating role should almost never say.
-	ExpectedBranch string `json:"expectedBranch,omitempty"`
-	Role           Role   `json:"role"`
-	Session        string `json:"session"`
+	ExpectedBranch string `toml:"expectedBranch,omitempty" json:"expectedBranch,omitempty"`
+	Role           Role   `toml:"role" json:"role"`
+	Session        string `toml:"session" json:"session"`
 	// AllowDirtyWorktree makes an unclean tree acceptable. The dirt is still
 	// enumerated in the report either way; this only decides whether it votes.
-	AllowDirtyWorktree bool `json:"allowDirtyWorktree,omitempty"`
+	AllowDirtyWorktree bool `toml:"allowDirtyWorktree,omitempty" json:"allowDirtyWorktree,omitempty"`
 }
 
 // ErrOwnershipIncomplete is returned when a declaration omits something without
