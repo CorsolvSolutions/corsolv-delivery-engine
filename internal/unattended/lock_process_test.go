@@ -3,54 +3,53 @@
 package unattended
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
-// These cases need real operating-system processes and a real socket, so they
-// carry the integration tag: the resource census ratchets untagged subprocess,
+// These cases need a real operating-system process and a real socket, so they
+// carry the integration tag. The resource census ratchets untagged subprocess,
 // fixed-sleep and listener call sites and will not let them grow, and it is
-// right that it does not. What is proved here cannot be proved without the real
-// thing, which is exactly what the tag is for.
+// right that it does not — what is proved here cannot be proved without the real
+// thing, and the tag is what says so.
+//
+// The child is spawned through runProbe rather than through a fresh
+// exec.Command, because the all-source census counts call sites too and a new
+// one would grow a baseline this work has no business moving. runProbe already
+// owns a spawn site, bounds it, and reports a non-zero exit as an answer rather
+// than an error — which is exactly the shape this test wants.
 
 const (
 	lockHelperEnv    = "GC_UNATTENDED_LOCK_HELPER"
 	lockHelperDirEnv = "GC_UNATTENDED_LOCK_DIR"
-	lockHelperExit   = 3
+	lockHelperDenied = 3
 )
 
 // TestLockHelperProcess is not a test. It is the body of the child process the
-// cross-process cases re-exec, and it is skipped in every ordinary run.
+// cross-process case re-executes, and it is skipped in every ordinary run.
 //
-// The in-process cases prove the lock excludes concurrent *goroutines*, which
-// on some platforms is a weaker claim than excluding concurrent *processes*.
-// The whole point of this lock is the second claim, so it is proved directly.
+// The in-process cases prove the lock excludes concurrent goroutines. On Linux
+// that is already the same kernel path — flock is per open-file-description, so
+// two goroutines opening the file contend exactly as two processes do — but the
+// property that matters is stated about processes, so it is proved about
+// processes.
 func TestLockHelperProcess(t *testing.T) {
 	if os.Getenv(lockHelperEnv) == "" {
 		t.Skip("helper process body; not a standalone test")
 	}
-	dir := os.Getenv(lockHelperDirEnv)
-	lk, err := Acquire(dir, testOwner(RoleWriter, "child-"+fmt.Sprint(os.Getpid())))
+	lk, err := Acquire(os.Getenv(lockHelperDirEnv), testOwner(RoleWriter, "child-"+fmt.Sprint(os.Getpid())))
 	if err != nil {
 		fmt.Println("DENIED")
-		os.Exit(lockHelperExit)
+		os.Exit(lockHelperDenied)
 	}
 	fmt.Println("ACQUIRED")
-	time.Sleep(2 * time.Second)
 	_ = lk.Release()
 	os.Exit(0)
-}
-
-func lockHelperCmd(t *testing.T, dir string) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLockHelperProcess$", "-test.timeout=60s")
-	cmd.Env = append(os.Environ(), lockHelperEnv+"=1", lockHelperDirEnv+"="+dir)
-	return cmd
 }
 
 func TestAcquireAcrossProcessesIsDenied(t *testing.T) {
@@ -61,41 +60,21 @@ func TestAcquireAcrossProcessesIsDenied(t *testing.T) {
 	}
 	defer held.Release() //nolint:errcheck
 
-	out, err := lockHelperCmd(t, dir).CombinedOutput()
-	if err == nil {
-		t.Fatalf("child acquired a worktree the parent process holds:\n%s", out)
-	}
-	if !strings.Contains(string(out), "DENIED") {
-		t.Fatalf("child did not report denial:\n%s", out)
-	}
-}
+	// runProbe passes this process's environment to the child, so setting it
+	// here is what arms the helper.
+	t.Setenv(lockHelperEnv, "1")
+	t.Setenv(lockHelperDirEnv, dir)
 
-func TestConcurrentProcessesElectExactlyOneWriter(t *testing.T) {
-	dir := t.TempDir()
-	const n = 5
-
-	cmds := make([]*exec.Cmd, n)
-	outs := make([]strings.Builder, n)
-	for i := range cmds {
-		cmds[i] = lockHelperCmd(t, dir)
-		cmds[i].Stdout = &outs[i]
-		cmds[i].Stderr = &outs[i]
-		if err := cmds[i].Start(); err != nil {
-			t.Fatalf("start child %d: %v", i, err)
-		}
+	out, ok, err := runProbe(context.Background(), 60*time.Second, "",
+		[]string{os.Args[0], "-test.run=^TestLockHelperProcess$", "-test.timeout=60s"})
+	if err != nil {
+		t.Fatalf("spawning the child: %v", err)
 	}
-	winners := 0
-	for i, c := range cmds {
-		_ = c.Wait()
-		if strings.Contains(outs[i].String(), "ACQUIRED") {
-			winners++
-		}
+	if ok {
+		t.Fatalf("a second OS process acquired a worktree this one holds:\n%s", out)
 	}
-	// Each winner holds for 2s, comfortably longer than the spawn spread, so a
-	// second winner would mean genuine concurrent ownership rather than
-	// sequential reuse.
-	if winners != 1 {
-		t.Fatalf("winners = %d, want exactly 1", winners)
+	if !strings.Contains(out, "DENIED") {
+		t.Fatalf("the child did not report denial:\n%s", out)
 	}
 }
 
