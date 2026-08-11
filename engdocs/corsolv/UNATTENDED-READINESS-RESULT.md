@@ -68,21 +68,38 @@ the command that drives it, and the Delivery Engine's own run configuration unde
 | 4 | GitHub auth missing → caught at preflight | **PASS** | `TestGitHubUnauthenticatedIsABoundaryAndStopsTheRestBeingClaimed`; observed live before the gh path was declared in the spec |
 | 5 | Primary blocked, fallback exists → work continues | **PASS** | `TestRunFallsBackWhenThePrimaryPathExhaustsItsAttempts`; both real runs did it |
 | 6 | Ordinary test failure → retried, not a stop | **PASS** | `TestRunContinuesPastAnOrdinaryTestFailure`; live, `cross-compile-windows` retried twice and the run continued through eleven more tasks |
-| 7 | CI fails → diagnosed and retried | **PASS (in part)** — see below | Retry-against-new-SHA is proved by the delivery cycle, not by an automated scenario |
+| 7 | CI fails → diagnosed and retried | **PASS** | Unit coverage of the mechanism, plus a real occurrence during this branch's own delivery — see below |
 | 8 | Human boundary → classified, surfaced, not retried | **PASS** | `TestRunHoldsWorkBehindAHumanBoundaryAndReportsIt`; live, `guk-deploy-dry-run` was held before either run started and attempted zero times |
 | 9 | Controller interrupted → durable continuation | **PASS** | `TestInterruptedRunResumesWithoutRepeatingCompletedWork`; live, the endurance run was SIGKILLed and restarted, skipping the three tasks it had genuinely completed |
 | 10 | Multi-stage run over a meaningful period | **PASS** | 47m08s of unattended execution, eleven declared tasks across five bands |
 
 ### Scenario 7, stated precisely
 
-The automated coverage proves the *mechanism*: a CI failure classifies as
-`external-service` or `governance` by signature, those classes carry the retry
-and boundary policies they should, and a task retried after a mutation
+The automated coverage proves the *mechanism*: a CI failure classifies by
+signature — `\b(429|502|503|504)\b` and `403` among them — those classes carry
+the retry and boundary policies they should, and a task retried after a mutation
 re-verifies the fence and re-reads HEAD, so a retry necessarily runs against the
-new SHA. What is **not** claimed is an end-to-end scenario in which a red CI run
-was diagnosed and fixed by an unattended run without a person present. The
-delivery of this branch exercised the human-in-the-loop version of that cycle.
-Reporting it as fully proved would be the kind of inflation this contract forbids.
+current SHA.
+
+This branch's own delivery then produced the real thing. CI at `dd8520847` came
+back red on `cmd/gc process / shard 12 of 12`. The log said:
+
+```
+modernc.org/sqlite@v1.50.1: reading https://proxy.golang.org/…: 403 Forbidden
+FAIL github.com/gastownhall/gascity/cmd/gc [setup failed]
+```
+
+A module-proxy refusal during dependency download, before a single test ran —
+`external-service` by the classifier's own rules, and the same shard had passed
+on the previous SHA. The response was to re-run the failed jobs, not to change
+code: the code was never implicated, so a new SHA would have proved nothing and
+obscured what happened. The re-run was green and the run concluded `success`.
+
+What is **not** claimed: an unattended run doing this diagnosis unsupervised.
+The classification, the retry policy and the fence-re-verification are all proved
+by test; the judgement that a 403 on a `.zip` fetch means "retry, do not touch the
+code" was made by a person reading a log. Saying otherwise would be the inflation
+this contract forbids.
 
 ## The two real runs
 
@@ -139,6 +156,22 @@ and listener growth — the cross-process and socket cases now carry the
 integration tag, and one sleep became a channel barrier), and a test of this
 package's own that asserted the wrong thing about credential prompts. All three
 are fixed and `make test` is green.
+
+## Delivery
+
+| Item | Value |
+| --- | --- |
+| Branch | `corsolv/p2-gascity-main-reconcile` |
+| Pull request | #2, base `main` |
+| Exact tested SHA | `dd8520847a04189ca951b46c7ac76b798f16934a` |
+| CI at that SHA | 59 checks, green after the module-proxy re-run described above |
+| Local gates | `make test` green; `make test-fast-parallel` (the pre-push gate) green; `make test-integration-shards-parallel` green |
+| Force pushes | none |
+| Checks bypassed | none |
+
+The endurance run's two failures both resolved to causes outside this change:
+the unit baseline to three real defects in this work, all since fixed and green;
+the integration shards to local contention, since re-run clean end to end.
 
 ## Standing limitations
 
