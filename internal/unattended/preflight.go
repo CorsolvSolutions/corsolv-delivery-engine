@@ -125,6 +125,9 @@ func Preflight(ctx context.Context, spec Spec, plan *Plan) *Report {
 	r.Repo = state
 	r.Checks = append(r.Checks, ownershipChecks...)
 	r.Checks = append(r.Checks, competingWriterCheck(state))
+	if state.Root != "" {
+		r.Checks = append(r.Checks, CheckWorktreeCrossOSDurable(state.Root))
+	}
 
 	if spec.GitHub != nil {
 		probe := ProbeGitHub(ctx, *spec.GitHub)
