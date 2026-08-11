@@ -1,0 +1,117 @@
+# GUK BPM pilot — run spec.
+#
+# MUST be launched with Node 20 first on PATH:
+#
+#   PATH=/home/corsolvtech/.local/node20/bin:$PATH \
+#     unattended-run run -spec corsolv/unattended/guk-bpm-pilot.spec.toml \
+#                        -plan corsolv/unattended/guk-bpm-pilot.plan.toml
+#
+# That is not incidental. The npm launcher's shebang is `#!/usr/bin/env node`,
+# so npm cannot resolve its own runtime unless node is on PATH — preflight
+# caught exactly this and refused, reporting npm's version as unreadable rather
+# than guessing. The machine default is Node 24; this project pins 20.x in
+# engines.node, .nvmrc and its CI, so the pinned runtime is named explicitly and
+# the default is deliberately left alone.
+#
+# The worktree below is a DEDICATED pilot worktree, not the primary checkout.
+# Preflight was run against the primary checkout before approval and refused it
+# on two counts — it sits on a documentation branch and carries nine dirty paths
+# — which is the evidence for why the pilot gets its own. Create it with:
+#
+#   git -C /mnt/d/Development/guk-bpm-platform worktree add \
+#       /home/corsolvtech/guk-bpm-pilot -b pilot/gascity-001 origin/main
+#
+# On the Linux filesystem rather than under /mnt/d: npm on DrvFs is slow, the
+# project's CI runs on Linux so behaviour matches, and it keeps the run entirely
+# on one side of the OS boundary the writer lock cannot span.
+
+projectId   = "guk-bpm-platform"
+stateDir    = "/home/corsolvtech/corsolv-unattended/guk-bpm-pilot"
+publishPath = "/home/corsolvtech/corsolv-unattended/guk-bpm-pilot/PROJECT-STATE.yml"
+
+[ownership]
+projectId      = "guk-bpm-platform"
+worktree       = "/home/corsolvtech/guk-bpm-pilot"
+expectedOrigin = "https://github.com/CorsolvSolutions/guk-bpm-platform.git"
+expectedBranch = "pilot/gascity-001"
+role           = "writer"
+session        = "guk-bpm-pilot-001"
+
+[github]
+repo       = "CorsolvSolutions/guk-bpm-platform"
+account    = "Corsolv"
+branch     = "main"
+command    = "/mnt/c/Program Files/GitHub CLI/gh.exe"
+needPush   = true
+needPr     = true
+needChecks = true
+
+# The pilot does not claim merge authority, and must not: main is unprotected
+# and the account is ADMIN, so an unattended run *could* merge. Declaring this
+# false is the control.
+needMerge        = false
+mergeHumanAction = "the delivery owner merges the pilot's pull request after reading its evidence and the exact-head CI result"
+
+[[tool]]
+name        = "git"
+minVersion  = "2.30"
+versionArgs = ["--version"]
+purpose     = "every repository operation the pilot performs"
+
+[[tool]]
+name        = "/home/corsolvtech/.local/node20/bin/node"
+minVersion  = "20.0.0"
+versionArgs = ["--version"]
+purpose     = "the runtime this project pins via engines.node, .nvmrc and CI"
+
+[[tool]]
+name        = "/home/corsolvtech/.local/node20/bin/npm"
+minVersion  = "10.0.0"
+versionArgs = ["--version"]
+purpose     = "dependency install and every declared project script"
+
+[[tool]]
+name        = "/mnt/c/Program Files/GitHub CLI/gh.exe"
+minVersion  = "2.40"
+versionArgs = ["--version"]
+purpose     = "forge readiness: auth, permissions, branch protection, CI"
+
+[[path]]
+path    = "/home/corsolvtech/guk-bpm-pilot"
+kind    = "dir"
+purpose = "the pilot target"
+
+[[path]]
+path    = "/home/corsolvtech/guk-bpm-pilot/package.json"
+kind    = "file"
+purpose = "the declared script surface the work package draws on"
+
+[[path]]
+path     = "/home/corsolvtech/corsolv-unattended/guk-bpm-pilot"
+kind     = "dir"
+writable = true
+create   = true
+purpose  = "durable preflight state, outside the target"
+
+[[env]]
+name    = "HOME"
+purpose = "resolves the npm cache and git config"
+
+# The deployment credential the pilot must NOT have for its first run. Declaring
+# it makes every deploy-shaped task hold before the run starts rather than being
+# attempted.
+[[credential]]
+id          = "guk-deployment"
+title       = "GUK BPM deployment credential"
+env         = "GUK_BPM_DEPLOY_TOKEN"
+humanAction = "deployment is out of scope for the first pilot; this credential is deliberately absent so no deploy task can run"
+
+[[classify]]
+pattern = "ERR_PNPM|ENOENT: no such file or directory, open '.*package.json'|npm ERR! code ERESOLVE"
+class   = "environment"
+reason  = "a dependency-tree or workspace fault rather than a defect in the change under test"
+
+[[classify]]
+pattern = "supabase.*(connection refused|not running)|ECONNREFUSED .*54322"
+class   = "environment"
+reason  = "the local Supabase stack is not up; a host condition, not a code fault"

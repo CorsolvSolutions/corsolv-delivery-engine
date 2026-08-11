@@ -95,14 +95,45 @@ Supabase, none touches live traffic.
 | Item | Status | Who |
 | --- | --- | --- |
 | A dedicated pilot worktree from a known ref | not created | can be created by the pilot's operator |
-| `node` and `npm` on the execution host | present on Windows; **absent in WSL** | needs installing, or the pilot runs on the Windows side |
+| Node 20.x (the pinned major) | **resolved** — installed at `~/.local/node20` (v20.20.2, npm 10.8.2) | done |
 | `npm ci` completed in the pilot worktree | not done | mechanical |
 | Deployment credentials | **not held** — `GUK_BPM_DEPLOY_TOKEN` unset | platform owner, and only if deployment is in scope |
 | Decision on merge authority | recommend `needMerge = false` | delivery owner |
 | Decision on deployment | recommend excluded from the first pilot entirely | delivery owner |
 
-The node-in-WSL point is the one real setup task, and it is the kind this
-milestone exists to surface before a run rather than nine minutes into one.
+### Correction: the Node finding was wrong, and the real one was worse
+
+An earlier version of this assessment recorded "node/npm absent in WSL". That
+was incorrect — `~/.local/bin/node` has been present throughout. Deriving the
+requirement from the project's own files instead of from what happened to be on
+PATH produced the actual finding, which was more serious:
+
+| Source | Requirement |
+| --- | --- |
+| `package.json` `engines.node` | `20.x` |
+| `.nvmrc` | `20` |
+| `.github/workflows/*.yml` | `node-version: 20` |
+
+Three authoritative sources agree on Node **20.x**, and **both** environments
+had Node **24.19.0** — the wrong major. So the blocker was not absence in one
+place; it was a version mismatch in every place, and the "just run it on
+Windows" fallback would have been wrong too.
+
+Node 20.20.2 is now installed at `~/.local/node20`, alongside the existing
+`~/.local/node24` and following the same pattern. The machine default is
+deliberately **unchanged**: repointing it could break whatever else uses Node 24,
+and the pilot's run spec names the pinned runtime explicitly, which is what a
+spec file is for.
+
+Proved: `npm ci` installs the project's exact locked dependency set (531
+packages, 44s) under 20.20.2, and `vite 5.4.21`, `vitest 3.2.7` and `tsc 5.8.3`
+all execute on it.
+
+One consequence, found by preflight rather than by a failed run: npm's launcher
+is `#!/usr/bin/env node`, so **npm cannot resolve its own runtime unless node is
+on PATH**. Preflight refused with "unreadable version" rather than guessing. The
+pilot must therefore be launched with `PATH=~/.local/node20/bin:$PATH`, which the
+run spec documents at the top.
 
 ## Estimated unattended duration
 
