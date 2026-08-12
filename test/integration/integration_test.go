@@ -88,6 +88,13 @@ const (
 // tmux socket parent dir for the binary's lifetime; see TestMain.
 var tmuxSocketAliveSentinel *os.File
 
+// tmuxSocketParentPath records this run's tmux socket parent so the signal
+// sweeper can stop the servers inside it. A timed-out run is killed by
+// SIGQUIT, which bypasses every normal exit path, and KillAllTestSessions
+// only reaches gctest-* sockets — not the per-run socket root where these
+// sessions actually live.
+var tmuxSocketParentPath string
+
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
@@ -120,11 +127,12 @@ func TestMain(m *testing.M) {
 	// through defers) so it cannot leak the parent until a later aged sweep.
 	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
 	tmuxSocketAliveSentinel = tmuxSentinel
+	tmuxSocketParentPath = tmuxSocketParent
 	defer func() {
 		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
 		// below is honored and this never double-removes on a normal exit.
 		if tmuxSocketParent != "" {
-			_ = os.RemoveAll(tmuxSocketParent)
+			tmuxtest.CleanupSocketRoot(tmuxSocketParent, io.Discard)
 		}
 	}()
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
@@ -147,7 +155,7 @@ func TestMain(m *testing.M) {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			_ = os.RemoveAll(tmpDir)
 			if tmuxSocketParent != "" {
-				_ = os.RemoveAll(tmuxSocketParent)
+				tmuxtest.CleanupSocketRoot(tmuxSocketParent, io.Discard)
 			}
 			os.Exit(0)
 		}
@@ -261,7 +269,10 @@ func TestMain(m *testing.M) {
 
 	_ = os.RemoveAll(tmpDir)
 	if tmuxSocketParent != "" {
-		_ = os.RemoveAll(tmuxSocketParent)
+		// Stop the servers before removing their socket parent: deleting the
+		// directory leaves each one running with its TMUX_TMPDIR gone, which
+		// no later sweep can find.
+		tmuxtest.CleanupSocketRoot(tmuxSocketParent, io.Discard)
 	}
 	os.Exit(code)
 }
@@ -296,6 +307,12 @@ func sweepIntegrationProcesses(subprocess bool) {
 	// normally does this is bypassed on a signal (issue #3640).
 	if testGCHome != "" {
 		cleanupIntegrationDoltSQLServersUnderRoot(testGCHome)
+	}
+	// This run's own sessions live on sockets under its socket parent, which
+	// KillAllTestSessions does not reach — it only matches gctest-* names. On
+	// a signal this is the last chance to stop them.
+	if tmuxSocketParentPath != "" {
+		tmuxtest.ShutdownSocketRoot(tmuxSocketParentPath, io.Discard)
 	}
 	if !subprocess {
 		tmuxtest.KillAllTestSessions(&mainTB{})

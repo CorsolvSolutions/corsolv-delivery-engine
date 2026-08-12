@@ -196,7 +196,11 @@ func (m cleanupTestingM) Run() int {
 	code := m.m.Run()
 	for _, path := range m.paths {
 		if path != "" {
-			_ = os.RemoveAll(path)
+			// Stop the tmux servers before removing their socket parent.
+			// Removing it first does not stop them: they keep running with
+			// their TMUX_TMPDIR gone, invisible to list-sessions and beyond
+			// the reach of any later sweep.
+			tmuxtest.CleanupSocketRoot(path, os.Stderr)
 		}
 	}
 	return code
@@ -261,7 +265,7 @@ func TestMain(m *testing.M) {
 	// /tmp parent is removed here.
 	defer func() {
 		if tmuxSocketCleanupRoot != "" {
-			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+			tmuxtest.CleanupSocketRoot(tmuxSocketCleanupRoot, os.Stderr)
 		}
 	}()
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
