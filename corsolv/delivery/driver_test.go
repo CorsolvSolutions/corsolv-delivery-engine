@@ -1,3 +1,13 @@
+//go:build integration
+
+// These tests run the driver, which means spawning bash and letting it read
+// files. That is a process-owning test by this repository's taxonomy, so it
+// carries the integration tag rather than growing the untagged subprocess debt
+// baseline — which only ever ratchets down.
+//
+// The contract they check is still exercised on every pull request: a Go change
+// matches the `integration` path filter, and the integration shards run them.
+
 package main
 
 import (
@@ -129,6 +139,43 @@ func TestEveryCompiledCommandLineParsesInTheDriver(t *testing.T) {
 				t.Fatalf("the driver rejected the compiled invocation %v:\n%s", args, out)
 			}
 		})
+	}
+}
+
+// The other half of the cross-language contract. The driver reads two files by
+// name; the Go layer writes them. Nothing but this connects the two, and the
+// symptom of getting it wrong is a run that fails at its very first stage with
+// "no delivery intent" — which is exactly what happened before this test
+// existed.
+func TestTheGoLayerWritesEveryDocumentTheDriverReads(t *testing.T) {
+	root := t.TempDir()
+	in := fixtureIntent()
+	plan := fixturePlan()
+
+	if err := handoff.SaveIntent(root, in); err != nil {
+		t.Fatalf("SaveIntent: %v", err)
+	}
+	if err := handoff.SavePlan(root, plan); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+
+	// The exact paths driver.sh composes from -state.
+	stateDir := filepath.Join(root, in.ProjectID)
+	for _, name := range []string{"intent.json", "plan.json"} {
+		if _, err := os.Stat(filepath.Join(stateDir, name)); err != nil {
+			t.Errorf("the driver reads %s from the state directory, and it is not there: %v", name, err)
+		}
+	}
+
+	bash := bashOrSkip(t)
+	cmd := exec.Command(bash, driverPath(t), "dispatch", "-project", in.ProjectID, "-state", stateDir)
+	cmd.Env = append(os.Environ(), "CORSOLV_ENGINE_REPO="+engineRepo(t))
+	out, _ := cmd.CombinedOutput()
+
+	// It will not get far without a city, but it must get PAST reading its
+	// documents — that is the contract under test.
+	if strings.Contains(string(out), "no delivery intent") || strings.Contains(string(out), "no delivery plan") {
+		t.Fatalf("the driver could not read the documents the Go layer wrote:\n%s", out)
 	}
 }
 

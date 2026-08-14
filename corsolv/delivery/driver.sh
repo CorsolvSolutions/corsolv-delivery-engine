@@ -38,7 +38,6 @@ SOURCE_REPO="${CORSOLV_ENGINE_REPO:-/mnt/d/Development/corsolv-delivery-engine}"
 # shellcheck source=../p2-smoke/lib/sa-lib.sh
 . "$SOURCE_REPO/corsolv/p2-smoke/lib/sa-lib.sh"
 
-GH="${GH:-gh}"
 CONTROLLER_ID='Gas City Controller <support@corsolv.com>'
 
 # ---------------------------------------------------------------------------
@@ -50,11 +49,14 @@ PACKAGE=''
 PROJECT=''
 STATE=''
 
+FORGE=''
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -package) PACKAGE="${2:-}"; shift 2 ;;
     -project) PROJECT="${2:-}"; shift 2 ;;
     -state)   STATE="${2:-}"; shift 2 ;;
+    -gh)      FORGE="${2:-}"; shift 2 ;;
     *) printf 'driver: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -71,6 +73,13 @@ case "$STAGE" in
   city-up|dispatch|await|publish|project|publish-projection) ;;
   *) printf 'driver: unknown stage %s\n' "$STAGE" >&2; exit 2 ;;
 esac
+
+# The forge CLI comes from the run's host profile, passed in on the command
+# line. It is not defaulted to `gh` on PATH, because on this host the engine
+# runs under WSL while the only authenticated gh is a Windows install — and a
+# driver that silently fell back to a `gh` that is not there fails at the clone
+# with an authentication error that names nothing.
+GH="${FORGE:-${GH:-gh}}"
 
 INTENT="$STATE/intent.json"
 PLAN="$STATE/plan.json"
@@ -162,8 +171,23 @@ stage_city_up() {
   git -C "$RIG_PATH" config credential.helper "$GIT_CRED_HELPER"
 
   say "initializing the city at $CITY"
-  command gc init "$CITY" --provider claude --yes > "$EVIDENCE/init.txt" 2>&1 \
-    || die "gc init failed; see $EVIDENCE/init.txt"
+  command gc init "$CITY" --provider claude --yes > "$EVIDENCE/init.txt" 2>&1
+  # The exit code is not the verdict here, and treating it as one is wrong on
+  # exactly the machines this is meant to run on. `gc init` also tries to start
+  # the machine-wide supervisor, and on a host that already has one it reports a
+  # non-zero exit for a condition that is not merely benign but correct — only
+  # one supervisor may run per machine, and the city is registered with the one
+  # already there. So the verdict is the state on disk, not the status code.
+  if [ ! -f "$CITY/city.toml" ]; then
+    die "the city was not created; see $EVIDENCE/init.txt"
+  fi
+  if grep -q 'supervisor did not' "$EVIDENCE/init.txt" 2>/dev/null; then
+    if pgrep -f 'gc supervisor run' >/dev/null 2>&1; then
+      say 'a machine-wide supervisor is already running; this city is registered with it'
+    else
+      die "the city was created but no supervisor is running; see $EVIDENCE/init.txt"
+    fi
+  fi
 
   # A worker may not close a bead with an unearned disposition. `shipped`
   # requires a reachable commit, which this policy withholds from workers.
@@ -227,13 +251,24 @@ worker_lifecycle() {
   printf '%s' 'Verify your change with the project'"'"'s own gates before closing. You cannot run git; the controller publishes. Close the assigned bead with gc.work_outcome=blocked plus a gc.work_blocked_reason; do NOT claim shipped.'
 }
 
+# mk_bead <title> [description]
+#
+# The title is a LABEL and the description carries the work. A real work
+# package's objective is several sentences — it has to be, since the worker
+# reading it has no other context — and bead titles are capped at 500
+# characters. Putting the objective in the title made the cap a limit on how
+# precisely work could be described, which is exactly backwards.
 mk_bead() {
-  local text="$1" out rc
-  if [ "${#text}" -gt 500 ]; then
-    printf 'driver: bead text is %s chars, over the 500 limit\n' "${#text}" >&2
+  local title="$1" description="${2:-}" out rc
+  if [ "${#title}" -gt 500 ]; then
+    printf 'driver: bead title is %s chars, over the 500 limit\n' "${#title}" >&2
     return 1
   fi
-  out="$(gcx bd q "$text" 2>&1)"; rc=$?
+  if [ -n "$description" ]; then
+    out="$(gcx bd create "$title" --description "$description" --silent 2>&1)"; rc=$?
+  else
+    out="$(gcx bd create "$title" --silent 2>&1)"; rc=$?
+  fi
   [ "$rc" -eq 0 ] || { printf 'driver: creating bead: %s\n' "$(tail -1 <<<"$out")" >&2; return 1; }
   tail -1 <<<"$out"
 }
@@ -258,8 +293,10 @@ stage_dispatch() {
     artifact="$(pkg_field "$id" artifact)"
     paths="$(pkg_paths_csv "$id")"
 
-    bead="$(mk_bead "$objective $(worker_lifecycle)")" || die "creating the work bead for $id"
-    mergeBead="$(mk_bead "Controller publishes and merges the result of $id ($bead)")" \
+    bead="$(mk_bead "$(pkg_field "$id" title)" "$objective
+
+$(worker_lifecycle)")" || die "creating the work bead for $id"
+    mergeBead="$(mk_bead "Controller publishes and merges $id ($bead)")" \
       || die "creating the merge bead for $id"
 
     gcx bd update "$bead" --set-metadata "gc.required_artifact=$artifact" >/dev/null 2>&1

@@ -168,6 +168,39 @@ func TestProjectedStatusRespectsMergeAuthority(t *testing.T) {
 	}
 }
 
+// The driver cannot find the forge CLI for itself: on this host the engine runs
+// under WSL and the only authenticated gh is a Windows install. Where it lives
+// is declared once, in the host profile, and must reach every stage.
+func TestTheForgeCLIReachesTheDriver(t *testing.T) {
+	host := testHost(t)
+	_, work, err := Compile(planIntent(), validPlan(), host, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range work.Tasks {
+		if !containsPath(task.Argv, "-gh") {
+			t.Errorf("task %q was not told which forge CLI to use: %v", task.ID, task.Argv)
+			continue
+		}
+		if !containsPath(task.Argv, host.GitHubCommand) {
+			t.Errorf("task %q did not receive the declared forge CLI: %v", task.ID, task.Argv)
+		}
+	}
+
+	// A host that says nothing says nothing — the driver's own default applies.
+	bare := host
+	bare.GitHubCommand = ""
+	_, work, err = Compile(planIntent(), validPlan(), bare, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range work.Tasks {
+		if containsPath(task.Argv, "-gh") {
+			t.Errorf("task %q invented a forge CLI the host did not declare: %v", task.ID, task.Argv)
+		}
+	}
+}
+
 func TestCompiledSpecCarriesTheDeclaredAuthority(t *testing.T) {
 	host := testHost(t)
 	in := planIntent()

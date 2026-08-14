@@ -33,6 +33,8 @@ post a command is a remote shell with a project id attached.
 delivery preflight -intent intent.json     # could it start? starts nothing
 delivery start     -intent intent.json     # admit, plan, compile, begin
 delivery status    -project <id>           # the canonical state, as JSON
+delivery plan      -project <id>           # show the plan
+delivery plan      -project <id> -from f   # install one written by hand
 ```
 
 `start` is idempotent. Pressing it twice reports the existing delivery and
@@ -57,6 +59,17 @@ plannerArgs        = ["-p", "--permission-mode", "plan"]
 `githubCommand` points into `/mnt/c` because the engine runs under WSL while
 the only authenticated `gh` is a Windows install. That is exactly the kind of
 fact this file exists to hold.
+
+Planning is normally an agent's job. `delivery plan -from` exists for when a
+person already knows the answer, or when the agent runtime is unavailable —
+which on a real machine is a Tuesday rather than a hypothetical. An installed
+plan faces exactly the same validator an agent's would: the containment rules
+are not a property of who wrote the plan. It will not replace an existing plan,
+because a delivery part-way through has merged work against the plan it started
+with.
+
+There is deliberately no equivalent fallback for worker execution. A controller
+that wrote the code itself would be forging the evidence it later checks.
 
 ## What happens after Start
 

@@ -279,6 +279,45 @@ func PlanPath(deliveryRoot, projectID string) string {
 	return filepath.Join(deliveryRoot, projectID, "plan.json")
 }
 
+// IntentPath is where a delivery's accepted intent is kept, standing alone.
+//
+// The record already holds the intent, and this is not a second copy for the
+// Go layer's benefit — nothing here reads it. It exists because the driver that
+// executes the run is a separate program in a separate language, and its whole
+// contract is "the two validated documents": what to deliver, and the work
+// packages. Handing it the intent inside a record it would have to know how to
+// unwrap would make it a reader of this package's internal shape.
+func IntentPath(deliveryRoot, projectID string) string {
+	return filepath.Join(deliveryRoot, projectID, "intent.json")
+}
+
+// SaveIntent writes the accepted intent where the driver reads it.
+//
+// It is written from the RECORD's copy rather than from whatever the caller
+// happens to hold, so the document the driver acts on is provably the one that
+// was admitted — not a later request that was refused for differing from it.
+func SaveIntent(deliveryRoot string, in Intent) error {
+	if err := in.Validate(); err != nil {
+		return err
+	}
+	path := IntentPath(deliveryRoot, in.ProjectID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating delivery directory: %w", err)
+	}
+	data, err := json.MarshalIndent(in, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding delivery intent: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // run evidence
+		return fmt.Errorf("writing delivery intent: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("installing delivery intent %q: %w", path, err)
+	}
+	return nil
+}
+
 // SavePlan writes a validated delivery plan atomically.
 func SavePlan(deliveryRoot string, p DeliveryPlan) error {
 	path := PlanPath(deliveryRoot, p.ProjectID)

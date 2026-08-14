@@ -133,8 +133,18 @@ var bootstrapPolicy = Ledger{
 			// source belongs in the count rather than hidden from it. The
 			// untagged Debt baseline is untouched, which is the property that
 			// matters — the new file is integration-tagged.
-			BaselineCalls:   608,
-			BaselineFiles:   173,
+			//
+			// 608/173 -> 613/174: the managed-delivery driver contract test
+			// (corsolv/delivery/driver_test.go) adds one integration-tagged file
+			// with five subprocess call sites — a `bash` LookPath and four runs
+			// of the driver, one per compiled command line, which is the only
+			// thing connecting the Go compiler to the driver's own argument
+			// parser. Raised for the same reason as above: process-owning test
+			// source belongs in the audit count rather than hidden from it, and
+			// the untagged Debt baseline is again untouched because the file is
+			// integration-tagged.
+			BaselineCalls:   613,
+			BaselineFiles:   174,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

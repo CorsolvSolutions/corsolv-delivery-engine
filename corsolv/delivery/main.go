@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,6 +66,8 @@ func run() int {
 		return cmdStart(ctx, os.Args[2:])
 	case "run":
 		return cmdRun(ctx, os.Args[2:])
+	case "plan":
+		return cmdPlan(os.Args[2:])
 	case "status":
 		return cmdStatus(os.Args[2:])
 	case "-h", "--help", "help":
@@ -89,6 +92,10 @@ func usage() {
 
   run -project <id> [-host <file>]
       Execute the compiled run in the foreground. This is what start detaches.
+
+  plan -project <id> [-from <file>] [-host <file>]
+      Print the delivery's plan, or install one written by hand with -from.
+      An installed plan faces the same validator an agent's would.
 
   status -project <id> [-host <file>]
       Print the canonical delivery state as JSON.
@@ -164,7 +171,13 @@ func cmdPreflight(ctx context.Context, args []string) int {
 		fmt.Print(report.String())
 	}
 
-	switch report.Readiness {
+	readiness := deliveryReadiness(report)
+	if !*asJSON {
+		fmt.Printf("\nMANAGED DELIVERY: %s\n", readiness)
+		fmt.Println("The work plan is not adjudicated here — planning is the first thing a run does.")
+	}
+
+	switch readiness {
 	case unattended.Ready:
 		return exitOK
 	case unattended.ReadyWithKnownHumanBoundary:
@@ -172,6 +185,33 @@ func cmdPreflight(ctx context.Context, args []string) int {
 	default:
 		return exitRefused
 	}
+}
+
+// planCheckPrefix identifies the run-layer checks that adjudicate a work queue.
+//
+// Managed delivery has none at preflight, and cannot: the work is produced by a
+// planning agent as the FIRST thing a run does, so a plan exists only after
+// Start. The run layer reports those checks as not-reached, which is honest but
+// would make every delivery preflight say NOT-READY for the one reason that is
+// never a reason to refuse.
+const planCheckPrefix = "plan."
+
+// deliveryReadiness reduces a preflight report to a verdict about whether
+// managed delivery may begin.
+//
+// It is the run layer's own reduction over every check EXCEPT the plan ones.
+// Excluding them is a statement about when planning happens, not a relaxation
+// of a gate: nothing about ownership, the forge, the tools or the durable state
+// is skipped, and those are what "is it safe to start" actually means here.
+func deliveryReadiness(report *unattended.Report) unattended.Readiness {
+	var answerable unattended.Checks
+	for _, c := range report.Checks {
+		if strings.HasPrefix(c.ID, planCheckPrefix) {
+			continue
+		}
+		answerable = append(answerable, c)
+	}
+	return answerable.Readiness()
 }
 
 // preflightDelivery proves the ground before anything is created.
@@ -268,7 +308,7 @@ func cmdStart(ctx context.Context, args []string) int {
 	if err != nil {
 		return refuse(err)
 	}
-	if report.Readiness == unattended.NotReady {
+	if deliveryReadiness(report) == unattended.NotReady {
 		fmt.Fprint(os.Stderr, report.String())
 		return refuse(fmt.Errorf("managed delivery cannot start for %q: the ground is not ready", in.ProjectID))
 	}
@@ -376,6 +416,12 @@ func executeRun(ctx context.Context, host handoff.HostProfile, planner handoff.P
 	if _, _, err := handoff.WriteRunFiles(host, spec, work); err != nil {
 		return refuse(err)
 	}
+	// The driver is a separate program and reads the two validated documents
+	// directly. The intent comes from the RECORD, so what executes is provably
+	// what was admitted rather than a later request that was refused.
+	if err := handoff.SaveIntent(host.DeliveryRoot, in); err != nil {
+		return refuse(err)
+	}
 	if host.GitHubCommand != "" {
 		unattended.GitHubCommand = host.GitHubCommand
 	}
@@ -431,6 +477,87 @@ func executeRun(ctx context.Context, host handoff.HostProfile, planner handoff.P
 	default:
 		return exitRefused
 	}
+}
+
+// --- plan -------------------------------------------------------------------
+
+// cmdPlan shows a delivery's plan, or installs one a person wrote.
+//
+// Planning is normally an agent's job, and this does not change that. What it
+// changes is who may be the author when a person already knows the answer — or
+// when the agent runtime is unavailable, which on a real machine is a Tuesday
+// rather than a hypothetical. An installed plan goes through exactly the same
+// validator an agent's would: the containment rules are not a property of who
+// wrote the plan.
+//
+// It refuses to replace an existing plan. A delivery part-way through has
+// merged work against the plan it started with, and swapping in a new one would
+// leave the run reconciling two.
+func cmdPlan(args []string) int {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	projectID := fs.String("project", "", "the project whose plan to show or install")
+	from := fs.String("from", "", "install the plan in this JSON file")
+	hostPath := fs.String("host", defaultHostPath(), "path to the delivery host profile")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *projectID == "" {
+		return fail("plan needs -project")
+	}
+	if err := handoff.SanitizeProjectID(*projectID); err != nil {
+		return refuse(err)
+	}
+	host, _, err := loadHost(*hostPath)
+	if err != nil {
+		return refuse(err)
+	}
+
+	record, found, err := handoff.LoadRecord(host.DeliveryRoot, *projectID)
+	if err != nil {
+		return refuse(err)
+	}
+	if !found {
+		return refuse(fmt.Errorf("no managed delivery has been started for %q", *projectID))
+	}
+
+	existing, hasPlan, err := handoff.LoadPlan(host.DeliveryRoot, record.Intent)
+	if err != nil {
+		return refuse(err)
+	}
+
+	if *from == "" {
+		if !hasPlan {
+			fmt.Fprintf(os.Stderr, "delivery for %q has no plan yet\n", *projectID)
+			return exitHumanBoundary
+		}
+		data, merr := handoff.MarshalPlan(existing)
+		if merr != nil {
+			return refuse(merr)
+		}
+		fmt.Println(string(data))
+		return exitOK
+	}
+
+	if hasPlan {
+		return refuse(fmt.Errorf(
+			"delivery for %q already has a plan of %d work package(s) — a delivery part-way through has "+
+				"merged work against the plan it started with, so it is not replaced",
+			*projectID, len(existing.Packages)))
+	}
+
+	raw, err := os.ReadFile(*from) //nolint:gosec // an operator-supplied path
+	if err != nil {
+		return refuse(fmt.Errorf("reading the plan: %w", err))
+	}
+	plan, err := handoff.StaticPlanner{Raw: raw}.Plan(context.Background(), record.Intent)
+	if err != nil {
+		return refuse(err)
+	}
+	if err := handoff.SavePlan(host.DeliveryRoot, plan); err != nil {
+		return refuse(err)
+	}
+	fmt.Fprintf(os.Stderr, "installed a plan of %d work package(s) for %s\n", len(plan.Packages), *projectID)
+	return exitOK
 }
 
 // --- status -----------------------------------------------------------------

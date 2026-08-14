@@ -220,7 +220,15 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		}
 	}
 
+	// Every argument the driver receives comes from the host profile or from an
+	// identifier this package has already validated. The forge CLI is here for
+	// the same reason it is in the spec: where `gh` lives is machine-specific,
+	// and a driver left to find it on PATH fails at the clone with an
+	// authentication error that names nothing.
 	project := []string{"-project", in.ProjectID, "-state", host.ProjectDir(in.ProjectID)}
+	if cli := strings.TrimSpace(host.GitHubCommand); cli != "" {
+		project = append(project, "-gh", cli)
+	}
 
 	work.Tasks = append(work.Tasks,
 		stage(StageCityUp, "build the city, clone the working rig and declare the workers",
