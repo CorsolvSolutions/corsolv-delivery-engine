@@ -39,7 +39,11 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
+// `corsolv` is the fork-owned integration layer: harnesses, run specs and the
+// managed-delivery driver. Its markdown documents those components for
+// contributors working on this fork, and is not part of the published
+// documentation site.
+var docTreeIgnored = []string{"cmd", "corsolv", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
 // isNestedWorktreeRoot reports whether path is the root of a linked git
 // worktree checked out inside this tree. Linked worktrees have a .git FILE
