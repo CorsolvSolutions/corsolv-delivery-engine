@@ -395,18 +395,30 @@ func executeRun(ctx context.Context, host handoff.HostProfile, planner handoff.P
 	}
 	in := record.Intent
 
+	startedAt := time.Now().UTC()
+	runID := fmt.Sprintf("%s-%s", projectID, startedAt.Format("20060102T150405Z"))
+	reason := handoff.ReasonInitial
+	if len(record.Runs) > 0 {
+		reason = handoff.ReasonResumed
+	}
+
 	plan, planned, err := handoff.EnsurePlan(ctx, host.DeliveryRoot, in, planner)
 	if err != nil {
+		// Planning happens BEFORE the run layer starts, so a failure here leaves
+		// nothing behind that anything downstream can read — and a delivery whose
+		// planner died reads to the portal exactly like one still thinking. That
+		// is the worst possible answer: it is indistinguishable from progress,
+		// and it never changes.
+		//
+		// So the failure is published through the record the run layer already
+		// owns, rather than through a new one. Nothing here invents a second
+		// authority; it fills in the authority that would have existed a moment
+		// later.
+		recordPreRunBoundary(host, projectID, runID, startedAt, err)
 		return refuse(err)
 	}
 	if planned {
 		fmt.Fprintf(os.Stderr, "planned %d work package(s) for %s\n", len(plan.Packages), projectID)
-	}
-
-	runID := fmt.Sprintf("%s-%s", projectID, time.Now().UTC().Format("20060102T150405Z"))
-	reason := handoff.ReasonInitial
-	if len(record.Runs) > 0 {
-		reason = handoff.ReasonResumed
 	}
 
 	spec, work, err := handoff.Compile(in, plan, host, runID)
@@ -558,6 +570,44 @@ func cmdPlan(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "installed a plan of %d work package(s) for %s\n", len(plan.Packages), *projectID)
 	return exitOK
+}
+
+// recordPreRunBoundary publishes a failure that happened before the run layer
+// could publish one for itself.
+//
+// It is reported as a human boundary rather than as a plain failure, because
+// that is what it always is: whatever stopped planning — an exhausted spend
+// limit, an expired login, a brief the planner could not turn into safe work —
+// needs a person, and delivery genuinely did everything it could without one.
+// The reason carries the planner's own words, because a boundary nobody can
+// read is not actionable.
+//
+// A failure to write the record is reported and nothing more. The run has
+// already failed; losing the note about it must not also lose the exit code
+// that says so.
+func recordPreRunBoundary(host handoff.HostProfile, projectID, runID string, startedAt time.Time, cause error) {
+	stateDir := host.StateDir(projectID)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "delivery: recording the planning boundary: %v\n", err)
+		return
+	}
+
+	finished := time.Now().UTC()
+	event := unattended.CompletionEvent{
+		RunID:        runID,
+		ProjectID:    projectID,
+		Session:      "managed-delivery-" + projectID,
+		SessionLabel: "managed delivery — " + projectID,
+		Outcome:      unattended.RunBlockedHuman,
+		Reason:       "delivery could not plan the work",
+		StartedAt:    startedAt,
+		FinishedAt:   finished,
+		Duration:     finished.Sub(startedAt).Round(time.Second).String(),
+		HumanActions: []string{cause.Error()},
+	}
+	if err := unattended.WriteCompletion(stateDir, event); err != nil {
+		fmt.Fprintf(os.Stderr, "delivery: recording the planning boundary: %v\n", err)
+	}
 }
 
 // --- status -----------------------------------------------------------------
