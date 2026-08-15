@@ -356,6 +356,30 @@ func TestPreflightRequiresTheCityBuildingTools(t *testing.T) {
 	}
 }
 
+// An unreachable machine-wide supervisor must read as a decision for its owner,
+// not as a defect to retry. Left to the builtin rules it would be classified as
+// ordinary work and attempted again, which cannot help: the supervisor does not
+// start answering because it was asked twice.
+func TestAnUnreachableSupervisorIsAHumanDecision(t *testing.T) {
+	spec, _, err := Compile(planIntent(), validPlan(), testHost(t), "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unattended.ValidateClassificationRules(spec.Classification); err != nil {
+		t.Fatalf("the declared signatures must be usable: %v", err)
+	}
+
+	const observed = "driver[city-up]: the machine-wide supervisor cannot be asked to reconcile this city, " +
+		"so its agents will never start: gc supervisor reload: supervisor is not running"
+	got := unattended.Classify(observed, spec.Classification)
+	if got.Class != unattended.FailureHumanDecision {
+		t.Fatalf("classified as %q, want %q: %s", got.Class, unattended.FailureHumanDecision, got.Reason)
+	}
+	if unattended.PolicyFor(got.Class).MaxAttempts != 1 {
+		t.Error("a decision for a person must not be retried")
+	}
+}
+
 func TestCompiledSpecCarriesTheDeclaredAuthority(t *testing.T) {
 	host := testHost(t)
 	in := planIntent()

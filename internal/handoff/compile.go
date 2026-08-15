@@ -223,6 +223,17 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 			{Name: "HOME", Purpose: "resolves the agent runtime's configuration"},
 			{Name: "PATH", Purpose: "resolves every declared tool"},
 		},
+		// A run's own tooling knows what its stderr means, and this is the one
+		// sentence the builtin rules would read wrongly. "The supervisor cannot
+		// be asked to reconcile" is not a code defect to retry and not an
+		// environment fault to shrug at: restarting a machine-wide process that
+		// other work may depend on is a judgement, and this run is not entitled
+		// to make it.
+		Classification: []unattended.ClassificationRule{{
+			Pattern: `supervisor cannot be asked to reconcile`,
+			Class:   unattended.FailureHumanDecision,
+			Reason:  "the machine-wide supervisor is not answering, and restarting a shared process is its owner's decision",
+		}},
 		GitHub: &unattended.GitHubRequirement{
 			Repo:             in.Repository.Slug,
 			Command:          host.GitHubCommand,

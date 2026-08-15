@@ -279,6 +279,96 @@ func TestDriverRefusesWithoutValidatedDocuments(t *testing.T) {
 // controller primitives make through sa_gc, and for the lookup a child makes on
 // its own behalf.
 func TestCityUpUsesTheDeclaredBinariesRatherThanPATH(t *testing.T) {
+	r := runCityUpWithStubs(t, "printf 'reconciled 1 city\\n'; exit 0")
+	out, sabotage, calls := r.out, r.sabotage, r.calls
+
+	if strings.Contains(string(out), "command not found") {
+		t.Fatalf("the driver looked for the Gas City CLI on PATH:\n%s", out)
+	}
+	if _, err := os.Stat(sabotage); err == nil {
+		used, _ := os.ReadFile(sabotage) //nolint:gosec // test artifact
+		t.Fatalf("the driver ran the gc on PATH instead of the declared one:\n%s", used)
+	}
+	recorded, err := os.ReadFile(calls) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI was never invoked: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(recorded), "init") {
+		t.Fatalf("the declared Gas City CLI was not asked to build the city, only: %s", recorded)
+	}
+	// The city it created is the verdict the driver reads, so the stage must
+	// have gone past `gc init` rather than stopping on it.
+	if strings.Contains(string(out), "the city was not created") {
+		t.Fatalf("the city the declared CLI built was not seen:\n%s", out)
+	}
+
+	// And the lookup gc makes on its own behalf has to land on the declared
+	// beads binary, resolved through the run's own directory.
+	found, err := os.ReadFile(r.seenBeads) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI never reported its beads lookup: %v", err)
+	}
+	resolved := strings.TrimSpace(string(found))
+	if resolved == "" {
+		t.Fatalf("Gas City would not have found beads at all — the failure the pilot hit:\n%s", out)
+	}
+	assertResolvesTo(t, resolved, r.beads, "beads")
+
+	// Same for the agent runtime, which Gas City resolves by the provider's
+	// name — so the declared binary has to be exposed under that name.
+	found, err = os.ReadFile(r.seenProvider) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI never reported its provider lookup: %v", err)
+	}
+	resolved = strings.TrimSpace(string(found))
+	if resolved == "" {
+		t.Fatalf("Gas City would not have found its provider at all — the failure the pilot hit:\n%s", out)
+	}
+	assertResolvesTo(t, resolved, r.provider, "the agent runtime")
+}
+
+// The third failure, and the one that cost the most to see.
+//
+// A supervisor five days old held the API port with no control socket and no
+// children. `gc init` correctly declined to start a second one, the city was
+// registered with the first, and the driver — which asked only whether such a
+// process existed — declared the city up. Dispatch then routed four packages to
+// agents that were never spawned, and the run sat in `await` for its full
+// ninety-minute deadline waiting for workers that did not exist.
+//
+// The verdict has to be the supervisor's own answer, and the failure has to
+// name the decision rather than look like a fault to retry: restarting a
+// machine-wide process is its owner's call.
+func TestCityUpStopsWhenTheSupervisorCannotBeAskedToReconcile(t *testing.T) {
+	r := runCityUpWithStubs(t, "printf 'gc supervisor reload: supervisor is not running\\n'; exit 1")
+
+	if r.code == 0 {
+		t.Fatalf("city-up reported success over a supervisor that will never start its agents:\n%s", r.out)
+	}
+	if !strings.Contains(string(r.out), "cannot be asked to reconcile") {
+		t.Fatalf("the refusal must name what is wrong, got:\n%s", r.out)
+	}
+	if !strings.Contains(string(r.out), "decision for its owner") {
+		t.Fatalf("the refusal must name whose decision it is, got:\n%s", r.out)
+	}
+}
+
+// cityUpRun is one execution of the city-up stage against stubbed binaries.
+type cityUpRun struct {
+	out                     []byte
+	code                    int
+	sabotage, calls         string
+	seenBeads, seenProvider string
+	beads, provider         string
+}
+
+// runCityUpWithStubs runs the real city-up stage with every binary it reaches
+// replaced by a stub, and with a gc on PATH that would ruin the run if used.
+//
+// supervisorReply is the body the stub runs for `gc supervisor reload`, which is
+// the one answer the two callers differ on.
+func runCityUpWithStubs(t *testing.T, supervisorReply string) cityUpRun {
+	t.Helper()
 	bash := bashOrSkip(t)
 	for _, tool := range []string{"git", "jq"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -304,94 +394,55 @@ func TestCityUpUsesTheDeclaredBinariesRatherThanPATH(t *testing.T) {
 	// The gc the run must NOT use. It is first on PATH and leaves a mark, so
 	// "the declared one was used" is proved by an artifact rather than inferred
 	// from the absence of an error.
-	sabotage := filepath.Join(root, "path-gc-was-used")
+	r := cityUpRun{
+		sabotage:     filepath.Join(root, "path-gc-was-used"),
+		calls:        filepath.Join(root, "declared-gc-calls"),
+		seenBeads:    filepath.Join(root, "beads-gc-would-find"),
+		seenProvider: filepath.Join(root, "provider-gc-would-find"),
+		beads:        filepath.Join(root, "declared-bd-under-another-name"),
+		provider:     filepath.Join(root, "declared-provider-under-another-name"),
+	}
 	pathBin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(pathBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeScript(t, filepath.Join(pathBin, "gc"),
-		"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shquote(sabotage)+"\nexit 1\n")
+		"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shquote(r.sabotage)+"\nexit 1\n")
 
 	// The gc the host declares. It answers `init` by creating the city, which is
 	// the verdict the driver reads, records every call it received, and reports
-	// which beads binary its own PATH lookup would find — which is the thing gc
-	// really does and the driver cannot pass on a command line.
-	calls := filepath.Join(root, "declared-gc-calls")
-	seenBeads := filepath.Join(root, "beads-gc-would-find")
-	seenProvider := filepath.Join(root, "provider-gc-would-find")
+	// which beads binary and which agent runtime its own PATH lookup would find
+	// — the thing gc really does and the driver cannot pass on a command line.
 	declared := filepath.Join(root, "declared-gc")
 	writeScript(t, declared,
 		"#!/usr/bin/env bash\n"+
-			"printf '%s\\n' \"$*\" >> "+shquote(calls)+"\n"+
-			"command -v bd > "+shquote(seenBeads)+" 2>&1 || true\n"+
-			"command -v claude > "+shquote(seenProvider)+" 2>&1 || true\n"+
+			"printf '%s\\n' \"$*\" >> "+shquote(r.calls)+"\n"+
+			"command -v bd > "+shquote(r.seenBeads)+" 2>&1 || true\n"+
+			"command -v claude > "+shquote(r.seenProvider)+" 2>&1 || true\n"+
 			"if [ \"${1:-}\" = init ]; then mkdir -p \"$2\" && printf 'name = \"test\"\\n' > \"$2/city.toml\"; exit 0; fi\n"+
+			"if [ \"${1:-}\" = supervisor ]; then "+supervisorReply+"; fi\n"+
 			"if [ \"${3:-}\" = import ]; then exit 0; fi\n"+
 			"exit 1\n")
 
 	// Neither the beads binary nor the agent runtime is invoked by the driver;
 	// they only have to be findable, under paths nothing would stumble on by
 	// accident.
-	beads := filepath.Join(root, "declared-bd-under-another-name")
-	writeScript(t, beads, "#!/usr/bin/env bash\nexit 0\n")
-	provider := filepath.Join(root, "declared-provider-under-another-name")
-	writeScript(t, provider, "#!/usr/bin/env bash\nexit 0\n")
+	writeScript(t, r.beads, "#!/usr/bin/env bash\nexit 0\n")
+	writeScript(t, r.provider, "#!/usr/bin/env bash\nexit 0\n")
 
 	forge := filepath.Join(root, "gh")
 	writeScript(t, forge, "#!/usr/bin/env bash\nprintf 'x\\n'\nexit 0\n")
 
 	cmd := exec.Command(bash, driverPath(t), "city-up",
 		"-project", in.ProjectID, "-state", state,
-		"-gh", forge, "-gc", declared, "-bd", beads,
-		"-provider", "claude", "-provider-bin", provider)
+		"-gh", forge, "-gc", declared, "-bd", r.beads,
+		"-provider", "claude", "-provider-bin", r.provider)
 	cmd.Env = append(os.Environ(),
 		"CORSOLV_ENGINE_REPO="+engineRepo(t),
 		"PATH="+pathBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	out, _ := cmd.CombinedOutput()
-
-	if strings.Contains(string(out), "command not found") {
-		t.Fatalf("the driver looked for the Gas City CLI on PATH:\n%s", out)
-	}
-	if _, err := os.Stat(sabotage); err == nil {
-		used, _ := os.ReadFile(sabotage) //nolint:gosec // test artifact
-		t.Fatalf("the driver ran the gc on PATH instead of the declared one:\n%s", used)
-	}
-	recorded, err := os.ReadFile(calls) //nolint:gosec // test artifact
-	if err != nil {
-		t.Fatalf("the declared Gas City CLI was never invoked: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(recorded), "init") {
-		t.Fatalf("the declared Gas City CLI was not asked to build the city, only: %s", recorded)
-	}
-	// The city it created is the verdict the driver reads, so the stage must
-	// have gone past `gc init` rather than stopping on it.
-	if strings.Contains(string(out), "the city was not created") {
-		t.Fatalf("the city the declared CLI built was not seen:\n%s", out)
-	}
-
-	// And the lookup gc makes on its own behalf has to land on the declared
-	// beads binary, resolved through the run's own directory.
-	found, err := os.ReadFile(seenBeads) //nolint:gosec // test artifact
-	if err != nil {
-		t.Fatalf("the declared Gas City CLI never reported its beads lookup: %v", err)
-	}
-	resolved := strings.TrimSpace(string(found))
-	if resolved == "" {
-		t.Fatalf("Gas City would not have found beads at all — the failure the pilot hit:\n%s", out)
-	}
-	assertResolvesTo(t, resolved, beads, "beads")
-
-	// Same for the agent runtime, which Gas City resolves by the provider's
-	// name — so the declared binary has to be exposed under that name.
-	found, err = os.ReadFile(seenProvider) //nolint:gosec // test artifact
-	if err != nil {
-		t.Fatalf("the declared Gas City CLI never reported its provider lookup: %v", err)
-	}
-	resolved = strings.TrimSpace(string(found))
-	if resolved == "" {
-		t.Fatalf("Gas City would not have found its provider at all — the failure the pilot hit:\n%s", out)
-	}
-	assertResolvesTo(t, resolved, provider, "the agent runtime")
+	r.out, _ = cmd.CombinedOutput()
+	r.code = cmd.ProcessState.ExitCode()
+	return r
 }
 
 // assertResolvesTo compares two paths after following symlinks, which is how

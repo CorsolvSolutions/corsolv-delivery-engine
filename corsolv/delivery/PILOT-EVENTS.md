@@ -57,6 +57,10 @@ Date: 2026-08-15
 | 15:54 | `COMPLETION_EVIDENCE` | — | automatic | Planner produced 4 bounded work packages through the validator | plan accepted | — |
 | 15:54 | `WORKER_FAILURE` | — | automatic | `city-up` cloned the rig and then died: `driver.sh: line 174: gc: command not found` | run failed in 1s; 1 failed, 8 held | — |
 | 16:43 | `WORKER_RETRY` | — | automatic | With gc declared, `city-up` reached `gc rig add` and died there: `bd: not found`, from a script Gas City shells out to | second binary, same cause | — |
+| 16:48 | `WORKER_RETRY` | — | automatic | With beads declared, `gc init` halted at provider readiness: `provider "claude" command "claude"` not found, leaving the city built but its pack imports uninstalled | third binary, same cause; late failure read as "the rig's bead store never became ready" | — |
+| 17:10 | `RECOVERY` | — | automatic | With all three declared, `city-up` completed: city built, rig cloned, imports installed, 4 bounded worker agents declared | city-up green | — |
+| 17:12 | `RECOVERY` | all 4 | automatic | `dispatch` created 8 beads (4 work, 4 controller merge), wired dependencies and slung each package to its worker | dispatch complete | — |
+| 17:12 | `APPROVAL_REQUIRED` | all 4 | human | No worker session ever started: the machine-wide supervisor (pid 388, up 5d) holds the API port with no control socket and no children, so `gc supervisor reload` reports it not running | delivery cannot proceed; restarting a shared process is its owner's decision | — |
 
 ### The defect the second pilot found
 
@@ -83,6 +87,41 @@ own, so a fix touching both halves could arrive half-applied.
 All of it is corrected: both CLIs are declared in the host profile and reach
 every stage as `-gc` and `-bd`, preflight requires both by name (29 checks, not
 27), and the driver reads its library from the tree it ships in.
+
+### What stopped it after city-up
+
+**A supervisor that exists is not a supervisor that works.** `gc init` registers
+the city and then declines to start a second supervisor, correctly, because only
+one may own the port — and leaves the city registered for the running one to
+pick up. The driver checked that such a process existed and called the city up.
+
+The process that existed had been running since 2026-08-10, held
+`127.0.0.1:8372`, and had **no control socket and no children**. `gc supervisor
+status` reports it running on an API liveness probe while admitting the control
+socket is unreachable; `gc supervisor reload` — the request that makes a
+supervisor learn about a city registered after it started — answers *"supervisor
+is not running"*. So the city was registered with a process that would never
+reconcile it. Dispatch routed all four packages to worker agents that were never
+spawned, and the run sat in `await` for its full ninety-minute deadline waiting
+for workers that did not exist.
+
+The driver now takes the supervisor's own answer as the verdict, and asks before
+dispatch rather than discovering it after: reconciling is both the check and the
+step. The failure is declared to the run layer as a `human-decision`, because
+restarting a machine-wide process other work may depend on is a judgement this
+run is not entitled to make.
+
+**The one action required, and it is a person's:** the stale supervisor must be
+replaced —
+
+```
+gc supervisor stop      # will not reach it; the control socket is gone
+kill 388                # the process started 2026-08-10 that owns 127.0.0.1:8372
+gc supervisor start
+```
+
+No new supervisor can take over while pid 388 holds the port, which is why
+`gc init` was right to refuse and why nothing this run could do would fix it.
 
 ### Portal defect observed, not fixed here
 
