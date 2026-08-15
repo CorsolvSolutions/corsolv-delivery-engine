@@ -619,6 +619,21 @@ stage_publish() {
   # the permission list buys scope clarity rather than containment. What
   # contains the worker is that only the controller publishes — and for that to
   # mean anything the controller must look at the change set first.
+  #
+  # First, take back what the worker could not. bounded-project grants Write and
+  # Edit and nothing that removes a file, so a transient probe the worker wrote
+  # to verify its own configuration is a file it cannot delete — and an
+  # undeletable stray would block this package permanently. The controller moves
+  # untracked out-of-scope files into evidence before it gates anything, so what
+  # it verifies and what it commits are the same authorised tree. A TRACKED file
+  # changed out of scope is not touched and still refuses below.
+  local quarantined
+  quarantined="$(quarantine_untracked_out_of_scope "$wt" "$paths" "$EVIDENCE/quarantined-$PACKAGE")"
+  if [ -n "$quarantined" ]; then
+    say "$PACKAGE left untracked files outside its scope; quarantined to evidence: $(tr '\n' ' ' <<<"$quarantined")"
+    printf '%s\n' "$quarantined" > "$EVIDENCE/quarantined-$PACKAGE.txt"
+  fi
+
   local violations
   violations="$(publication_scope_violations "$wt" "$paths")"
   if [ -n "$violations" ]; then

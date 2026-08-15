@@ -465,6 +465,176 @@ else
 fi
 
 # ===========================================================================
+section '6b. publication scope — attribution is per FILE'
+# ===========================================================================
+#
+# A package that creates a new directory is the normal case, not the exception:
+# `src/`, `tests/`, `public/` do not exist before the scaffold package runs. Git
+# reports an untracked directory as the directory alone unless asked otherwise,
+# so attribution built on the default listing judges a path the bead can never
+# authorise — and every compliant package that creates a directory is refused.
+# These controls pin attribution to the file the bead actually named.
+
+DIR_RIG="$(new_rig dir-rig)"
+mkdir -p "$DIR_RIG/src" "$DIR_RIG/tests"
+printf 'export const x = 1;\n' > "$DIR_RIG/src/config.js"
+printf 'test\n'                > "$DIR_RIG/tests/config.test.js"
+
+VIOL="$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js')"
+if [ -z "$VIOL" ]; then
+  pass 'a fully authorised NEW directory does not block publication'
+else
+  fail 'a fully authorised NEW directory does not block publication' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+
+# The same listing must still catch the file nobody authorised — collapsing to
+# the directory would hide it just as readily as it hid the authorised ones.
+printf 'x\n' > "$DIR_RIG/src/smuggled.js"
+VIOL="$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js')"
+if grep -qx 'src/smuggled.js' <<<"$VIOL"; then
+  pass 'an unauthorised file inside an authorised directory is still refused'
+else
+  fail 'an unauthorised file inside an authorised directory is still refused' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+rm -f "$DIR_RIG/src/smuggled.js"
+
+# Attribution must survive a filename git would otherwise quote and a reader
+# would otherwise split on whitespace.
+printf 'x\n' > "$DIR_RIG/src/two words.js"
+VIOL="$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js')"
+if grep -qx 'src/two words.js' <<<"$VIOL"; then
+  pass 'a path containing a space is attributed whole'
+else
+  fail 'a path containing a space is attributed whole' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+if [ -z "$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js,src/two words.js')" ]; then
+  pass 'a path containing a space can be authorised'
+else
+  fail 'a path containing a space can be authorised' \
+       "$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js,src/two words.js' | tr '\n' ' ')"
+fi
+rm -f "$DIR_RIG/src/two words.js"
+
+# A rename moves content between two paths. Both ends are the worker's doing, so
+# both must be attributed — otherwise a tracked file can be emptied out of scope
+# by moving it somewhere the bead did authorise.
+git_quiet "$DIR_RIG" add src/config.js tests/config.test.js
+git_quiet "$DIR_RIG" commit -qm 'chore: track the authorised files'
+git -C "$DIR_RIG" mv src/config.js src/renamed.js
+VIOL="$(publication_scope_violations "$DIR_RIG" 'src/config.js,tests/config.test.js')"
+if grep -qx 'src/renamed.js' <<<"$VIOL"; then
+  pass 'a rename attributes its destination path'
+else
+  fail 'a rename attributes its destination path' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+git -C "$DIR_RIG" mv src/renamed.js src/config.js
+
+# ===========================================================================
+section '6c. transient files — a worker that cannot delete is not unpublishable'
+# ===========================================================================
+#
+# bounded-project grants Write and Edit and nothing that REMOVES a file, and a
+# cleanup command cannot be declared as a verification gate. A worker that
+# writes a transient probe to prove its lint or type configuration covers a
+# directory therefore permanently blocks its own package: it can create the file
+# and it cannot take it back.
+#
+# The controller can. It owns the worktree, it commits only the paths the bead
+# named — so an untracked out-of-scope file was never going to reach the commit
+# anyway — and the only real risk such a file carries is contaminating the gate
+# run the controller does before publishing. So the controller QUARANTINES it:
+# moves it out of the tree, keeps it as evidence, and gates the clean tree.
+#
+# The authority split is unchanged, and these controls pin the two edges of it:
+# an untracked stray is recoverable, a TRACKED file changed out of scope is not.
+
+Q_RIG="$(new_rig quarantine-rig)"
+mkdir -p "$Q_RIG/src" "$Q_RIG/public"
+printf 'export const x = 1;\n'    > "$Q_RIG/src/config.js"
+printf 'tracked\n'                > "$Q_RIG/keep.ts"
+git_quiet "$Q_RIG" add keep.ts
+git_quiet "$Q_RIG" commit -qm 'chore: a tracked file the bead does not authorise'
+printf 'probe\n'                  > "$Q_RIG/public/__lintprobe.js"
+printf 'probe\n'                  > "$Q_RIG/src/__typeprobe.js"
+Q_DEST="$WORK/quarantined"
+
+MOVED="$(quarantine_untracked_out_of_scope "$Q_RIG" 'src/config.js' "$Q_DEST")"
+if grep -qx 'public/__lintprobe.js' <<<"$MOVED" && grep -qx 'src/__typeprobe.js' <<<"$MOVED"; then
+  pass 'the controller reports every untracked file it quarantined'
+else
+  fail 'the controller reports every untracked file it quarantined' \
+       "reported: $(printf '%s' "$MOVED" | tr '\n' ' ')"
+fi
+if [ ! -e "$Q_RIG/public/__lintprobe.js" ] && [ ! -e "$Q_RIG/src/__typeprobe.js" ]; then
+  pass 'a quarantined file is gone from the tree the controller gates and commits'
+else
+  fail 'a quarantined file is gone from the tree the controller gates and commits' \
+       'a probe file survived quarantine'
+fi
+if [ -f "$Q_DEST/public/__lintprobe.js" ] && [ -f "$Q_DEST/src/__typeprobe.js" ]; then
+  pass 'a quarantined file is kept as evidence, not destroyed'
+else
+  fail 'a quarantined file is kept as evidence, not destroyed' \
+       "$(ls -R "$Q_DEST" 2>&1 | tr '\n' ' ')"
+fi
+if [ -f "$Q_RIG/src/config.js" ]; then
+  pass 'quarantine leaves the authorised work untouched'
+else
+  fail 'quarantine leaves the authorised work untouched' 'src/config.js was removed'
+fi
+
+# THE EDGE THAT MUST NOT MOVE. A tracked file changed outside the bead's scope
+# is a mutation of content the project already had. Quarantining it would be the
+# controller silently reverting the worker, and treating it as transient would
+# let an out-of-scope edit ride to publication. It stays a refusal.
+printf 'tampered\n' > "$Q_RIG/keep.ts"
+MOVED="$(quarantine_untracked_out_of_scope "$Q_RIG" 'src/config.js' "$Q_DEST")"
+if grep -qx 'keep.ts' <<<"$MOVED"; then
+  fail 'quarantine never touches a TRACKED out-of-scope change' 'keep.ts was quarantined'
+else
+  pass 'quarantine never touches a TRACKED out-of-scope change'
+fi
+if [ "$(cat "$Q_RIG/keep.ts")" = 'tampered' ]; then
+  pass 'a tracked out-of-scope change is left exactly as the worker left it'
+else
+  fail 'a tracked out-of-scope change is left exactly as the worker left it' \
+       "keep.ts now reads: $(cat "$Q_RIG/keep.ts")"
+fi
+VIOL="$(publication_scope_violations "$Q_RIG" 'src/config.js')"
+if grep -qx 'keep.ts' <<<"$VIOL"; then
+  pass 'a tracked out-of-scope change still REFUSES publication after quarantine'
+else
+  fail 'a tracked out-of-scope change still refuses publication after quarantine' \
+       "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
+fi
+
+# After quarantine the only thing standing between a compliant package and
+# publication must be nothing at all.
+git_quiet "$Q_RIG" checkout -- keep.ts
+if [ -z "$(publication_scope_violations "$Q_RIG" 'src/config.js')" ]; then
+  pass 'a package whose only strays were transient publishes after quarantine'
+else
+  fail 'a package whose only strays were transient publishes after quarantine' \
+       "$(publication_scope_violations "$Q_RIG" 'src/config.js' | tr '\n' ' ')"
+fi
+
+# Quarantine is not a licence to launder infrastructure: paths excluded from
+# attribution were never violations, so moving them would delete a real
+# node_modules the very next gate needs.
+mkdir -p "$Q_RIG/node_modules/left-pad"
+printf 'x\n' > "$Q_RIG/node_modules/left-pad/index.js"
+quarantine_untracked_out_of_scope "$Q_RIG" 'src/config.js' "$Q_DEST" >/dev/null
+if [ -f "$Q_RIG/node_modules/left-pad/index.js" ]; then
+  pass 'quarantine does not remove installed dependencies'
+else
+  fail 'quarantine does not remove installed dependencies' 'node_modules was quarantined'
+fi
+
+# ===========================================================================
 section '7. required-job CI adjudication'
 # ===========================================================================
 #

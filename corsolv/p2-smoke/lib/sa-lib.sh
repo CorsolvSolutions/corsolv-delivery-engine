@@ -480,25 +480,106 @@ sa_session_workdir() {
 # not the worker's to author in the first place.
 SA_PUBLICATION_INFRA_RE='^(\.beads/|\.gc/|\.claude/|node_modules/|dist/|\.gitignore$)'
 
+# publication_changed_status <worktree>
+#
+# Emits the worktree's change set as NUL-terminated "<XY><TAB><path>" records —
+# the single reading of git status every attribution decision below is built on.
+#
+# Three properties the default reading does not have:
+#
+#   -uall  an untracked DIRECTORY is otherwise reported as the directory alone.
+#          A bead authorises files, so "src/" is a path it can never name, and
+#          collapsing hides the authorised and unauthorised alike: every package
+#          that creates a directory is refused, and a stray inside one that
+#          already existed is invisible.
+#   -z     git quotes a path containing a space or a newline, and any reader
+#          splitting on whitespace attributes a fragment of it.
+#   R/C    a rename emits its destination and then its origin as two records.
+#          Both ends are the worker's doing, so both must be attributable.
+publication_changed_status() {
+  local wt="$1" rec status wantOrigin=0
+  while IFS= read -r -d '' rec; do
+    if [ "$wantOrigin" = '1' ]; then
+      wantOrigin=0
+      printf '%s\t%s\0' 'R ' "$rec"
+      continue
+    fi
+    status="${rec:0:2}"
+    printf '%s\t%s\0' "$status" "${rec:3}"
+    case "$status" in
+      R*|C*|*R|*C) wantOrigin=1 ;;
+    esac
+  done < <(git -C "$wt" status --porcelain=v1 -uall -z 2>/dev/null)
+}
+
+# publication_path_is_attributable <path> <authorised-csv>
+#
+# True when the path is the worker's to answer for and the bead did not name it.
+publication_path_is_attributable() {
+  local path="$1" authorised="$2"
+  grep -qE "$SA_PUBLICATION_INFRA_RE" <<<"$path" && return 1
+  # Exact membership, not prefix: "src/add.ts" must not authorise
+  # "src/add.ts.bak", and an authorised directory is spelled out per file.
+  case ",$authorised," in
+    *",$path,"*) return 1 ;;
+  esac
+  return 0
+}
+
 # publication_scope_violations <worktree> <authorised-csv>
 #
 # Prints every changed path the bead did not authorise, one per line. Empty
 # output means publication may proceed. Deliberately reports rather than
 # decides, so the caller records the violation in its own control ledger.
 publication_scope_violations() {
-  local wt="$1" authorised="$2" changed path
-  changed="$(git -C "$wt" status --porcelain 2>/dev/null | awk '{print $NF}')"
-  [ -n "$changed" ] || return 0
-  while IFS= read -r path; do
+  local wt="$1" authorised="$2" rec path
+  while IFS= read -r -d '' rec; do
+    path="${rec#*$'\t'}"
     [ -n "$path" ] || continue
-    grep -qE "$SA_PUBLICATION_INFRA_RE" <<<"$path" && continue
-    # Exact membership, not prefix: "src/add.ts" must not authorise
-    # "src/add.ts.bak", and an authorised directory is spelled out per file.
-    case ",$authorised," in
-      *",$path,"*) continue ;;
-    esac
+    publication_path_is_attributable "$path" "$authorised" || continue
     printf '%s\n' "$path"
-  done <<<"$changed"
+  done < <(publication_changed_status "$wt")
+}
+
+# quarantine_untracked_out_of_scope <worktree> <authorised-csv> <dest-dir>
+#
+# Moves every UNTRACKED out-of-scope file into <dest-dir> under its original
+# relative path and prints what it moved. Returns 0 whether or not it moved
+# anything; a caller that needs to know reads the output.
+#
+# Why the controller may do this, when it may not revert a worker:
+#
+# `bounded-project` grants Write and Edit and nothing that REMOVES a file, and a
+# cleanup command cannot be declared as a verification gate. So a worker that
+# writes a transient probe — to prove its lint config really covers `public/`,
+# say — can create the file and cannot take it back, and the package it just
+# completed correctly is unpublishable forever.
+#
+# An untracked out-of-scope file was never going to be published: the controller
+# commits the bead's named paths and nothing else. The only harm it can still do
+# is contaminate the gate run the controller performs before publishing. Moving
+# it out of the tree removes exactly that harm and destroys nothing — the file
+# is kept as evidence, and the same file remains a scope violation if the worker
+# ever gets it committed.
+#
+# A TRACKED file changed out of scope is deliberately NOT touched. That is a
+# mutation of content the project already had; quarantining it would be the
+# controller silently reverting the worker, and it stays a refusal.
+quarantine_untracked_out_of_scope() {
+  local wt="$1" authorised="$2" dest="$3" rec path dir
+  while IFS= read -r -d '' rec; do
+    [ "${rec%%$'\t'*}" = '??' ] || continue
+    path="${rec#*$'\t'}"
+    [ -n "$path" ] || continue
+    publication_path_is_attributable "$path" "$authorised" || continue
+    dir="$(dirname "$path")"
+    mkdir -p "$dest/$dir" || continue
+    mv -f "$wt/$path" "$dest/$path" || continue
+    # Leave the tree as though the file had never been written. Single level and
+    # only when empty, so this can never reach a directory holding real work.
+    [ "$dir" = '.' ] || rmdir "$wt/$dir" 2>/dev/null || true
+    printf '%s\n' "$path"
+  done < <(publication_changed_status "$wt")
 }
 
 # ---------------------------------------------------------------------------
