@@ -88,6 +88,30 @@ that wrote the code itself would be forging the evidence it later checks.
    and published to `delivery/gascity/PROJECT-STATE.yml`, which the portal
    reads from the authoritative ref.
 
+## Resuming an interrupted delivery
+
+Every stage is idempotent, but idempotent does not mean "skip what is already
+recorded". The run's `runtime.json` is scratch memory, and its `dispatched`
+timestamp is durable *history*: it says routing happened once, never that a
+worker still exists. So a resumed `dispatch` re-derives, per package, from state
+it re-reads rather than remembers:
+
+| Bead | Worker | What resume does |
+| --- | --- | --- |
+| closed | — | nothing; the work is done |
+| open | a live Gas City session holds it | nothing; a second sling would duplicate it |
+| open | none | routes it again, through the same sling that dispatched it |
+| open | no worktree yet (upstreams unmerged) | nothing; `publish` cuts its base and starts it there |
+
+Liveness is Gas City's own answer, not a file: `gc session list` asks the runtime
+provider whether the session is really running and reports a killed worker's
+surviving record as `asleep`.
+
+`await` waits only for the packages it is responsible for — the ones dispatch
+gave a worktree. If its deadline expires while any of those is still open, the
+stage **fails**. A deadline is not an outcome, and reporting one as success is
+how a run reached publication with work that had never been done.
+
 ## Why the driver is bash
 
 The controller primitives it needs already exist, proven, in

@@ -240,6 +240,96 @@ TOML
   say "city up: $(packages | wc -w) worker agent(s) declared"
 }
 
+# ---------------------------------------------------------------------------
+# Worker liveness — re-derived, never remembered.
+#
+# `dispatched` is durable HISTORY: it records that routing happened once, and
+# it stays true forever. Treating it as a statement about now — "a worker
+# exists and owns every still-open bead" — is false the moment anything is
+# interrupted, and that falsehood is what a resumed run acted on: it skipped
+# dispatch, started no worker, and then waited out its whole deadline on a bead
+# nobody was holding.
+#
+# So liveness is a question, asked of the things that actually know the answer:
+# the bead store for whether the work is still open, and Gas City's own session
+# list for whether a worker is running. Nothing new is written down.
+# ---------------------------------------------------------------------------
+
+# WORKER_LIVE_STATES are the session states in which a worker is running, or is
+# on its way to running. Every other state — asleep, suspended, draining,
+# drained, failed-create, quarantined, archived, closed — means no process is
+# doing the work, whatever the session record remembers about having started.
+#
+# `gc session list` is a live read, not a stored one: it asks the runtime
+# provider whether the session is really running and downgrades a stale
+# `active` to `asleep` when it is not. That is what makes it the authority here
+# rather than another thing to distrust.
+WORKER_LIVE_STATES='active awake start-pending creating'
+
+# worker_is_live <package-id> — true when Gas City reports a running session for
+# this package's worker agent.
+#
+# One agent per package is the dispatch design, so the agent IS the ownership
+# link: a live session for worker-<id> is a worker holding that package's work.
+worker_is_live() {
+  local agent="worker-$1" json
+  json="$(gcx session list --json 2>/dev/null || true)"
+  [ -n "$json" ] || return 1
+  jq -e --arg a "$agent" --arg live "$WORKER_LIVE_STATES" '
+      ($live | split(" ")) as $ok
+      | (.sessions // [])
+      | map(select(
+          ((.template // "") == $a)
+          or ((.template // "") | endswith("/" + $a))
+          or ((.agent_name // "") == $a)))
+      | map(select((.closed // false) | not))
+      | map(select((.state // "") as $s | ($ok | index($s)) != null))
+      | length > 0
+    ' <<<"$json" >/dev/null 2>&1
+}
+
+# recover_worker <package-id> — put a worker back on work that still needs one.
+#
+# The three cases, decided from re-read state and nothing else:
+#
+#   bead closed                    the work is done; replaying it would hand a
+#                                  worker a bead it cannot act on
+#   bead open, worker live         someone is on it; a second sling would be a
+#                                  duplicate
+#   bead open, no worker           the orphan case — route it again, through the
+#                                  same sling dispatch used in the first place
+#
+# A package whose upstreams have not merged is a fourth case that is not an
+# orphan: it has no worktree because it has no base yet, and publish cuts one
+# and starts its worker then. Routing it here would put a worker somewhere that
+# does not exist.
+recover_worker() {
+  local id="$1" bead wt
+  bead="$(rt_get "bead.$id")"
+  [ -n "$bead" ] || return 0
+
+  if bead_is_closed "$bead"; then
+    return 0
+  fi
+
+  wt="$(rt_get "wt.$id")"
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    say "$id: no worktree yet; its worker starts when its upstreams have merged"
+    return 0
+  fi
+
+  if worker_is_live "$id"; then
+    say "$id: a live worker still holds bead $bead"
+    return 0
+  fi
+
+  say "$id: bead $bead is open and no worker holds it; routing it again"
+  sa_ledger_note "recovering $id: re-routing open bead $bead with no live worker"
+  gcx sling "$RIG_NAME/worker-$id" "$bead" --no-formula --no-convoy \
+    >> "$EVIDENCE/route-$id.txt" 2>&1 \
+    || say "re-routing $id reported a problem; see route-$id.txt"
+}
+
 # ===========================================================================
 # STAGE dispatch
 # ===========================================================================
@@ -277,8 +367,17 @@ stage_dispatch() {
   [ -n "$CITY" ] || die 'no city; city-up has not run'
   cd "$CITY" || die "cannot enter $CITY"
 
+  # Already dispatched means the beads exist, their dependencies are wired and
+  # their scope is stamped — none of which is created twice. It does NOT mean
+  # the work is still being done. This is the stage a resumed run re-enters, so
+  # it is where reality is re-derived: every package that is still open with no
+  # worker holding it gets one, through the routing that put it there first.
   if [ -n "$(rt_get dispatched)" ]; then
-    say 'work already dispatched'
+    say 'work was already dispatched; re-deriving which of it still needs a worker'
+    local pkg
+    for pkg in $(packages); do
+      recover_worker "$pkg"
+    done
     return 0
   fi
 
@@ -370,6 +469,19 @@ prepare_worktree() {
 # STAGE await
 # ===========================================================================
 
+# awaited_packages are the packages this stage is actually responsible for.
+#
+# A package whose upstreams have not merged has no worktree yet and its bead is
+# correctly blocked — publish cuts its base and waits for it there. Counting it
+# here made the deadline the NORMAL outcome for any delivery with a dependent
+# package, which is precisely why expiring quietly looked survivable.
+awaited_packages() {
+  local id
+  for id in $(packages); do
+    [ -n "$(pkg_deps "$id")" ] || printf '%s\n' "$id"
+  done
+}
+
 stage_await() {
   [ -n "$CITY" ] || die 'no city; city-up has not run'
   cd "$CITY" || die "cannot enter $CITY"
@@ -379,21 +491,25 @@ stage_await() {
 
   while true; do
     remaining=''
-    for id in $(packages); do
+    for id in $(awaited_packages); do
       bead="$(rt_get "bead.$id")"
       [ -n "$bead" ] || continue
-      # A package whose upstreams have not merged has no worktree yet and its
-      # bead is correctly blocked; it is not something to wait for here.
       bead_is_closed "$bead" || remaining="$remaining $id"
     done
-    [ -z "$remaining" ] && { say 'every work bead is closed'; return 0; }
+    [ -z "$remaining" ] && { say 'every work bead this stage waits for is closed'; return 0; }
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      say "deadline reached with work outstanding:$remaining"
-      # NOT a failure of this stage. The packages that did finish are still
-      # publishable, and reporting a hard failure here would throw away real
-      # completed work because a sibling was slow.
-      return 0
+      # A deadline is not an outcome. Reporting success here said the wait had
+      # succeeded when the work it waited for was still open, and publication
+      # then refused on a missing artifact — naming the wrong thing, hours after
+      # the real event, with the run's own record claiming the stage passed.
+      #
+      # The truthful answer is that this stage did not achieve what it waited
+      # for. It costs the packages that DID finish their publication in this
+      # run, which is a real loss; the run's state stays honest and resumable,
+      # which is the larger one.
+      say "deadline reached with mandatory work still open:$remaining"
+      return 1
     fi
     sleep 15
   done
@@ -431,7 +547,15 @@ stage_publish() {
     wt_add "$RIG_PATH" "$wt" "$branch" "$mergedBase" || die "creating the worktree for $PACKAGE"
     prepare_worktree "$wt" "$PACKAGE"
     say "cut $PACKAGE from the merged base ${mergedBase:0:9} — its worker runs now"
-    gcx sling "$RIG_NAME/worker-$PACKAGE" "$bead" --no-formula --no-convoy >/dev/null 2>&1
+  fi
+
+  # An open bead here means the work is not done, and the worktree existing says
+  # nothing about whether anyone is doing it. Gating the worker on the WORKTREE
+  # being absent conflated "there is nowhere to work" with "someone is working":
+  # an interrupted run whose worktree survived arrived here with an open bead, no
+  # worker, and nothing left in the run that would ever start one.
+  if ! bead_is_closed "$bead"; then
+    recover_worker "$PACKAGE"
     local deadline=$(( $(date +%s) + ${DELIVERY_WORK_DEADLINE:-5400} ))
     while ! bead_is_closed "$bead"; do
       [ "$(date +%s)" -ge "$deadline" ] && die "$PACKAGE did not finish before its deadline"
