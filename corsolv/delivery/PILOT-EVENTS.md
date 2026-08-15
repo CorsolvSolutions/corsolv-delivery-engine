@@ -179,6 +179,60 @@ dependent package needs is cut where the waiting happens rather than after it.
 Nothing new schedules any of this: it is the same queue over the same bead
 graph, with the task order finally matching the dependency order it always had.
 
+### The rerun on the fixed engine, and where it stopped
+
+Same project, same repository, same durable state, replanned so the packages
+could declare gates. Attempt 1's plan, city, rig and evidence are archived
+beside the run in `attempt-1-blocked-worker-gates/` rather than deleted.
+
+| Time (UTC) | Event | Package | Actor | Reason | Outcome | Mins |
+| --- | --- | --- | --- | --- | --- | --- |
+| 19:34 | `RECOVERY` | — | automatic | `city-up` on the fixed engine; preflight 30 checks | city built, supervisor reconciled | 1 |
+| 19:35 | `RECOVERY` | all 4 | automatic | `dispatch` created the beads and granted each package its declared gates in its own worktree | 4 packages routed | 1 |
+| 19:44 | `COMPLETION_EVIDENCE` | `wp-scaffold` | automatic | The worker ran the gates it was granted: `npm run lint` clean, `npm run typecheck` clean, `npm test` 11/11 | **a worker verified its own work for the first time in this pilot** | 9 |
+| 19:44 | `WORKER_FAILURE` | `wp-scaffold` | automatic | Publication refused: two probe files outside `gc.authorised_paths` that the worker could not delete | containment held; delivery stopped | — |
+
+Both fixes did what they were written for. `await-wp-scaffold` completed in
+9m23s rather than burning a ninety-minute deadline, and the gate grant reached
+the worker and was used.
+
+### The defect it stopped on: a worker can create a file but not remove one
+
+The scaffold worker wrote two probe files — `public/__lintprobe.js` and
+`scripts/__typeprobe.js` — to prove its toolchain really did support the
+runtimes the package needs, then found it could not clean them up. In its own
+close reason:
+
+> They were meant to be transient, but `rm` and `mv` are both blocked in this
+> session, so they remain in the worktree. Neither is in `gc.authorised_paths`.
+> Delete them, or publish authorised paths only.
+
+`bounded-project` grants Read, Write, Edit, Glob and Grep. Nothing removes a
+file, and nothing can: a cleanup command is not a project build or test runner,
+so it cannot be declared as a gate either. Any transient file a worker creates
+is therefore permanent, and permanently makes its package unpublishable.
+
+The controller was right to refuse — an unauthorised file is exactly what the
+scope check exists to catch — but the worker had no way to comply.
+
+**A second defect is proved alongside it.** `publication_scope_violations` reads
+`git status --porcelain` without `-uall`, so untracked directories collapse to a
+single entry. The refusal named four violations — `public/ scripts/ src/ tests/`
+— when only two files offended; every file under `src/` and `tests/` was
+authorised. On that evidence a package that creates any new directory cannot
+publish even when it is entirely compliant. Here a real violation and a phantom
+one happened to coincide, which is the kind of luck that hides a defect rather
+than revealing it.
+
+**And a third thing has no mechanism at all.** The worker raised two rulings it
+genuinely needed: a type-only `@types/node` without which `tsc --noEmit` cannot
+pass, and `node --test tests` failing with `MODULE_NOT_FOUND` on the Node 24
+that `ci.yml` pins — so the test script the plan specified can never go green in
+CI. It reported `gc mail send` denied, leaving the bead's close reason as its
+only channel to say so.
+
+None of these three is fixed here. They are recorded as found.
+
 ### Portal defect observed, not fixed here
 
 **Managed Delivery's "Check now" gives no visible feedback when reconciliation
