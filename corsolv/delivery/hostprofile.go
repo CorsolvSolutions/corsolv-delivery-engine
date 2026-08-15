@@ -21,6 +21,9 @@ type hostFile struct {
 	DeliveryRoot       string `toml:"deliveryRoot"`
 	Driver             string `toml:"driver"`
 	GitHubCommand      string `toml:"githubCommand"`
+	GasCityCommand     string `toml:"gascityCommand"`
+	BeadsCommand       string `toml:"beadsCommand"`
+	ProviderCommand    string `toml:"providerCommand"`
 	Provider           string `toml:"provider"`
 	WindowsMountPrefix string `toml:"windowsMountPrefix"`
 
@@ -66,6 +69,9 @@ func loadHost(path string) (handoff.HostProfile, handoff.Planner, error) {
 		DeliveryRoot:       f.DeliveryRoot,
 		Driver:             f.Driver,
 		GitHubCommand:      f.GitHubCommand,
+		GasCityCommand:     f.GasCityCommand,
+		BeadsCommand:       f.BeadsCommand,
+		ProviderCommand:    f.ProviderCommand,
 		Provider:           f.Provider,
 		WindowsMountPrefix: f.WindowsMountPrefix,
 	}

@@ -45,3 +45,54 @@ unattended delivery survivable.
 
 The two `WORKER_RETRY` rows are both driver defects found by running rather than
 reading, and both are fixed. Neither would have been found by review.
+
+## Second pilot — Website Status Checker Pilot v2
+
+Project: `website-status-checker-pilot-v2`
+Date: 2026-08-15
+
+| Time (UTC) | Event | Package | Actor | Reason | Outcome | Mins |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15:52 | `PR_RECONCILIATION` | — | automatic | Start accepted from the portal; intent recorded with digest `865680d4` | delivery admitted | — |
+| 15:54 | `COMPLETION_EVIDENCE` | — | automatic | Planner produced 4 bounded work packages through the validator | plan accepted | — |
+| 15:54 | `WORKER_FAILURE` | — | automatic | `city-up` cloned the rig and then died: `driver.sh: line 174: gc: command not found` | run failed in 1s; 1 failed, 8 held | — |
+| 16:43 | `WORKER_RETRY` | — | automatic | With gc declared, `city-up` reached `gc rig add` and died there: `bd: not found`, from a script Gas City shells out to | second binary, same cause | — |
+
+### The defect the second pilot found
+
+**A detached run has no PATH, and two binaries were still relying on one.** The
+first pilot found this for the planner and for the forge CLI, and both were
+moved into the host profile as declared absolute paths. `gc` was left taking its
+chances on PATH, and it is installed under the operator's home rather than in a
+system directory, so the very first stage of every delivery on this host was one
+line away from failing.
+
+Naming `gc` absolutely got the run one step further, to `gc rig add`, and into
+the second half of the same defect: Gas City resolves `bd` by PATH lookup from a
+script it shells out to, and no flag can tell it otherwise. So the driver now
+exposes the declared binaries — and only those, one symlink each in a directory
+the run owns — on the PATH its children inherit. Declared, not inferred, and
+without dragging in whatever else shares a folder with them.
+
+Two things made it worse than it needed to be. Preflight reported READY over 27
+checks without looking for either, because the spec declared `git`, `tmux` and
+`gh` as its tools and not the two that build the city. And the driver sourced
+its shared controller primitives from a hard-coded checkout rather than from its
+own, so a fix touching both halves could arrive half-applied.
+
+All of it is corrected: both CLIs are declared in the host profile and reach
+every stage as `-gc` and `-bd`, preflight requires both by name (29 checks, not
+27), and the driver reads its library from the tree it ships in.
+
+### Portal defect observed, not fixed here
+
+**Managed Delivery's "Check now" gives no visible feedback when reconciliation
+finds nothing changed.** A user who presses it sees the page as it was and
+cannot tell whether the request was made, whether it is still in flight, or
+whether it completed and found the state unchanged — which is indistinguishable
+from a dead button, and invites the repeated pressing that idempotency exists to
+survive rather than to encourage.
+
+That is a portal presentation defect, not an engine one: the engine's answer
+("unchanged") is correct and is what the portal read. It is recorded here
+because the pilot found it, and it belongs to the portal's own backlog.

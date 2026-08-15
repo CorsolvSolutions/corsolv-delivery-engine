@@ -32,8 +32,29 @@ type HostProfile struct {
 	// while the only authenticated gh is a Windows install, so assuming `gh` on
 	// PATH is wrong and declaring it is the point.
 	GitHubCommand string
+	// GasCityCommand is the Gas City CLI the driver builds the city with. It is
+	// declared for the same reason the forge CLI and the planner are: a run
+	// detached into its own process group does not inherit an interactive
+	// shell's PATH, and a driver left to find `gc` there fails at the very
+	// first stage with "command not found".
+	GasCityCommand string
+	// BeadsCommand is the beads CLI the city's bead stores are made with.
+	//
+	// The driver never invokes it. Gas City does, by PATH lookup, from a script
+	// it shells out to — so unlike the others this one is declared not to be
+	// executed but to be findable, and the driver puts it where that lookup
+	// will find it.
+	BeadsCommand string
 	// Provider is the agent runtime workers are started under.
 	Provider string
+	// ProviderCommand is where that runtime's binary actually is.
+	//
+	// Gas City resolves a provider by name on PATH, and refuses to finish
+	// building a city whose provider it cannot resolve — which leaves the city
+	// half-made: created, but with its pack imports never installed, so every
+	// later command fails on a missing packs.lock. Declared here, exposed by
+	// name, for the same reason as the two above.
+	ProviderCommand string
 	// WindowsMountPrefix maps a Windows drive to its mount point on this host,
 	// e.g. "/mnt". Empty means paths are used as given.
 	WindowsMountPrefix string
@@ -184,6 +205,14 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 			{Name: "git", MinVersion: "2.30", VersionArgs: []string{"--version"}, Purpose: "every repository operation delivery performs"},
 			{Name: "tmux", MinVersion: "3.0", VersionArgs: []string{"-V"}, Purpose: "the runtime provider worker sessions run under"},
 			{Name: host.forgeCLI(), MinVersion: "2.40", VersionArgs: []string{"--version"}, Purpose: "pull requests, checks and merges"},
+			// No minimum version: the run is built against whichever gc this
+			// host has, and a version comparison here would refuse a delivery
+			// over a banner rather than over a capability. Presence is the
+			// property that was missing — a preflight that reported READY while
+			// the binary the first stage runs was nowhere on PATH.
+			{Name: host.gasCityCLI(), Purpose: "building the city, cloning the rig and every bead operation delivery performs"},
+			{Name: host.beadsCLI(), Purpose: "the bead store Gas City creates in the rig; Gas City resolves it by PATH lookup"},
+			{Name: host.providerCLI(), Purpose: "the agent runtime the city's provider readiness and every worker session resolve by name"},
 		},
 		Paths: []unattended.PathRequirement{
 			{Path: worktree, Kind: unattended.PathDir, Purpose: "the registered checkout this delivery is for"},
@@ -228,6 +257,20 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	project := []string{"-project", in.ProjectID, "-state", host.ProjectDir(in.ProjectID)}
 	if cli := strings.TrimSpace(host.GitHubCommand); cli != "" {
 		project = append(project, "-gh", cli)
+	}
+	if cli := strings.TrimSpace(host.GasCityCommand); cli != "" {
+		project = append(project, "-gc", cli)
+	}
+	if cli := strings.TrimSpace(host.BeadsCommand); cli != "" {
+		project = append(project, "-bd", cli)
+	}
+	// The provider is named as well as located: the name is what Gas City looks
+	// up, so it is also the name the located binary has to be exposed under. A
+	// driver that hard-coded one of them would build a city under a runtime the
+	// host profile did not declare.
+	project = append(project, "-provider", host.Provider)
+	if cli := strings.TrimSpace(host.ProviderCommand); cli != "" {
+		project = append(project, "-provider-bin", cli)
 	}
 
 	work.Tasks = append(work.Tasks,
@@ -314,6 +357,37 @@ func (h HostProfile) forgeCLI() string {
 		return h.GitHubCommand
 	}
 	return "gh"
+}
+
+// gasCityCLI is the Gas City command this run will use, declared or defaulted.
+//
+// The default is the bare name, which is what the driver falls back to. It is a
+// real answer on a host that has gc on PATH, and naming it here means preflight
+// reports its absence instead of leaving city-up to discover it.
+func (h HostProfile) gasCityCLI() string {
+	if strings.TrimSpace(h.GasCityCommand) != "" {
+		return h.GasCityCommand
+	}
+	return "gc"
+}
+
+// beadsCLI is the beads command this run will make findable, declared or
+// defaulted, on the same terms as the two above.
+func (h HostProfile) beadsCLI() string {
+	if strings.TrimSpace(h.BeadsCommand) != "" {
+		return h.BeadsCommand
+	}
+	return "bd"
+}
+
+// providerCLI is the agent runtime binary, declared or defaulted to the
+// provider's own name — which is what Gas City looks up when nothing says
+// otherwise.
+func (h HostProfile) providerCLI() string {
+	if strings.TrimSpace(h.ProviderCommand) != "" {
+		return h.ProviderCommand
+	}
+	return h.Provider
 }
 
 // orderPackages returns the packages in dependency order.

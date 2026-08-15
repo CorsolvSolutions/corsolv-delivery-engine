@@ -11,6 +11,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,9 +102,13 @@ func TestEveryCompiledCommandLineParsesInTheDriver(t *testing.T) {
 	}
 
 	host := handoff.HostProfile{
-		DeliveryRoot: t.TempDir(),
-		Driver:       driver,
-		Provider:     "claude",
+		DeliveryRoot:    t.TempDir(),
+		Driver:          driver,
+		GitHubCommand:   "/mnt/c/Program Files/GitHub CLI/gh.exe",
+		GasCityCommand:  "/home/operator/.local/bin/gc",
+		BeadsCommand:    "/home/operator/.local/bin/bd",
+		Provider:        "claude",
+		ProviderCommand: "/home/operator/.local/bin/claude",
 	}
 	_, work, err := handoff.Compile(fixtureIntent(), fixturePlan(), host, "run-1")
 	if err != nil {
@@ -179,6 +184,36 @@ func TestTheGoLayerWritesEveryDocumentTheDriverReads(t *testing.T) {
 	}
 }
 
+// The driver's controller primitives must come from the checkout the driver
+// itself is in. They are a matched pair: a fix that touches both arrives half
+// applied if a copy of the driver sources its library from somewhere else.
+func TestTheDriverSourcesItsLibraryFromItsOwnCheckout(t *testing.T) {
+	bash := bashOrSkip(t)
+	state := t.TempDir()
+
+	// No CORSOLV_ENGINE_REPO at all, and a working directory that is not the
+	// engine: whatever it finds, it finds from its own path.
+	cmd := exec.Command(bash, driverPath(t), "dispatch", "-project", "p", "-state", state)
+	cmd.Dir = state
+	env := os.Environ()
+	kept := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CORSOLV_ENGINE_REPO=") {
+			kept = append(kept, e)
+		}
+	}
+	cmd.Env = kept
+	out, _ := cmd.CombinedOutput()
+
+	if strings.Contains(string(out), "sa-lib.sh") && strings.Contains(string(out), "No such file") {
+		t.Fatalf("the driver could not find its own controller primitives:\n%s", out)
+	}
+	// It stops on the missing intent, which is proof it got through sourcing.
+	if !strings.Contains(string(out), "no delivery intent") {
+		t.Fatalf("the driver did not reach its own document check:\n%s", out)
+	}
+}
+
 func TestDriverRefusesAnUnknownStage(t *testing.T) {
 	bash := bashOrSkip(t)
 	state := t.TempDir()
@@ -227,6 +262,210 @@ func TestDriverRefusesWithoutValidatedDocuments(t *testing.T) {
 	if !strings.Contains(string(out), "no delivery intent") {
 		t.Fatalf("the refusal must name what is missing, got:\n%s", out)
 	}
+}
+
+// The two failures the Website Status Checker pilot stopped on, in order.
+//
+// A run detached into its own process group does not inherit an interactive
+// shell's PATH, and both binaries the first stage needs are installed under the
+// operator's home rather than in a system directory. So `city-up` cloned the
+// working rig and died on `gc: command not found`; with gc named absolutely it
+// got one step further and died on `gc rig add: ... bd: not found`, because Gas
+// City resolves beads by PATH lookup from a script it shells out to.
+//
+// Both are the same property, and it is what this proves: the run uses the
+// DECLARED binaries. A gc on PATH that would ruin the run is present throughout
+// and must lose — for the driver's own `gc init`, for every call the shared
+// controller primitives make through sa_gc, and for the lookup a child makes on
+// its own behalf.
+func TestCityUpUsesTheDeclaredBinariesRatherThanPATH(t *testing.T) {
+	bash := bashOrSkip(t)
+	for _, tool := range []string{"git", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not available", tool)
+		}
+	}
+
+	root := t.TempDir()
+	origin := seedOriginRepo(t, root)
+
+	in := fixtureIntent()
+	in.Repository.Origin = "file://" + filepath.ToSlash(origin)
+
+	// Written directly rather than through SaveIntent: a real intent's origin is
+	// a forge URL, and this one has to be clonable without a network.
+	state := filepath.Join(root, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(state, "intent.json"), in)
+	writeJSONFile(t, filepath.Join(state, "plan.json"), fixturePlan())
+
+	// The gc the run must NOT use. It is first on PATH and leaves a mark, so
+	// "the declared one was used" is proved by an artifact rather than inferred
+	// from the absence of an error.
+	sabotage := filepath.Join(root, "path-gc-was-used")
+	pathBin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(pathBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, filepath.Join(pathBin, "gc"),
+		"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> "+shquote(sabotage)+"\nexit 1\n")
+
+	// The gc the host declares. It answers `init` by creating the city, which is
+	// the verdict the driver reads, records every call it received, and reports
+	// which beads binary its own PATH lookup would find — which is the thing gc
+	// really does and the driver cannot pass on a command line.
+	calls := filepath.Join(root, "declared-gc-calls")
+	seenBeads := filepath.Join(root, "beads-gc-would-find")
+	seenProvider := filepath.Join(root, "provider-gc-would-find")
+	declared := filepath.Join(root, "declared-gc")
+	writeScript(t, declared,
+		"#!/usr/bin/env bash\n"+
+			"printf '%s\\n' \"$*\" >> "+shquote(calls)+"\n"+
+			"command -v bd > "+shquote(seenBeads)+" 2>&1 || true\n"+
+			"command -v claude > "+shquote(seenProvider)+" 2>&1 || true\n"+
+			"if [ \"${1:-}\" = init ]; then mkdir -p \"$2\" && printf 'name = \"test\"\\n' > \"$2/city.toml\"; exit 0; fi\n"+
+			"if [ \"${3:-}\" = import ]; then exit 0; fi\n"+
+			"exit 1\n")
+
+	// Neither the beads binary nor the agent runtime is invoked by the driver;
+	// they only have to be findable, under paths nothing would stumble on by
+	// accident.
+	beads := filepath.Join(root, "declared-bd-under-another-name")
+	writeScript(t, beads, "#!/usr/bin/env bash\nexit 0\n")
+	provider := filepath.Join(root, "declared-provider-under-another-name")
+	writeScript(t, provider, "#!/usr/bin/env bash\nexit 0\n")
+
+	forge := filepath.Join(root, "gh")
+	writeScript(t, forge, "#!/usr/bin/env bash\nprintf 'x\\n'\nexit 0\n")
+
+	cmd := exec.Command(bash, driverPath(t), "city-up",
+		"-project", in.ProjectID, "-state", state,
+		"-gh", forge, "-gc", declared, "-bd", beads,
+		"-provider", "claude", "-provider-bin", provider)
+	cmd.Env = append(os.Environ(),
+		"CORSOLV_ENGINE_REPO="+engineRepo(t),
+		"PATH="+pathBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, _ := cmd.CombinedOutput()
+
+	if strings.Contains(string(out), "command not found") {
+		t.Fatalf("the driver looked for the Gas City CLI on PATH:\n%s", out)
+	}
+	if _, err := os.Stat(sabotage); err == nil {
+		used, _ := os.ReadFile(sabotage) //nolint:gosec // test artifact
+		t.Fatalf("the driver ran the gc on PATH instead of the declared one:\n%s", used)
+	}
+	recorded, err := os.ReadFile(calls) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI was never invoked: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(recorded), "init") {
+		t.Fatalf("the declared Gas City CLI was not asked to build the city, only: %s", recorded)
+	}
+	// The city it created is the verdict the driver reads, so the stage must
+	// have gone past `gc init` rather than stopping on it.
+	if strings.Contains(string(out), "the city was not created") {
+		t.Fatalf("the city the declared CLI built was not seen:\n%s", out)
+	}
+
+	// And the lookup gc makes on its own behalf has to land on the declared
+	// beads binary, resolved through the run's own directory.
+	found, err := os.ReadFile(seenBeads) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI never reported its beads lookup: %v", err)
+	}
+	resolved := strings.TrimSpace(string(found))
+	if resolved == "" {
+		t.Fatalf("Gas City would not have found beads at all — the failure the pilot hit:\n%s", out)
+	}
+	assertResolvesTo(t, resolved, beads, "beads")
+
+	// Same for the agent runtime, which Gas City resolves by the provider's
+	// name — so the declared binary has to be exposed under that name.
+	found, err = os.ReadFile(seenProvider) //nolint:gosec // test artifact
+	if err != nil {
+		t.Fatalf("the declared Gas City CLI never reported its provider lookup: %v", err)
+	}
+	resolved = strings.TrimSpace(string(found))
+	if resolved == "" {
+		t.Fatalf("Gas City would not have found its provider at all — the failure the pilot hit:\n%s", out)
+	}
+	assertResolvesTo(t, resolved, provider, "the agent runtime")
+}
+
+// assertResolvesTo compares two paths after following symlinks, which is how
+// the run exposes a declared binary under the name its consumer looks up.
+func assertResolvesTo(t *testing.T, got, want, what string) {
+	t.Helper()
+	gotReal, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolving %q: %v", got, err)
+	}
+	wantReal, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotReal != wantReal {
+		t.Fatalf("Gas City would find %s at %q, not the declared %q", what, gotReal, wantReal)
+	}
+}
+
+// seedOriginRepo makes a bare repository with one commit, so the driver's clone
+// is a real clone with nothing to authenticate against.
+func seedOriginRepo(t *testing.T, root string) string {
+	t.Helper()
+	origin := filepath.Join(root, "origin.git")
+	work := filepath.Join(root, "seed")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run(root, "init", "--bare", "--initial-branch=main", origin)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "init", "--initial-branch=main", work)
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("seed\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	run(work, "add", "README.md")
+	run(work, "commit", "-m", "seed")
+	run(work, "remote", "add", "origin", origin)
+	run(work, "push", "-q", "origin", "main")
+	return origin
+}
+
+func writeJSONFile(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+}
+
+func writeScript(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // an executable stub is the point
+		t.Fatal(err)
+	}
+}
+
+// shquote renders a path as a single-quoted shell word for the stubs above.
+func shquote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // engineRepo is this checkout, which the driver sources its proven controller

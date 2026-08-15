@@ -34,7 +34,14 @@
 
 set -uo pipefail
 
-SOURCE_REPO="${CORSOLV_ENGINE_REPO:-/mnt/d/Development/corsolv-delivery-engine}"
+# The controller primitives come from THIS driver's own checkout by default.
+#
+# A named absolute default was a checkout on one machine, so a driver run from
+# anywhere else — a second worktree, a release copy — sourced a library from a
+# different tree than the one it shipped with, and a change made to the pair
+# arrived half-applied. The environment override remains for a caller that
+# genuinely means to point somewhere else.
+SOURCE_REPO="${CORSOLV_ENGINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # shellcheck source=../p2-smoke/lib/sa-lib.sh
 . "$SOURCE_REPO/corsolv/p2-smoke/lib/sa-lib.sh"
 
@@ -50,6 +57,10 @@ PROJECT=''
 STATE=''
 
 FORGE=''
+GASCITY=''
+BEADS=''
+PROVIDER=''
+PROVIDER_BIN=''
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -57,6 +68,10 @@ while [ $# -gt 0 ]; do
     -project) PROJECT="${2:-}"; shift 2 ;;
     -state)   STATE="${2:-}"; shift 2 ;;
     -gh)      FORGE="${2:-}"; shift 2 ;;
+    -gc)      GASCITY="${2:-}"; shift 2 ;;
+    -bd)      BEADS="${2:-}"; shift 2 ;;
+    -provider)     PROVIDER="${2:-}"; shift 2 ;;
+    -provider-bin) PROVIDER_BIN="${2:-}"; shift 2 ;;
     *) printf 'driver: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -81,11 +96,52 @@ esac
 # with an authentication error that names nothing.
 GH="${FORGE:-${GH:-gh}}"
 
+# The Gas City CLI arrives the same way and for the same reason. A run detached
+# into its own process group does not inherit an interactive shell's PATH, and
+# `gc` is installed under the operator's home rather than in a system directory
+# — so a driver that took it from PATH failed at its very first stage with
+# `gc: command not found`, having already cloned the rig. Exporting it is what
+# makes the shared controller primitives in sa-lib.sh use it too: every gc
+# invocation in a run goes through sa_gc, which reads this.
+GC="${GASCITY:-${GC:-gc}}"
+export SA_GC_BIN="$GC"
+
+# The agent runtime is named by the host profile rather than assumed here. It
+# is both a name and a location: Gas City looks the provider up BY NAME, so the
+# declared binary has to be exposed under the name the city was built with.
+PROVIDER="${PROVIDER:-claude}"
+
 INTENT="$STATE/intent.json"
 PLAN="$STATE/plan.json"
 RUNTIME="$STATE/runtime.json"
 EVIDENCE="$STATE/evidence"
 mkdir -p "$EVIDENCE"
+
+# Not every dependency can be told where to look.
+#
+# Gas City refuses to build a city without beads, and finds it by PATH lookup
+# from a script it shells out to — so `gc rig add` failed with `bd: not found`
+# even once gc itself was named absolutely. It then refuses to finish building
+# a city whose provider it cannot resolve by name, which leaves the city made
+# but its pack imports uninstalled, and every later command failing on a
+# missing packs.lock. What a detached run cannot do is assume PATH; what it can
+# do is make the DECLARED binaries findable on it.
+#
+# They go in a directory this run owns, one symlink each, rather than by
+# prepending the directory they happen to live in: the run should expose the
+# tools it declared and nothing else that shares a folder with them.
+TOOLBIN="$STATE/toolbin"
+mkdir -p "$TOOLBIN"
+expose_tool() {
+  case "$2" in
+    /*) ln -sfn "$2" "$TOOLBIN/$1" ;;
+  esac
+}
+expose_tool gc "$GC"
+expose_tool bd "$BEADS"
+expose_tool "$PROVIDER" "$PROVIDER_BIN"
+PATH="$TOOLBIN:$PATH"
+export PATH
 
 die() { printf 'driver[%s]: %s\n' "$STAGE" "$1" >&2; exit 1; }
 say() { printf 'driver[%s] %s\n' "$STAGE" "$1" >&2; }
@@ -171,7 +227,7 @@ stage_city_up() {
   git -C "$RIG_PATH" config credential.helper "$GIT_CRED_HELPER"
 
   say "initializing the city at $CITY"
-  command gc init "$CITY" --provider claude --yes > "$EVIDENCE/init.txt" 2>&1
+  command "$GC" init "$CITY" --provider "$PROVIDER" --yes > "$EVIDENCE/init.txt" 2>&1
   # The exit code is not the verdict here, and treating it as one is wrong on
   # exactly the machines this is meant to run on. `gc init` also tries to start
   # the machine-wide supervisor, and on a host that already has one it reports a
@@ -180,6 +236,17 @@ stage_city_up() {
   # already there. So the verdict is the state on disk, not the status code.
   if [ ! -f "$CITY/city.toml" ]; then
     die "the city was not created; see $EVIDENCE/init.txt"
+  fi
+  # A city on disk is not yet a city that works.
+  #
+  # `gc init` runs eight steps and can stop at the sixth — a provider it cannot
+  # resolve halts it after the city exists but before its pack imports are
+  # installed. On disk that reads as success, and the run then spends four
+  # minutes failing at something else entirely: every later gc command refuses
+  # with a missing packs.lock, so the rig's bead store "never became ready"
+  # although it had been initialized correctly. The verdict is gc's own.
+  if ! command "$GC" --city "$CITY" import check > "$EVIDENCE/import-check.txt" 2>&1; then
+    die "the city was created but is not usable: $(tail -3 "$EVIDENCE/import-check.txt" | tr '\n' ' '); see $EVIDENCE/init.txt"
   fi
   if grep -q 'supervisor did not' "$EVIDENCE/init.txt" 2>/dev/null; then
     if pgrep -f 'gc supervisor run' >/dev/null 2>&1; then

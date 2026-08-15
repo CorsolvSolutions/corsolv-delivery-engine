@@ -40,6 +40,11 @@
 # explicit and independent of when .gc/ happens to materialize.
 #
 # Unset (the control tests, which stub gc) it degrades to a plain call.
+#
+# WHICH gc comes from SA_GC_BIN when the caller sets it, and from PATH when it
+# does not. A detached run does not inherit an interactive shell's PATH, so a
+# caller that knows where the binary is says so; the control tests that stub gc
+# on PATH leave it unset and are unaffected.
 # LEDGER CAPTURE LIVES HERE, AT THE LOWEST WRAPPER — deliberately.
 #
 # It used to live in gcx(), one layer up, with sa_gc() executing gc directly
@@ -63,7 +68,7 @@ sa_gc() {
   if [ -n "${SA_CMD_LEDGER:-}" ]; then
     printf '%s\t%s\t%s\n' "$(date +%s)" "$(date -u +%FT%TZ)" "$*" >> "$SA_CMD_LEDGER"
   fi
-  command gc "${pre[@]}" "$@"
+  command "${SA_GC_BIN:-gc}" "${pre[@]}" "$@"
 }
 
 # sa_ledger_init <path> — start a fresh command ledger.

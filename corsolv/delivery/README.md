@@ -50,6 +50,8 @@ delivery to another machine is a change to this file and to nothing else.
 deliveryRoot       = "/home/you/corsolv-delivery"
 driver             = "/path/to/corsolv-delivery-engine/corsolv/delivery/driver.sh"
 githubCommand      = "/mnt/c/Program Files/GitHub CLI/gh.exe"
+gascityCommand     = "/home/you/.local/bin/gc"
+beadsCommand       = "/home/you/.local/bin/bd"
 provider           = "claude"
 windowsMountPrefix = "/mnt"
 plannerCommand     = "claude"
@@ -59,6 +61,18 @@ plannerArgs        = ["-p", "--permission-mode", "plan"]
 `githubCommand` points into `/mnt/c` because the engine runs under WSL while
 the only authenticated `gh` is a Windows install. That is exactly the kind of
 fact this file exists to hold.
+
+Every executable a run needs is named here for the same reason. A delivery
+detaches into its own process group and does not inherit an interactive shell's
+PATH, so a binary installed under a home directory — `gc`, `bd` and the planner
+all are — is not there to be found. Preflight checks each of them by the name
+given here, which is why an undeclared one is refused before a run starts rather
+than discovered by the stage that needed it.
+
+`beadsCommand` is the one the driver never runs. Gas City runs it, by PATH
+lookup from a script it shells out to, and will not build a city without it. So
+the driver exposes the declared binaries — and only those — through a directory
+the run owns, and puts that on PATH for its children.
 
 Planning is normally an agent's job. `delivery plan -from` exists for when a
 person already knows the answer, or when the agent runtime is unavailable —
