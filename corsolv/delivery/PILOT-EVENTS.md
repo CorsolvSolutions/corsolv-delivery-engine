@@ -245,3 +245,75 @@ survive rather than to encourage.
 That is a portal presentation defect, not an engine one: the engine's answer
 ("unchanged") is correct and is what the portal read. It is recorded here
 because the pilot found it, and it belongs to the portal's own backlog.
+
+## The second rerun: what the publication boundary was actually reading
+
+Two of the three defects above are fixed in `eb904cf0a`. Nothing about the
+project changed — same intent, same plan, same city, same rig, same beads, same
+worktree with the scaffold worker's completed work still in it. The only change
+was to what the controller reads before it publishes.
+
+The phantom violations were a reading error. `git status --porcelain` reports an
+untracked DIRECTORY as the directory alone, so the four names in the refusal —
+`public/ scripts/ src/ tests/` — were never files any bead could have
+authorised. Read with `-uall`, the same worktree at the same moment says:
+
+```
+?? public/__lintprobe.js
+?? scripts/__typeprobe.js
+?? src/config.js
+?? tests/config.test.js
+```
+
+Two offenders, not four directories, and every file under `src/` and `tests/`
+authorised exactly as the bead said. The refusal had been reporting a category
+the boundary cannot express.
+
+The two real offenders are handled by giving the removal to whoever can perform
+it. A worker under `bounded-project` can create a file and cannot delete one,
+and a cleanup command cannot be declared as a verification gate — so a transient
+probe is permanent for the worker. It is not permanent for the controller, which
+owns the worktree. And an untracked out-of-scope file was never going to be
+published in any case: `controller_commit` stages the bead's named paths and
+nothing else. The only harm such a file can still do is contaminate the gate run
+the controller performs before publishing, so the controller moves it into
+evidence, gates the clean tree, and commits that.
+
+A TRACKED file changed out of scope is deliberately not touched. That is
+content the project already had; quarantining it would be the controller
+silently reverting the worker. It still refuses publication, and the authority
+split is unchanged — the worker mutates a working tree, only the controller
+publishes, and the controller still looks at what changed first.
+
+### What the second rerun produced
+
+| Time (UTC) | Event | Package | Actor | Reason | Outcome | Mins |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20:42 | `RECOVERY` | — | automatic | `city-up`, `dispatch` and `await-wp-scaffold` all resumed from durable state | three stages re-entered and returned in 1s | 0 |
+| 20:43 | `RECOVERY` | `wp-scaffold` | automatic | Controller quarantined `public/__lintprobe.js` and `scripts/__typeprobe.js` into `evidence/quarantined-wp-scaffold/` | the tree gated and committed contained authorised paths only | — |
+| 20:44 | `COMPLETION_EVIDENCE` | `wp-scaffold` | automatic | Declared gates re-run under controller identity; `npm ci`, lint, typecheck and 11 tests clean | committed, pushed, PR #1 opened at `ba1282ee` | 1 |
+| 20:44 | `COMPLETION_EVIDENCE` | `wp-scaffold` | automatic | Required job `validate` passed on the exact PR head in 9s | **PR #1 merged — the pilot's first package shipped** | — |
+| 20:44 | `RECOVERY` | `wp-status-core` | automatic | `await-wp-status-core` cut the next worktree and launched session `c2-2kl` | **package 2 started because package 1 merged** | — |
+
+`publish-wp-scaffold` took 1m0s end to end, from a stage that had previously
+exhausted its attempts. The sequencing the previous fix built is now observable
+rather than inferred: work1 → verify1 → publish1 → merge1 → work2, with the
+second worker's session created 3 seconds after the first package's merge.
+
+### The third defect stands, and was ruled on by hand
+
+The worker still has no escalation channel; `gc mail send` remains denied to a
+bounded worker, and the bead close reason remains its only way to raise a
+question. Both rulings it raised that way were correct and are visible in the
+shipped package:
+
+- `@types/node` is a devDependency of the merged `package.json`. Without it
+  `tsc --noEmit` cannot resolve `node:` builtins and the typecheck gate cannot
+  pass.
+- the test script ships as `node --test tests/*.test.js`, not the
+  `node --test tests` the plan specified. On the Node 24 that `ci.yml` pins,
+  the directory form fails; verified directly in the worker's worktree, it
+  reports `pass 0 fail 1` against `test at tests:1:1`.
+
+The worker was right twice, and had to spend a bead close reason to say so.
+That is recorded as remaining work, not fixed here.
