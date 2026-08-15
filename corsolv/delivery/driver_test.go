@@ -76,6 +76,7 @@ func fixturePlan() handoff.DeliveryPlan {
 				Objective:       "Create src/one.ts.",
 				Artifact:        "src/one.ts",
 				AuthorizedPaths: []string{"src/one.ts"},
+				Gates:           []string{"npm install", "npm run verify"},
 				Satisfies:       []string{"ac-1"},
 			},
 			{

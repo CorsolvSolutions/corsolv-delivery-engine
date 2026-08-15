@@ -44,8 +44,9 @@ func TestCompileProducesAnExecutableRun(t *testing.T) {
 	}
 
 	want := []string{
-		StageCityUp, StageDispatch, StageAwait,
-		StagePublish + "-wp-add", StagePublish + "-wp-multiply",
+		StageCityUp, StageDispatch,
+		StageAwait + "-wp-add", StagePublish + "-wp-add",
+		StageAwait + "-wp-multiply", StagePublish + "-wp-multiply",
 		StageProject, StagePublishProjection,
 	}
 	got := map[string]bool{}

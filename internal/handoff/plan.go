@@ -36,6 +36,20 @@ type WorkPackage struct {
 	// AuthorizedPaths is every repository-relative path this package may
 	// create or change.
 	AuthorizedPaths []string `json:"authorizedPaths"`
+	// Gates are the verification commands this package's worker is expected to
+	// run before closing, and is therefore permitted to run.
+	//
+	// They exist because a bounded worker is deny-by-default: the first pilot's
+	// scaffold package told its worker to prove itself with `npm install && npm
+	// run verify`, and the worker was structurally forbidden from executing
+	// either, so it closed `blocked` with correct but unverified work. An
+	// instruction a worker cannot obey is not a gate.
+	//
+	// Declaring them here — per package, validated, and nowhere else — is what
+	// lets the run grant exactly these and nothing more. The grant is installed
+	// in that package's own worktree, so one package's gates are not another's,
+	// and no permission is widened for the fleet.
+	Gates []string `json:"gates,omitempty"`
 	// DependsOn names packages that must be MERGED before this one starts.
 	DependsOn []string `json:"dependsOn,omitempty"`
 	// Satisfies names the acceptance criteria this package contributes to.
@@ -74,6 +88,69 @@ var protectedPrefixes = []string{
 	".git",
 	".github/workflows",
 	"delivery/gascity",
+}
+
+// MaxGatesPerPackage bounds how much verification surface one package may ask
+// for. A package needing more than this is not describing gates.
+const MaxGatesPerPackage = 8
+
+// gateRunners are the programs a work package may name as a gate.
+//
+// An allowlist, not a denylist, because the plan is written by a language model
+// and the question "is this command safe" has no general answer. These are
+// project build and test runners: they do what the project's own configuration
+// says, which is exactly what a gate is for.
+//
+// What is deliberately absent is as much of the point as what is present.
+// `git` and `gh` are publication authority, which belongs to the controller
+// alone. `npx`, `curl`, `wget` and `pip` fetch and execute code the plan never
+// declared. `bash`, `sh`, `env` and `xargs` are general execution surfaces that
+// would make the rest of this list decorative. `sudo`, `ssh` and `docker` leave
+// the worktree entirely.
+var gateRunners = map[string]bool{
+	"npm": true, "pnpm": true, "yarn": true, "node": true,
+	"go": true, "make": true, "cargo": true, "mvn": true, "gradle": true,
+	"python": true, "python3": true, "pytest": true, "ruff": true,
+	"tsc": true, "eslint": true, "vitest": true, "jest": true, "dotnet": true,
+}
+
+// gateForbidden are the characters that would turn one declared command into
+// several, or into something the declaration does not say. A gate is a command,
+// not a shell script.
+const gateForbidden = ";|&$`<>(){}[]\\\"'\n\r\t*?!#~"
+
+// ValidateGate reports why a declared gate cannot be granted, or nil.
+//
+// It is exported because the grant is only as trustworthy as this check: the
+// driver installs exactly what this accepts, and a test that proves a refusal
+// here is proving the boundary itself.
+func ValidateGate(gate string) error {
+	trimmed := strings.TrimSpace(gate)
+	if trimmed == "" {
+		return errors.New("a gate cannot be empty")
+	}
+	if trimmed != gate {
+		return fmt.Errorf("%q has surrounding whitespace; a gate is granted verbatim", gate)
+	}
+	if strings.ContainsAny(gate, gateForbidden) {
+		return fmt.Errorf("%q contains shell syntax; a gate is one command, not a script", gate)
+	}
+	// Traversal, not merely a pair of dots: `go build ./...` is an ordinary
+	// package pattern and refusing it would refuse Go projects outright.
+	for _, token := range strings.Fields(gate) {
+		if token == ".." || strings.HasPrefix(token, "../") ||
+			strings.Contains(token, "/../") || strings.HasSuffix(token, "/..") {
+			return fmt.Errorf("%q traverses out of the worktree", gate)
+		}
+	}
+	fields := strings.Fields(gate)
+	if strings.Contains(fields[0], "/") {
+		return fmt.Errorf("%q names a path rather than a project runner", gate)
+	}
+	if !gateRunners[fields[0]] {
+		return fmt.Errorf("%q is not a project build or test runner this engine will grant", gate)
+	}
+	return nil
 }
 
 // DecodePlan parses a delivery plan and validates it against the intent it was
@@ -149,6 +226,21 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		}
 		if !phases[wp.Phase] {
 			add("%s.phase %q is not one of the lifecycle phases the intent declared", label, wp.Phase)
+		}
+
+		if len(wp.Gates) > MaxGatesPerPackage {
+			add("%s declares %d gates; at most %d may be granted", label, len(wp.Gates), MaxGatesPerPackage)
+		}
+		seenGate := map[string]bool{}
+		for _, gate := range wp.Gates {
+			if err := ValidateGate(gate); err != nil {
+				add("%s gate %v", label, err)
+				continue
+			}
+			if seenGate[gate] {
+				add("%s declares gate %q twice", label, gate)
+			}
+			seenGate[gate] = true
 		}
 
 		if len(wp.AuthorizedPaths) == 0 {

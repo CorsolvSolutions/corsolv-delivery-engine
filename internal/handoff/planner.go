@@ -65,6 +65,7 @@ OUTPUT SHAPE
       "objective": "<what a coding agent must do, in full sentences>",
       "artifact": "<the one repository-relative file this package must produce>",
       "authorizedPaths": ["<every repository-relative path this package may create or change>"],
+      "gates": ["<the exact commands the worker must run to verify this package>"],
       "dependsOn": ["<ids of packages that must be MERGED first>"],
       "satisfies": ["<acceptance criterion ids this package delivers>"]
     }
@@ -93,6 +94,16 @@ RULES — a plan breaking any of these is rejected and you will be asked again.
  9. objective is read by a coding agent with no other context. State what to
     create, what it must export or contain, and how it will be verified.
 10. Every id matches ^[a-z0-9][a-z0-9-]{1,63}$.
+11. gates are the ONLY commands the worker will be permitted to run, so any
+    verification you state in the objective must appear here or the worker
+    cannot perform it. List the real commands, one per entry, exactly as they
+    would be typed — for example "npm install" then "npm run verify". Each must
+    begin with a project build or test runner (npm, pnpm, yarn, node, go, make,
+    cargo, mvn, gradle, python, python3, pytest, ruff, tsc, eslint, vitest,
+    jest, dotnet). No shell syntax: no &&, |, ;, quotes, redirects or
+    substitutions, and no paths — one command per entry. git, gh, npx, curl,
+    bash and sudo are refused: publication is the controller's authority, never
+    the worker's. At most 8 per package.
 `)
 	return b.String()
 }

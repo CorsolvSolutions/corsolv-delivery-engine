@@ -194,6 +194,7 @@ packages() { jqp '.packages[].id'; }
 pkg_field() { jq -r --arg id "$1" --arg f "$2" '.packages[] | select(.id == $id) | .[$f]' < "$PLAN"; }
 pkg_paths_csv() { jq -r --arg id "$1" '[.packages[] | select(.id == $id) | .authorizedPaths[]] | join(",")' < "$PLAN"; }
 pkg_deps() { jq -r --arg id "$1" '.packages[] | select(.id == $id) | .dependsOn[]?' < "$PLAN"; }
+pkg_gates() { jq -r --arg id "$1" '.packages[] | select(.id == $id) | .gates[]?' < "$PLAN"; }
 
 branch_for() { printf 'delivery/%s/%s' "$RUN_TAG" "$1"; }
 
@@ -201,9 +202,38 @@ branch_for() { printf 'delivery/%s/%s' "$RUN_TAG" "$1"; }
 # STAGE city-up
 # ===========================================================================
 
+# A SUPERVISOR THAT EXISTS IS NOT A SUPERVISOR THAT WORKS.
+#
+# `gc init` registers the city and tries to start a supervisor; on a host that
+# already has one it correctly declines, since only one may own the port, and
+# leaves the city registered for the running one to pick up. Whether such a
+# process exists is not the question this run needs answered — and the
+# difference is not theoretical. A supervisor five days old held the API port
+# with no control socket and no children, so `gc supervisor reload` could not
+# reach it: the city was registered with a process that would never reconcile
+# it, dispatch routed four packages to agents that were never spawned, and the
+# run waited out its ninety-minute deadline for workers that did not exist.
+#
+# So the verdict is the supervisor's own answer to the one request this run
+# actually needs honoured. Reconciling is also how a supervisor learns about a
+# city registered after it started, which makes asking both the check and the
+# step.
+supervisor_must_reconcile() {
+  if ! command "$GC" supervisor reload > "$EVIDENCE/supervisor-reload.txt" 2>&1 ||
+     grep -qi 'not running\|unreachable' "$EVIDENCE/supervisor-reload.txt"; then
+    die "the machine-wide supervisor cannot be asked to reconcile this city, so its agents will never start: $(tr '\n' ' ' < "$EVIDENCE/supervisor-reload.txt")— restarting a machine-wide supervisor is a decision for its owner, not for this run"
+  fi
+  say 'the machine-wide supervisor reconciled this city'
+}
+
 stage_city_up() {
   if [ -n "$CITY" ] && [ -f "$CITY/city.toml" ]; then
     say "city already built at $CITY"
+    # Still asked, and asked first: a resumed run inherits the city but not the
+    # supervisor that was answering when it was built. Reconciling is idempotent
+    # and is the one thing this stage promises downstream — that the agents
+    # dispatch is about to route work to will actually be started.
+    supervisor_must_reconcile
     return 0
   fi
 
@@ -248,13 +278,7 @@ stage_city_up() {
   if ! command "$GC" --city "$CITY" import check > "$EVIDENCE/import-check.txt" 2>&1; then
     die "the city was created but is not usable: $(tail -3 "$EVIDENCE/import-check.txt" | tr '\n' ' '); see $EVIDENCE/init.txt"
   fi
-  if grep -q 'supervisor did not' "$EVIDENCE/init.txt" 2>/dev/null; then
-    if pgrep -f 'gc supervisor run' >/dev/null 2>&1; then
-      say 'a machine-wide supervisor is already running; this city is registered with it'
-    else
-      die "the city was created but no supervisor is running; see $EVIDENCE/init.txt"
-    fi
-  fi
+  supervisor_must_reconcile
 
   # A worker may not close a bead with an unearned disposition. `shipped`
   # requires a reachable commit, which this policy withholds from workers.
@@ -426,11 +450,79 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
 # gets no preparation, and its gate authority is the required CI run.
 prepare_worktree() {
   local wt="$1" id="$2"
+  install_package_gates "$wt" "$id"
   if [ -f "$wt/package.json" ]; then
     ( cd "$wt" && npm ci --silent ) > "$EVIDENCE/prepare-$id.txt" 2>&1 \
       || ( cd "$wt" && npm install --silent ) >> "$EVIDENCE/prepare-$id.txt" 2>&1 \
       || say "dependency install for $id reported a problem; see prepare-$id.txt"
   fi
+}
+
+# install_package_gates grants this package's worker exactly the verification
+# commands its package declared, and nothing else.
+#
+# THE DEFECT THIS EXISTS FOR. A bounded worker is deny-by-default: its launch
+# carries an explicit allowlist and `--permission-mode dontAsk`, so anything not
+# on the list is refused with "Permission to use Bash has been denied". The
+# scaffold package told its worker to prove itself with `npm install && npm run
+# verify`; neither was on the list, and the worker — correctly — closed
+# `blocked` rather than claiming work it could not verify. An instruction a
+# worker is structurally forbidden from obeying is not a gate.
+#
+# WHY HERE AND NOT IN THE PERMISSION MODE. `bounded-project` is a fleet-wide
+# constant, and widening it would grant every worker on every project whatever
+# one package needed. This grant lives in the worker's OWN worktree, which is
+# the one directory that belongs to exactly one package, so one package's gates
+# are not another's and nothing is widened for anyone else. Claude Code composes
+# a project-local allow list with the launch allowlist, which is what makes a
+# narrower, per-package grant possible at all.
+#
+# The content comes from the validated plan through jq rather than through the
+# shell: `handoff.ValidateGate` has already refused anything that is not a bare
+# project runner, and nothing here re-interprets it.
+install_package_gates() {
+  local wt="$1" id="$2"
+  local settings="$wt/.claude/settings.local.json"
+  mkdir -p "$wt/.claude" || die "creating the permission directory for $id"
+  jq --arg id "$id" \
+    '{permissions: {allow: [.packages[] | select(.id == $id) | .gates[]? | "Bash(" + . + ":*)"]}}' \
+    < "$PLAN" > "$settings" || die "granting the declared gates for $id"
+  cp -f "$settings" "$EVIDENCE/gates-$id.json" 2>/dev/null || true
+  local granted; granted="$(pkg_gates "$id" | tr '\n' ',' | sed 's/,$//')"
+  if [ -n "$granted" ]; then
+    say "$id may run its declared gates: $granted"
+  else
+    say "$id declared no gates; its worker may run none"
+  fi
+}
+
+# ensure_package_worktree gives a package the working tree its worker needs,
+# cut from the base as it stands NOW that its upstreams have merged.
+#
+# A package with upstreams gets no worktree at dispatch, because the base it
+# must build on does not exist yet: its upstreams' work reaches it through
+# repository state, never by reading a sibling worker's files. So the cut
+# happens at the moment the package becomes workable, which is when the stage
+# that waits for it begins — and the bead is re-slung there, because an agent
+# whose work directory did not exist when it was first routed has nowhere to
+# have started.
+ensure_package_worktree() {
+  local id="$1"
+  local wt branch bead mergedBase
+  wt="$(rt_get "wt.$id")"
+  branch="$(rt_get "branch.$id")"
+  bead="$(rt_get "bead.$id")"
+  [ -n "$wt" ] && [ -n "$branch" ] || die "no worktree recorded for $id; dispatch has not run"
+  [ -d "$wt" ] && return 0
+
+  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH"
+  mergedBase="$(git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
+  wt_add "$RIG_PATH" "$wt" "$branch" "$mergedBase" || die "creating the worktree for $id"
+  wt_is_registered "$RIG_PATH" "$wt" || die "the worktree for $id is not registered"
+  prepare_worktree "$wt" "$id"
+  say "cut $id from the merged base ${mergedBase:0:9} — its worker runs now"
+  gcx sling "$RIG_NAME/worker-$id" "$bead" --no-formula --no-convoy \
+    > "$EVIDENCE/route-$id.txt" 2>&1 || say "re-routing $id reported a problem; see route-$id.txt"
 }
 
 # ===========================================================================
@@ -444,16 +536,35 @@ stage_await() {
   local deadline=$(( $(date +%s) + ${DELIVERY_WORK_DEADLINE:-5400} ))
   local id bead remaining
 
+  # WAIT FOR THE PACKAGE THIS STAGE IS FOR.
+  #
+  # Waiting for every package at once cannot succeed on a plan whose packages
+  # depend on each other: a dependent package's work bead does not open until
+  # its upstream's merge bead closes, and that happens in `publish`, which runs
+  # after this stage. The compiler now schedules one await per package, so this
+  # waits for that one — and a run given no package still waits for all of
+  # them, which is the correct meaning for a single-package plan.
+  local waitFor
+  if [ -n "$PACKAGE" ]; then
+    waitFor="$PACKAGE"
+  else
+    waitFor="$(packages)"
+  fi
+
+  # Waiting for a worker that has nowhere to work is how a stage burns its
+  # whole deadline and reports the wrong thing. The tree comes first.
+  for id in $waitFor; do
+    ensure_package_worktree "$id"
+  done
+
   while true; do
     remaining=''
-    for id in $(packages); do
+    for id in $waitFor; do
       bead="$(rt_get "bead.$id")"
       [ -n "$bead" ] || continue
-      # A package whose upstreams have not merged has no worktree yet and its
-      # bead is correctly blocked; it is not something to wait for here.
       bead_is_closed "$bead" || remaining="$remaining $id"
     done
-    [ -z "$remaining" ] && { say 'every work bead is closed'; return 0; }
+    [ -z "$remaining" ] && { say "every work bead is closed:$(printf ' %s' $waitFor)"; return 0; }
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
       say "deadline reached with work outstanding:$remaining"
@@ -489,16 +600,12 @@ stage_publish() {
   paths="$(pkg_paths_csv "$PACKAGE")"
   [ -n "$bead" ] || die "no work bead for $PACKAGE"
 
-  # A dependent package's worktree is cut here, from the base as it stands now
-  # that its upstreams have merged — so it consumes them through repository
-  # state rather than by reading a sibling's working tree.
+  # Normally the await stage for this package already cut the worktree and its
+  # worker has finished. This stays as the fallback for a publication reached
+  # without one — a single-package plan resumed straight into publish, say —
+  # and is a no-op when the work is already done.
   if [ ! -d "$wt" ]; then
-    git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH"
-    local mergedBase; mergedBase="$(git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
-    wt_add "$RIG_PATH" "$wt" "$branch" "$mergedBase" || die "creating the worktree for $PACKAGE"
-    prepare_worktree "$wt" "$PACKAGE"
-    say "cut $PACKAGE from the merged base ${mergedBase:0:9} — its worker runs now"
-    gcx sling "$RIG_NAME/worker-$PACKAGE" "$bead" --no-formula --no-convoy >/dev/null 2>&1
+    ensure_package_worktree "$PACKAGE"
     local deadline=$(( $(date +%s) + ${DELIVERY_WORK_DEADLINE:-5400} ))
     while ! bead_is_closed "$bead"; do
       [ "$(date +%s)" -ge "$deadline" ] && die "$PACKAGE did not finish before its deadline"
@@ -586,6 +693,23 @@ under bounded-project and is denied git by policy." "${pathList[@]}")" \
 # local gate — its authority is the required CI run, which is stronger anyway.
 run_project_gates() {
   local wt="$1" id="$2" ok=0
+
+  # The gate the package declared is the gate the controller re-runs. Anything
+  # else would judge the work against a different standard than the one the
+  # worker was given and permitted, which is how "the worker verified it" and
+  # "the controller verified it" come to mean two different things.
+  local gate n=0
+  while IFS= read -r gate; do
+    [ -n "$gate" ] || continue
+    n=$((n + 1))
+    # shellcheck disable=SC2086 # a validated gate is a bare command, by contract
+    ( cd "$wt" && $gate ) > "$EVIDENCE/gate-$n-$id.txt" 2>&1 \
+      || { say "$id failed its declared gate '$gate'; see gate-$n-$id.txt"; ok=1; }
+  done <<< "$(pkg_gates "$id")"
+  if [ "$n" -gt 0 ]; then
+    return $ok
+  fi
+
   if [ -f "$wt/package.json" ]; then
     local script
     for script in typecheck test; do
@@ -801,33 +925,6 @@ stage_publish_projection() {
   "$runner" publish -state "$STATE" -repo "$pub" -target "$target" \
     > "$EVIDENCE/publish-projection.txt" 2>&1 \
     || die "publishing the projection: $(tail -3 "$EVIDENCE/publish-projection.txt")"
-
-  if [ -z "$(git -C "$pub" status --porcelain)" ]; then
-    say 'the published projection is unchanged'
-    return 0
-  fi
-  git -C "$pub" add -- "$target"
-  git -C "$pub" commit -q -m "chore(delivery): publish the Gas City execution projection
-
-Generated by the delivery engine's projector from this run's own evidence.
-Hand edits are overwritten and are not a source of truth." \
-    || die 'committing the projection'
-  git -C "$pub" push -q origin "$DEFAULT_BRANCH" > "$EVIDENCE/publish-push.txt" 2>&1 \
-    || die "pushing the projection: $(tail -2 "$EVIDENCE/publish-push.txt")"
-  say "projection published to $REPO_SLUG:$target"
-}
-
-# ===========================================================================
-
-case "$STAGE" in
-  city-up)            stage_city_up ;;
-  dispatch)           stage_dispatch ;;
-  await)              stage_await ;;
-  publish)            stage_publish ;;
-  project)            stage_project ;;
-  publish-projection) stage_publish_projection ;;
-esac
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                CE/publish-projection.txt")"
 
   if [ -z "$(git -C "$pub" status --porcelain)" ]; then
     say 'the published projection is unchanged'

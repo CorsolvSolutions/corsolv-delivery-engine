@@ -61,6 +61,8 @@ Date: 2026-08-15
 | 17:10 | `RECOVERY` | — | automatic | With all three declared, `city-up` completed: city built, rig cloned, imports installed, 4 bounded worker agents declared | city-up green | — |
 | 17:12 | `RECOVERY` | all 4 | automatic | `dispatch` created 8 beads (4 work, 4 controller merge), wired dependencies and slung each package to its worker | dispatch complete | — |
 | 17:12 | `APPROVAL_REQUIRED` | all 4 | human | No worker session ever started: the machine-wide supervisor (pid 388, up 5d) holds the API port with no control socket and no children, so `gc supervisor reload` reports it not running | delivery cannot proceed; restarting a shared process is its owner's decision | — |
+| 18:01 | `HUMAN_INTERVENTION` | — | human | **Manual operational intervention**: stale shared Gas City supervisor pid 388 restarted by authorised human decision, after a read-only check confirmed zero children, sole ownership of 8372, absent control socket, and only this pilot's city registered | supervisor replaced (pid 3449733); control socket present; `reload` answers | 3 |
+| 18:02 | `RECOVERY` | all 4 | automatic | Delivery resumed through the supported path; `city-up` and `dispatch` completed and the supervisor reconciled the city | `worker-wp-scaffold` session active in its own worktree | 1 |
 
 ### The defect the second pilot found
 
@@ -122,6 +124,60 @@ gc supervisor start
 
 No new supervisor can take over while pid 388 holds the port, which is why
 `gc init` was right to refuse and why nothing this run could do would fix it.
+
+### MANUAL OPERATIONAL INTERVENTION
+
+**Stale shared Gas City supervisor pid 388 restarted by authorised human
+decision**, 2026-08-15 18:01 UTC, after a read-only check confirmed it still had
+zero children, still solely owned `127.0.0.1:8372`, still had no control socket,
+and that `~/.gc/cities.toml` held only this pilot's city. `gc supervisor stop`
+could not reach it; the process was signalled directly and the service manager
+brought up a replacement (pid 3449733) which answers on
+`/run/user/1000/gc/supervisor.sock` and honours `gc supervisor reload`.
+
+This is recorded rather than folded into the narrative because of what it costs
+the claim being tested. **The remainder of this pilot is not evidence of
+zero-intervention autonomy.** It is evidence about the rest of the journey —
+worker execution, publication, CI, merge, acceptance — measured on a host a
+person had to fix first. The engine change above is what makes the same
+condition self-reporting next time, in seconds and by name, instead of ninety
+minutes of silence; it does not make it self-healing, and it should not.
+
+### What the worker run then found
+
+Two defects, both reached only because everything before them worked.
+
+**A bounded worker cannot run the gates its own bead requires.** The scaffold
+package's objective told its worker to prove itself with `npm install && npm run
+verify`. `bounded-project` grants exactly three project commands — `npm run
+typecheck`, `npm run build`, `npm test` — and nothing named `install` or
+`verify`, so both were refused with *"Permission to use Bash has been denied
+because Claude Code is running in don't ask mode"*. The worker wrote all eight
+authorised files and closed `blocked` with a precise account of what it could
+not do, which is the right answer to an impossible instruction and a useless
+outcome for the delivery. There was no path from the plan into the worker's
+permissions at all.
+
+A package now declares its `gates`, validated in Go to be bare project runners,
+and the run grants exactly those — in that package's own worktree, so nothing is
+widened for any other worker. The controller re-runs the same declared gates
+before publishing, so "the worker verified it" and "the controller verified it"
+mean the same thing.
+
+**One `await` for the whole plan cannot be satisfied by a dependency chain.**
+The bead graph is `work → merge → work → merge`: a package waits for its
+upstream to be *merged*, not merely finished, and that merge bead is closed by
+the controller inside `publish`. A single plan-wide await therefore waited on
+three work beads that could not open until a publication that could not start
+until the await finished. The run had exactly one ready bead — the controller's
+own merge bead — and sat out its full ninety-minute deadline before publishing
+anything, then reported "deadline reached with work outstanding" about a plan
+that was in fact progressing correctly.
+
+Waiting is now per package, interleaved with publication, and the tree a
+dependent package needs is cut where the waiting happens rather than after it.
+Nothing new schedules any of this: it is the same queue over the same bead
+graph, with the task order finally matching the dependency order it always had.
 
 ### Portal defect observed, not fixed here
 

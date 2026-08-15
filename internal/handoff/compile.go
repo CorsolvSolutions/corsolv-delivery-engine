@@ -144,7 +144,9 @@ const (
 	// StageDispatch creates the work beads, wires their dependencies and routes
 	// each to its worker.
 	StageDispatch = "dispatch"
-	// StageAwait waits for the agents to finish their work.
+	// StageAwait waits for one package's agent to finish its work. It is
+	// compiled per package as `await-<id>`, because a single plan-wide wait
+	// cannot be satisfied by a plan whose packages depend on each other.
 	StageAwait = "await"
 	// StagePublish is per package: gate, commit, push, PR, checks, merge.
 	StagePublish = "publish"
@@ -297,37 +299,58 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	if awaitTimeout <= 0 {
 		awaitTimeout = 5400
 	}
-	work.Tasks = append(work.Tasks,
-		stage(StageAwait, "wait for the workers to finish",
-			unattended.BandPrimary, []string{StageDispatch}, false, awaitTimeout,
-			append([]string{StageAwait}, project...)...),
-	)
 
-	// One publication task per package, in dependency order. Keeping them
-	// separate is what lets an interrupted run resume at the package it was on
-	// rather than replaying every merge that already landed.
+	// WAITING IS PER PACKAGE, AND SO IS PUBLICATION.
+	//
+	// One `await` for the whole plan deadlocks any plan whose packages depend on
+	// each other, which is every real plan. The dependency the driver wires runs
+	// from an upstream's MERGE bead — a package waits for repository state, not
+	// for a sibling worker's filesystem — and that merge bead is closed by the
+	// controller inside `publish`. So a single await waited for work beads that
+	// could not open until a publication that could not start until the await
+	// finished. The first pilot never saw it because it had one package; the
+	// second sat for its full deadline with three workers that were never
+	// eligible to run.
+	//
+	// Per package, the same graph runs in the order it describes:
+	//
+	//	await-A → publish-A (closes A's merge bead) → await-B → publish-B → …
+	//
+	// A package with no upstreams waits only on dispatch, so genuinely
+	// independent packages stay free to proceed as soon as they are ready. No
+	// new scheduler: this is the existing queue over the existing bead graph.
 	for _, wp := range orderPackages(plan) {
-		needs := []string{StageAwait}
+		upstream := make([]string, 0, len(wp.DependsOn))
 		for _, dep := range wp.DependsOn {
-			needs = append(needs, StagePublish+"-"+dep)
+			upstream = append(upstream, StagePublish+"-"+dep)
 		}
-		work.Tasks = append(work.Tasks, unattended.Task{
-			ID:             StagePublish + "-" + wp.ID,
-			Title:          "publish " + wp.ID + ": " + wp.Title,
-			Band:           unattended.BandPrimary,
-			Argv:           append([]string{host.Driver, StagePublish, "-package", wp.ID}, project...),
-			Needs:          needs,
-			Mutates:        true,
-			TimeoutSeconds: 3600,
-			MaxAttempts:    1,
-			DeliveryStatus: publishedStatus(in.Policy),
-			CompletionGate: "required CI passed + independent assurance passed + merged through repository governance",
-			Phase:          wp.Phase,
-		})
+
+		awaitID := StageAwait + "-" + wp.ID
+		awaitNeeds := append([]string{StageDispatch}, upstream...)
+		publishNeeds := append([]string{awaitID}, upstream...)
+
+		work.Tasks = append(work.Tasks,
+			stage(awaitID, "wait for "+wp.ID+": "+wp.Title,
+				unattended.BandPrimary, awaitNeeds, false, awaitTimeout,
+				append([]string{StageAwait, "-package", wp.ID}, project...)...),
+			unattended.Task{
+				ID:             StagePublish + "-" + wp.ID,
+				Title:          "publish " + wp.ID + ": " + wp.Title,
+				Band:           unattended.BandPrimary,
+				Argv:           append([]string{host.Driver, StagePublish, "-package", wp.ID}, project...),
+				Needs:          publishNeeds,
+				Mutates:        true,
+				TimeoutSeconds: 3600,
+				MaxAttempts:    1,
+				DeliveryStatus: publishedStatus(in.Policy),
+				CompletionGate: "required CI passed + independent assurance passed + merged through repository governance",
+				Phase:          wp.Phase,
+			},
+		)
 	}
 
-	publishNeeds := []string{StageProject}
-	projectNeeds := []string{StageAwait}
+	publishProjectionNeeds := []string{StageProject}
+	projectNeeds := make([]string, 0, len(plan.Packages))
 	for _, wp := range plan.Packages {
 		projectNeeds = append(projectNeeds, StagePublish+"-"+wp.ID)
 	}
@@ -337,7 +360,7 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 			unattended.BandEvidence, projectNeeds, false, 600,
 			append([]string{StageProject}, project...)...),
 		stage(StagePublishProjection, "publish the projection into the project's repository",
-			unattended.BandEvidence, publishNeeds, true, 900,
+			unattended.BandEvidence, publishProjectionNeeds, true, 900,
 			append([]string{StagePublishProjection}, project...)...),
 	)
 

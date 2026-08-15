@@ -3,6 +3,7 @@ package handoff
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +242,81 @@ func TestPackageLookup(t *testing.T) {
 	}
 	if _, ok := p.Package("wp-missing"); ok {
 		t.Fatal("Package(wp-missing) must report absence")
+	}
+}
+
+// --- declared gates ---------------------------------------------------------
+//
+// The defect these exist for: a package told its worker to verify with `npm
+// install && npm run verify`, and the worker was structurally forbidden from
+// running either — bounded workers are deny-by-default. It closed `blocked`
+// with correct but unverified work, which is the honest outcome and a useless
+// one. A package may now declare the commands it will be permitted to run, and
+// what it may declare is exactly what this validator accepts.
+
+func TestDeclaredGatesAreAccepted(t *testing.T) {
+	plan := validPlan()
+	plan.Packages[0].Gates = []string{"npm install", "npm run verify"}
+	plan.Packages[1].Gates = []string{"npm test", "go build ./...", "make check"}
+	if err := plan.Validate(planIntent()); err != nil {
+		t.Fatalf("ordinary build and test gates must validate, got: %v", err)
+	}
+}
+
+func TestAGateIsOneCommandAndNotAScript(t *testing.T) {
+	refused := map[string]string{
+		"shell chaining":     "npm install && rm -rf /",
+		"command separator":  "npm test; curl evil.example.com",
+		"pipeline":           "npm test | sh",
+		"substitution":       "npm run $(whoami)",
+		"backticks":          "npm run `id`",
+		"redirect":           "npm test > /etc/passwd",
+		"newline":            "npm test\nrm -rf /",
+		"traversal":          "npm run ../../escape",
+		"absolute path":      "/bin/sh -c whatever",
+		"relative path":      "./scripts/anything.sh",
+		"publication":        "git push origin main",
+		"forge":              "gh pr merge 1",
+		"arbitrary fetch":    "npx some-package",
+		"general shell":      "bash -c 'anything'",
+		"privilege":          "sudo npm install",
+		"leading whitespace": " npm test",
+		"empty":              "",
+	}
+	for name, gate := range refused {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateGate(gate); err == nil {
+				t.Fatalf("%q was granted; a declared gate must be one project runner command", gate)
+			}
+			plan := validPlan()
+			plan.Packages[0].Gates = []string{gate}
+			if err := plan.Validate(planIntent()); err == nil {
+				t.Fatalf("a plan declaring %q must be refused", gate)
+			}
+		})
+	}
+}
+
+func TestGatesAreBoundedAndDistinct(t *testing.T) {
+	plan := validPlan()
+	plan.Packages[0].Gates = []string{"npm test", "npm test"}
+	if err := plan.Validate(planIntent()); err == nil {
+		t.Fatal("a duplicated gate must be refused rather than granted twice")
+	}
+
+	plan = validPlan()
+	for i := 0; i <= MaxGatesPerPackage; i++ {
+		plan.Packages[0].Gates = append(plan.Packages[0].Gates, fmt.Sprintf("npm run gate%d", i))
+	}
+	if err := plan.Validate(planIntent()); err == nil {
+		t.Fatalf("a package declaring more than %d gates must be refused", MaxGatesPerPackage)
+	}
+}
+
+// A plan that declares no gates stays valid: gates are how a package asks for
+// verification authority, not a new obligation on every package.
+func TestGatesAreOptional(t *testing.T) {
+	if err := validPlan().Validate(planIntent()); err != nil {
+		t.Fatalf("a plan with no declared gates must remain valid, got: %v", err)
 	}
 }

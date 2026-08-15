@@ -96,7 +96,10 @@ that wrote the code itself would be forging the evidence it later checks.
    and resume.
 4. **Execute** — the driver builds a city, clones a working rig, declares one
    bounded worker per package, creates the beads, wires the dependencies and
-   routes them. Workers write code; only the controller commits, pushes, opens
+   routes them. Each package is then waited for and published in turn:
+   `await-A → publish-A → await-B → …`, because a dependent package's work bead
+   only opens when its upstream's *merge* bead closes, and that happens during
+   publication. Workers write code; only the controller commits, pushes, opens
    pull requests and merges.
 5. **Project** — the run's own evidence is rendered into a delivery projection
    and published to `delivery/gascity/PROJECT-STATE.yml`, which the portal
@@ -115,6 +118,24 @@ The Go layer keeps everything that benefits from types and tests: the contract,
 validation, the durable record, the evidence assessment and the compiler.
 `driver_test.go` runs every command line the compiler emits through the driver's
 own parser, because nothing else connects the two.
+
+## Gates
+
+A work package declares the commands its worker must run to verify itself, and
+those are exactly the commands that worker is permitted to run.
+
+Both halves matter. A bounded worker is deny-by-default, so a package whose
+objective says "verify with `npm run verify`" and whose gates say nothing has
+told its worker to do something the platform forbids — which is what happened,
+and the worker correctly closed `blocked` rather than claiming unverified work.
+And a gate list that widened permissions for the fleet would trade one package's
+convenience for every other package's containment.
+
+So the grant is installed in that package's own worktree, the one directory
+belonging to exactly one package, and `handoff.ValidateGate` refuses anything
+that is not a bare project runner: no shell syntax, no paths, no traversal, and
+never `git`, `gh`, `npx`, `curl` or a shell. Publication authority stays with
+the controller, which re-runs the same declared gates before it publishes.
 
 ## Containment
 
