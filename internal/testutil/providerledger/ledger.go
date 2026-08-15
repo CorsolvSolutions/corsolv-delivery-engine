@@ -59,6 +59,15 @@ const (
 
 var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
 
+// runtimeContractWaiverExpiry is the temporary re-issue horizon shared by the
+// seven remaining runtime-contract waivers. A named human accepted the bounded
+// unproven-contract risk on 2026-08-15 (governance bead tst-gwe) after each
+// claim was adjudicated individually and none could be closed by remediation
+// bounded to this repository. None of these claims is proved; every one states
+// the condition that retires it. Constructors that have since obtained a real
+// contract proof are dispositioned proved and never reach this value.
+var runtimeContractWaiverExpiry = time.Date(2026, time.September, 14, 0, 0, 0, 0, time.UTC)
+
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
 	RuntimeBuiltinCatalog = "runtime.builtin"
@@ -66,6 +75,11 @@ const (
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
 	runtimeContractWaiverOwner = "ga-80po0c.3"
+	// runtimeInfraWaiverExit is the shared exit condition for the runtime
+	// contract waivers blocked on infrastructure this repository cannot offer a
+	// gated conformance environment. It is appended to each such reason so the
+	// rendered ledger states what retires the waiver, not merely what blocks it.
+	runtimeInfraWaiverExit = "exit: the required infrastructure becomes available to a legitimate gated conformance environment and this exact production constructor obtains the shared runtime contract proof"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -161,9 +175,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"subprocess", "exact:subprocess", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
-				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
+				"internal/runtime/subprocess/default_seam_conformance_test.go",
+				"TestSubprocessDefaultSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/subprocess", "defaultSeamConformancePrefix"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
@@ -176,9 +194,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"acp", "exact:acp", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
+				"internal/runtime/acp/default_conformance_test.go",
+				"TestACPDefaultConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				repoSymbol("internal/runtime/acp", "acpDefaultConformancePrefix"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -192,30 +215,30 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				"the production T3 bridge composition drives a live T3 API WebSocket server, which no gated conformance environment here provides; the in-repo fake answers one request per connection from a static snapshot, so extending it far enough to satisfy the shared contract would prove the bridge against a fiction authored for the proof",
 			),
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"the actual K8s production composition has no full shared runtime contract",
+				"the actual K8s production composition builds a live REST config and clientset in k8s.NewProvider, so the shared contract needs a real cluster and no CI lane installs kubectl or provisions one",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				"the existing full conformance run skips in short mode or when the herdr executable is absent, and no CI lane installs that binary; its factory also spans several statements, so binding it as ledger proof needs the executable and a factory rewrite",
 			),
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				"cmd/gc.newHybridProvider is the selected registry construction boundary and composes local tmux with k8s.NewSeamBacked, so it inherits that constructor's live-cluster requirement; its internal tmux, K8s, and hybrid constructors are not claimed here",
 			),
 		),
 		builtin(
@@ -228,23 +251,23 @@ func Catalog() []Entry {
 				repoSymbol("internal/runtime/exec", "execConformanceScript"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which drives a live T3 API WebSocket server no gated conformance environment here provides",
 			),
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,
-			waivedRuntime(
+			infraWaivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"the production SSH composition has no full shared runtime contract",
+				"the production SSH composition drives in-box tmux over a real ssh connection, so the shared contract needs a reachable host running sshd with tmux installed and no CI lane provides one",
 			),
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"the existing full conformance run skips when the tmux executable is absent",
+				"CI does equip this one: TestTmuxConformance runs the full contract against this exact constructor on installed tmux. It cannot bind as ledger proof because ValidateProofRefs rejects its hasTmux skip gate and pins the runner to RunProviderTests, while the run needs RunProviderTestsWithOptions SkipStartError to tolerate load-induced ErrServerDegraded starts, so binding it today would drop known-needed resilience from a required gate or admit skip classifiers into the proof shape; exit: resolve the proof-runner and degraded-start classification incompatibility without weakening the shared runtime contract or the required gate, then bind the exact constructor to legitimate ledger proof",
 			),
 		),
 		{
@@ -327,10 +350,17 @@ func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			Expires: runtimeContractWaiverExpiry,
 			Reason:  reason,
 		},
 	}
+}
+
+// infraWaivedRuntime records a runtime-contract waiver whose only blocker is
+// infrastructure this repository cannot offer a gated conformance environment,
+// appending the shared exit condition to the claim-specific blocker.
+func infraWaivedRuntime(constructor SymbolRef, blocker string) ContractClaim {
+	return waivedRuntime(constructor, blocker+"; "+runtimeInfraWaiverExit)
 }
 
 func notApplicableRuntime(constructor SymbolRef, reason string) ContractClaim {
