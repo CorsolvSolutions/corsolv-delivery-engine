@@ -231,6 +231,14 @@ type ResumeState struct {
 	Gates map[string]GateEvidence
 	// Finished reports whether the previous run recorded its own end.
 	Finished bool
+	// FinalOutcome is the terminal outcome that end recorded.
+	//
+	// It is kept apart from Finished because the two license different things.
+	// A run that ended is not thereby over: a run held at a human boundary, or
+	// one whose work failed, is exactly the run a resume exists for. Only a run
+	// that recorded RunCompleted is history, and reopening it would return a
+	// finished delivery to an active state. See ErrRunAlreadyCompleted.
+	FinalOutcome RunOutcome
 	// LastSeq is the highest durable sequence.
 	LastSeq int
 }
@@ -291,6 +299,7 @@ func Replay(records []Record, runID string) ResumeState {
 			st.Gates[r.Gate.GateID] = MergeEvidence(st.Gates[r.Gate.GateID], *r.Gate)
 		case RecordRunFinished:
 			st.Finished = true
+			st.FinalOutcome = RunOutcome(r.Outcome)
 		}
 	}
 	return st
