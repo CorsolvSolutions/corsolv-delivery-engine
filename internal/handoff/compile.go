@@ -1,0 +1,568 @@
+package handoff
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/unattended"
+)
+
+// HostProfile is everything about this delivery machine that the portal does
+// not know and must not be asked.
+//
+// It is the second half of the separation the intent contract makes. The portal
+// says what to deliver; this says where things live on the host that will do
+// it. Moving delivery to another machine is a change to this profile and to
+// nothing else — which is the same property the run spec already has, applied
+// one level up.
+type HostProfile struct {
+	// DeliveryRoot is where per-project delivery state lives. Each project gets
+	// a directory under it holding the record, the plan and the run's state.
+	DeliveryRoot string
+	// Driver is the engine-owned executable every compiled task invokes. It is
+	// the ONLY thing that ends up on a command line, and it comes from here —
+	// never from the intent.
+	Driver string
+	// GitHubCommand is the forge CLI. On this host the engine runs under WSL
+	// while the only authenticated gh is a Windows install, so assuming `gh` on
+	// PATH is wrong and declaring it is the point.
+	GitHubCommand string
+	// GasCityCommand is the Gas City CLI the driver builds the city with. It is
+	// declared for the same reason the forge CLI and the planner are: a run
+	// detached into its own process group does not inherit an interactive
+	// shell's PATH, and a driver left to find `gc` there fails at the very
+	// first stage with "command not found".
+	GasCityCommand string
+	// BeadsCommand is the beads CLI the city's bead stores are made with.
+	//
+	// The driver never invokes it. Gas City does, by PATH lookup, from a script
+	// it shells out to — so unlike the others this one is declared not to be
+	// executed but to be findable, and the driver puts it where that lookup
+	// will find it.
+	BeadsCommand string
+	// Provider is the agent runtime workers are started under.
+	Provider string
+	// ProviderCommand is where that runtime's binary actually is.
+	//
+	// Gas City resolves a provider by name on PATH, and refuses to finish
+	// building a city whose provider it cannot resolve — which leaves the city
+	// half-made: created, but with its pack imports never installed, so every
+	// later command fails on a missing packs.lock. Declared here, exposed by
+	// name, for the same reason as the two above.
+	ProviderCommand string
+	// WindowsMountPrefix maps a Windows drive to its mount point on this host,
+	// e.g. "/mnt". Empty means paths are used as given.
+	WindowsMountPrefix string
+}
+
+// ErrHostProfileInvalid is returned for a profile that cannot govern a run.
+var ErrHostProfileInvalid = errors.New("handoff: host profile is invalid")
+
+// Validate refuses a profile missing something no default can supply.
+func (h HostProfile) Validate() error {
+	var missing []string
+	if strings.TrimSpace(h.DeliveryRoot) == "" {
+		missing = append(missing, "deliveryRoot")
+	}
+	if strings.TrimSpace(h.Driver) == "" {
+		missing = append(missing, "driver")
+	}
+	if strings.TrimSpace(h.Provider) == "" {
+		missing = append(missing, "provider")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: missing %s", ErrHostProfileInvalid, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+var windowsDrive = regexp.MustCompile(`^([A-Za-z]):[\\/]`)
+
+// ResolveCheckout maps a checkout path recorded by the portal onto this host.
+//
+// The portal runs on Windows and records `D:\Development\thing`; the engine
+// runs under WSL where that is `/mnt/d/Development/thing`. Translating here
+// keeps the intent honest about what the portal knows — it really did register
+// a Windows path — without making every downstream consumer aware of the mount
+// layout.
+func (h HostProfile) ResolveCheckout(p string) string {
+	m := windowsDrive.FindStringSubmatch(p)
+	if m == nil || h.WindowsMountPrefix == "" {
+		return p
+	}
+	rest := strings.ReplaceAll(p[len(m[0]):], `\`, "/")
+	return path_Join(h.WindowsMountPrefix, strings.ToLower(m[1]), rest)
+}
+
+// path_Join joins with forward slashes regardless of the host separator: the
+// result addresses a POSIX mount point, so filepath.Join would corrupt it when
+// this code is compiled for Windows.
+//
+//nolint:revive // named for what it is, not for what filepath.Join is
+func path_Join(parts ...string) string {
+	cleaned := make([]string, 0, len(parts))
+	for _, p := range parts {
+		cleaned = append(cleaned, strings.Trim(p, "/"))
+	}
+	return "/" + strings.Join(cleaned, "/")
+}
+
+// ProjectDir is where a project's delivery state lives.
+func (h HostProfile) ProjectDir(projectID string) string {
+	return filepath.Join(h.DeliveryRoot, projectID)
+}
+
+// StateDir is the run's durable state directory.
+//
+// It sits beside the record rather than inside the worktree, because a checkout
+// or a cleanliness check inside the worktree would touch the run's own account
+// of what it was doing.
+func (h HostProfile) StateDir(projectID string) string {
+	return filepath.Join(h.ProjectDir(projectID), "run")
+}
+
+// ProjectionPath is where the run publisher renders RUN progress, refreshed
+// alongside the heartbeat so a dashboard sees movement during a long run.
+//
+// Its rows are keyed by run task id — `publish-wp-add`, not `wp-add` — and it
+// carries no per-package completion gate, because the run layer does not
+// adjudicate one. It is a view of the queue, not of the delivery.
+func (h HostProfile) ProjectionPath(projectID string) string {
+	return filepath.Join(h.StateDir(projectID), "PROJECT-STATE.yml")
+}
+
+// DeliveryProjectionPath is the delivery projection: the document the driver's
+// project stage renders from the forge and the run's control ledger, and the
+// one its publish-projection stage commits into the project's repository.
+//
+// It is keyed by PACKAGE id and carries each package's completion gate, which is
+// what makes it the document an acceptance assessment can read. Assess only ever
+// understood this shape, and was being handed the run-progress document instead:
+// no row could match by construction, so a delivery that had merged all four
+// packages with every gate met reported every package outstanding. A mismatch
+// that reads as "nothing is done" rather than as an error is the worst kind, so
+// the two documents are named apart here rather than distinguished by comment.
+func (h HostProfile) DeliveryProjectionPath(projectID string) string {
+	return filepath.Join(h.ProjectDir(projectID), "PROJECT-STATE.yml")
+}
+
+// The stages a compiled delivery run executes, in order.
+//
+// They are named rather than numbered because they appear in the run's
+// heartbeat, and "publishing wp-add" tells a person looking in at midnight
+// something that "stage 4" does not.
+const (
+	// StageCityUp builds the city, clones the working rig and declares the
+	// worker agents.
+	StageCityUp = "city-up"
+	// StageDispatch creates the work beads, wires their dependencies and routes
+	// each to its worker.
+	StageDispatch = "dispatch"
+	// StageAwait waits for one package's agent to finish its work. It is
+	// compiled per package as `await-<id>`, because a single plan-wide wait
+	// cannot be satisfied by a plan whose packages depend on each other.
+	StageAwait = "await"
+	// StagePublish is per package: gate, commit, push, PR, checks, merge.
+	StagePublish = "publish"
+	// StageProject renders the delivery projection from the run's own evidence.
+	StageProject = "project"
+	// StagePublishProjection installs that projection into the project's
+	// repository so the portal can read it.
+	StagePublishProjection = "publish-projection"
+)
+
+// Compile turns an intent and its validated plan into the run the unattended
+// layer already knows how to execute.
+//
+// Two properties matter more than the mechanics. First, every argv it produces
+// is built from the host profile's driver and from identifiers this package has
+// already validated — nothing from the intent reaches a command line as a word
+// the shell could read. Second, the result is a plain declarative plan, so an
+// interrupted run resumes through the journal the unattended layer already
+// keeps, rather than through anything invented here.
+func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unattended.Spec, unattended.Plan, error) {
+	var spec unattended.Spec
+	var work unattended.Plan
+
+	if err := in.Validate(); err != nil {
+		return spec, work, err
+	}
+	if err := plan.Validate(in); err != nil {
+		return spec, work, err
+	}
+	if err := host.Validate(); err != nil {
+		return spec, work, err
+	}
+	if strings.TrimSpace(runID) == "" {
+		return spec, work, fmt.Errorf("%w: a run needs an id", ErrHostProfileInvalid)
+	}
+
+	worktree := host.ResolveCheckout(in.Checkout)
+	stateDir := host.StateDir(in.ProjectID)
+
+	spec = unattended.Spec{
+		ProjectID: in.ProjectID,
+		Ownership: unattended.Ownership{
+			ProjectID:      in.ProjectID,
+			Worktree:       worktree,
+			ExpectedOrigin: in.Repository.Origin,
+			ExpectedBranch: in.Repository.DefaultBranch,
+			Role:           unattended.RoleController,
+			Session:        "managed-delivery-" + in.ProjectID,
+			// The registered checkout is the project's, not the run's. Delivery
+			// happens in a working clone the run makes for itself, so the
+			// checkout is read for identity and never mutated — and a person's
+			// half-finished edit in it is not this run's business to refuse.
+			AllowDirtyWorktree: true,
+		},
+		StateDir:    stateDir,
+		PublishPath: host.ProjectionPath(in.ProjectID),
+		Tools: []unattended.ToolRequirement{
+			{Name: "git", MinVersion: "2.30", VersionArgs: []string{"--version"}, Purpose: "every repository operation delivery performs"},
+			{Name: "tmux", MinVersion: "3.0", VersionArgs: []string{"-V"}, Purpose: "the runtime provider worker sessions run under"},
+			{Name: host.forgeCLI(), MinVersion: "2.40", VersionArgs: []string{"--version"}, Purpose: "pull requests, checks and merges"},
+			// No minimum version: the run is built against whichever gc this
+			// host has, and a version comparison here would refuse a delivery
+			// over a banner rather than over a capability. Presence is the
+			// property that was missing — a preflight that reported READY while
+			// the binary the first stage runs was nowhere on PATH.
+			{Name: host.gasCityCLI(), Purpose: "building the city, cloning the rig and every bead operation delivery performs"},
+			{Name: host.beadsCLI(), Purpose: "the bead store Gas City creates in the rig; Gas City resolves it by PATH lookup"},
+			{Name: host.providerCLI(), Purpose: "the agent runtime the city's provider readiness and every worker session resolve by name"},
+		},
+		Paths: []unattended.PathRequirement{
+			{Path: worktree, Kind: unattended.PathDir, Purpose: "the registered checkout this delivery is for"},
+			{Path: host.ProjectDir(in.ProjectID), Kind: unattended.PathDir, Writable: true, Create: true, Purpose: "durable delivery state: record, plan, journal, projection"},
+			{Path: stateDir, Kind: unattended.PathDir, Writable: true, Create: true, Purpose: "the run's journal, heartbeat and completion record"},
+		},
+		Env: []unattended.EnvRequirement{
+			{Name: "HOME", Purpose: "resolves the agent runtime's configuration"},
+			{Name: "PATH", Purpose: "resolves every declared tool"},
+		},
+		// A run's own tooling knows what its stderr means, and this is the one
+		// sentence the builtin rules would read wrongly. "The supervisor cannot
+		// be asked to reconcile" is not a code defect to retry and not an
+		// environment fault to shrug at: restarting a machine-wide process that
+		// other work may depend on is a judgement, and this run is not entitled
+		// to make it.
+		Classification: []unattended.ClassificationRule{{
+			Pattern: `supervisor cannot be asked to reconcile`,
+			Class:   unattended.FailureHumanDecision,
+			Reason:  "the machine-wide supervisor is not answering, and restarting a shared process is its owner's decision",
+		}},
+		GitHub: &unattended.GitHubRequirement{
+			Repo:             in.Repository.Slug,
+			Command:          host.GitHubCommand,
+			Branch:           in.Repository.DefaultBranch,
+			NeedPush:         in.Policy.NeedPush,
+			NeedPR:           in.Policy.NeedPR,
+			NeedChecks:       in.Policy.NeedChecks,
+			NeedMerge:        in.Policy.NeedMerge,
+			MergeHumanAction: in.Policy.MergeHumanAction,
+		},
+	}
+
+	// Risk classification — the packet's half of mandatory-gate selection.
+	//
+	// This packet authors no code and compiles nothing. Every line of code a
+	// managed delivery produces is written inside a WORKER's own packet, and is
+	// certified there: by the gates that package declared, re-run independently
+	// by the controller before it publishes, by required CI on the exact
+	// pull-request head, and by a governed merge — the three controls the run's
+	// own ledger records and the projection's completion gate is derived from.
+	// So no code-certifying gate applies to this packet, and Q0 requires none.
+	//
+	// Q0 rather than Q2 is a deliberate reading of what this packet IS, not a
+	// way around Q2's gates. The compiled run's every task invokes the declared
+	// driver and nothing else — TestCompiledArgvComesOnlyFromTheHostProfile
+	// holds that line — so it structurally cannot run a build, a test suite or
+	// a linter of its own to satisfy them. Declaring Q2 here would not make the
+	// delivery safer; it would make `Begin` refuse every delivery for want of
+	// evidence the packet is forbidden from producing, which is the same
+	// precedent guk-bpm-publication.plan.toml settled: classify by what the
+	// packet authors, not by what its product touches.
+	//
+	// Changing what this packet does is a change to this classification first.
+	work = unattended.Plan{RunID: runID, Risk: unattended.RiskQ0}
+	stage := func(id, title string, band unattended.Band, needs []string, mutates bool, timeout int, args ...string) unattended.Task {
+		return unattended.Task{
+			ID:             id,
+			Title:          title,
+			Band:           band,
+			Argv:           append([]string{host.Driver}, args...),
+			Needs:          needs,
+			Mutates:        mutates,
+			TimeoutSeconds: timeout,
+			MaxAttempts:    1,
+		}
+	}
+
+	// Every argument the driver receives comes from the host profile or from an
+	// identifier this package has already validated. The forge CLI is here for
+	// the same reason it is in the spec: where `gh` lives is machine-specific,
+	// and a driver left to find it on PATH fails at the clone with an
+	// authentication error that names nothing.
+	project := []string{"-project", in.ProjectID, "-state", host.ProjectDir(in.ProjectID)}
+	if cli := strings.TrimSpace(host.GitHubCommand); cli != "" {
+		project = append(project, "-gh", cli)
+	}
+	if cli := strings.TrimSpace(host.GasCityCommand); cli != "" {
+		project = append(project, "-gc", cli)
+	}
+	if cli := strings.TrimSpace(host.BeadsCommand); cli != "" {
+		project = append(project, "-bd", cli)
+	}
+	// The provider is named as well as located: the name is what Gas City looks
+	// up, so it is also the name the located binary has to be exposed under. A
+	// driver that hard-coded one of them would build a city under a runtime the
+	// host profile did not declare.
+	project = append(project, "-provider", host.Provider)
+	if cli := strings.TrimSpace(host.ProviderCommand); cli != "" {
+		project = append(project, "-provider-bin", cli)
+	}
+
+	work.Tasks = append(work.Tasks,
+		stage(StageCityUp, "build the city, clone the working rig and declare the workers",
+			unattended.BandPrimary, nil, false, 1800,
+			append([]string{StageCityUp}, project...)...),
+		stage(StageDispatch, "create the work beads, wire their dependencies and route them",
+			unattended.BandPrimary, []string{StageCityUp}, false, 900,
+			append([]string{StageDispatch}, project...)...),
+	)
+
+	awaitTimeout := in.Policy.WorkDeadlineSeconds
+	if awaitTimeout <= 0 {
+		awaitTimeout = 5400
+	}
+
+	// WAITING IS PER PACKAGE, AND SO IS PUBLICATION.
+	//
+	// One `await` for the whole plan deadlocks any plan whose packages depend on
+	// each other, which is every real plan. The dependency the driver wires runs
+	// from an upstream's MERGE bead — a package waits for repository state, not
+	// for a sibling worker's filesystem — and that merge bead is closed by the
+	// controller inside `publish`. So a single await waited for work beads that
+	// could not open until a publication that could not start until the await
+	// finished. The first pilot never saw it because it had one package; the
+	// second sat for its full deadline with three workers that were never
+	// eligible to run.
+	//
+	// Per package, the same graph runs in the order it describes:
+	//
+	//	await-A → publish-A (closes A's merge bead) → await-B → publish-B → …
+	//
+	// A package with no upstreams waits only on dispatch, so genuinely
+	// independent packages stay free to proceed as soon as they are ready. No
+	// new scheduler: this is the existing queue over the existing bead graph.
+	for _, wp := range orderPackages(plan) {
+		upstream := make([]string, 0, len(wp.DependsOn))
+		for _, dep := range wp.DependsOn {
+			upstream = append(upstream, StagePublish+"-"+dep)
+		}
+
+		awaitID := StageAwait + "-" + wp.ID
+		awaitNeeds := append([]string{StageDispatch}, upstream...)
+		publishNeeds := append([]string{awaitID}, upstream...)
+
+		work.Tasks = append(work.Tasks,
+			stage(awaitID, "wait for "+wp.ID+": "+wp.Title,
+				unattended.BandPrimary, awaitNeeds, false, awaitTimeout,
+				append([]string{StageAwait, "-package", wp.ID}, project...)...),
+			unattended.Task{
+				ID:             StagePublish + "-" + wp.ID,
+				Title:          "publish " + wp.ID + ": " + wp.Title,
+				Band:           unattended.BandPrimary,
+				Argv:           append([]string{host.Driver, StagePublish, "-package", wp.ID}, project...),
+				Needs:          publishNeeds,
+				Mutates:        true,
+				TimeoutSeconds: 3600,
+				MaxAttempts:    1,
+				DeliveryStatus: publishedStatus(in.Policy),
+				CompletionGate: "required CI passed + independent assurance passed + merged through repository governance",
+				Phase:          wp.Phase,
+			},
+		)
+	}
+
+	publishProjectionNeeds := []string{StageProject}
+	projectNeeds := make([]string, 0, len(plan.Packages))
+	for _, wp := range plan.Packages {
+		projectNeeds = append(projectNeeds, StagePublish+"-"+wp.ID)
+	}
+
+	work.Tasks = append(work.Tasks,
+		stage(StageProject, "render the delivery projection from the run's evidence",
+			unattended.BandEvidence, projectNeeds, false, 600,
+			append([]string{StageProject}, project...)...),
+		stage(StagePublishProjection, "publish the projection into the project's repository",
+			unattended.BandEvidence, publishProjectionNeeds, true, 900,
+			append([]string{StagePublishProjection}, project...)...),
+	)
+
+	if err := work.Validate(); err != nil {
+		return spec, work, fmt.Errorf("compiling the delivery run: %w", err)
+	}
+	if err := spec.Validate(); err != nil {
+		return spec, work, fmt.Errorf("compiling the delivery run: %w", err)
+	}
+	return spec, work, nil
+}
+
+// publishedStatus is the projection status a successful publication
+// establishes.
+//
+// It is the policy's honest ceiling, not an aspiration. A run forbidden to
+// merge reaches an open pull request and no further, and saying `merged` there
+// would score delivery for something that did not happen.
+func publishedStatus(p Policy) string {
+	if p.NeedMerge {
+		return "merged"
+	}
+	return "pr-open"
+}
+
+func (h HostProfile) forgeCLI() string {
+	if strings.TrimSpace(h.GitHubCommand) != "" {
+		return h.GitHubCommand
+	}
+	return "gh"
+}
+
+// gasCityCLI is the Gas City command this run will use, declared or defaulted.
+//
+// The default is the bare name, which is what the driver falls back to. It is a
+// real answer on a host that has gc on PATH, and naming it here means preflight
+// reports its absence instead of leaving city-up to discover it.
+func (h HostProfile) gasCityCLI() string {
+	if strings.TrimSpace(h.GasCityCommand) != "" {
+		return h.GasCityCommand
+	}
+	return "gc"
+}
+
+// beadsCLI is the beads command this run will make findable, declared or
+// defaulted, on the same terms as the two above.
+func (h HostProfile) beadsCLI() string {
+	if strings.TrimSpace(h.BeadsCommand) != "" {
+		return h.BeadsCommand
+	}
+	return "bd"
+}
+
+// providerCLI is the agent runtime binary, declared or defaulted to the
+// provider's own name — which is what Gas City looks up when nothing says
+// otherwise.
+func (h HostProfile) providerCLI() string {
+	if strings.TrimSpace(h.ProviderCommand) != "" {
+		return h.ProviderCommand
+	}
+	return h.Provider
+}
+
+// orderPackages returns the packages in dependency order.
+//
+// The plan has already been proved acyclic, so this is a plain topological
+// sort with a deterministic tiebreak: two runs of the same plan must compile to
+// the same task list, or a resumed run would not match its own journal.
+func orderPackages(plan DeliveryPlan) []WorkPackage {
+	remaining := make(map[string]WorkPackage, len(plan.Packages))
+	var ids []string
+	for _, wp := range plan.Packages {
+		remaining[wp.ID] = wp
+		ids = append(ids, wp.ID)
+	}
+	sortStrings(ids)
+
+	done := map[string]bool{}
+	out := make([]WorkPackage, 0, len(plan.Packages))
+	for len(out) < len(plan.Packages) {
+		progressed := false
+		for _, id := range ids {
+			if done[id] {
+				continue
+			}
+			wp := remaining[id]
+			ready := true
+			for _, dep := range wp.DependsOn {
+				if _, known := remaining[dep]; known && !done[dep] {
+					ready = false
+					break
+				}
+			}
+			if !ready {
+				continue
+			}
+			out = append(out, wp)
+			done[id] = true
+			progressed = true
+		}
+		if !progressed {
+			// Unreachable: Validate proved the graph acyclic. Appending the
+			// remainder keeps the compiler total rather than looping forever if
+			// that ever stops being true.
+			for _, id := range ids {
+				if !done[id] {
+					out = append(out, remaining[id])
+					done[id] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// WriteRunFiles renders the compiled spec and plan into the project's delivery
+// directory, where the driver and a person can both read them.
+func WriteRunFiles(host HostProfile, spec unattended.Spec, work unattended.Plan) (specPath, planPath string, err error) {
+	dir := host.ProjectDir(spec.ProjectID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", fmt.Errorf("creating delivery directory: %w", err)
+	}
+
+	specPath = filepath.Join(dir, "run-spec.toml")
+	data, err := spec.Encode()
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(specPath, data, 0o644); err != nil { //nolint:gosec // run evidence
+		return "", "", fmt.Errorf("writing %q: %w", specPath, err)
+	}
+
+	planPath = filepath.Join(dir, "run-plan.toml")
+	encoded, err := encodeWorkPlan(work)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(planPath, encoded, 0o644); err != nil { //nolint:gosec // run evidence
+		return "", "", fmt.Errorf("writing %q: %w", planPath, err)
+	}
+	return specPath, planPath, nil
+}
+
+// encodeWorkPlan renders the compiled work plan as the TOML the unattended
+// layer loads.
+//
+// The plan is round-tripped rather than handed over in memory because an
+// interrupted run is restarted as a new process, and the plan it resumes must
+// be the one on disk — the same bytes a person can read to see what the run
+// believed it was doing.
+func encodeWorkPlan(work unattended.Plan) ([]byte, error) {
+	var buf strings.Builder
+	if err := toml.NewEncoder(&buf).Encode(work); err != nil {
+		return nil, fmt.Errorf("encoding the delivery work plan: %w", err)
+	}
+	return []byte(buf.String()), nil
+}
