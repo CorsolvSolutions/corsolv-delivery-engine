@@ -143,8 +143,25 @@ var bootstrapPolicy = Ledger{
 			// source belongs in the audit count rather than hidden from it, and
 			// the untagged Debt baseline is again untouched because the file is
 			// integration-tagged.
-			BaselineCalls:   613,
-			BaselineFiles:   174,
+			//
+			// 613/174 -> 622/176: the managed-delivery recovery contract tests
+			// (corsolv/delivery/driver_recovery_test.go) and the projector's
+			// control-ledger contract test (corsolv/projector-gen/main_test.go,
+			// with the dedicated testenv import file the policy requires beside
+			// it). The recovery tests spawn the driver and build a real throwaway
+			// git repository per case, because the defect they pin — a resumed run
+			// reading `dispatched` as "a worker exists" and then waiting out its
+			// deadline on a bead nobody held — is only reproducible by running the
+			// driver against a repository that survived an interruption.
+			//
+			// Raised for the same reason as the two entries above: this is the
+			// audit baseline whose invariant is that real test source stays
+			// VISIBLE, so new process-owning test source belongs in the count
+			// rather than hidden from it. The untagged Debt baseline is untouched
+			// — driver_recovery_test.go is integration-tagged, and the
+			// projector-gen tests spawn nothing at all.
+			BaselineCalls:   622,
+			BaselineFiles:   176,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
