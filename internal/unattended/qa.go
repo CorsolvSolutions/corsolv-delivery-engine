@@ -353,7 +353,15 @@ type ProgressionDecision struct {
 }
 
 // Reason renders why progression was refused, or why it was permitted.
+//
+// A decision that was never taken says so. Rendering the zero value as a
+// refusal with no blocking gates would read as though the gates had been
+// consulted and come back empty, which is a different and much more
+// reassuring claim than "nobody asked".
 func (d ProgressionDecision) Reason() string {
+	if !d.Allowed && len(d.Required) == 0 && len(d.Blocking) == 0 {
+		return "no progression decision was recorded"
+	}
 	if d.Allowed {
 		if len(d.Required) == 0 {
 			return fmt.Sprintf("risk %s requires no mechanical gate", d.Risk)

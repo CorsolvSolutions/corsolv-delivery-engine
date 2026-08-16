@@ -161,8 +161,12 @@ func ReadCompletion(stateDir string) (CompletionEvent, bool, error) {
 
 // String renders a completion event as the one line a person needs.
 func (e CompletionEvent) String() string {
-	return fmt.Sprintf("%s — %s in %s (%s): %s",
-		e.SessionLabel, e.Outcome, e.Duration, summarizeCounts(e.Tasks), e.Reason)
+	// The QA verdict is appended rather than left to the reason, because it is
+	// answered independently of how the run ended: a run that stopped on a
+	// human boundary still has gates that did or did not pass. It stays on the
+	// one line this renders to — a notification layer announces this string.
+	return fmt.Sprintf("%s — %s in %s (%s): %s [qa: %s]",
+		e.SessionLabel, e.Outcome, e.Duration, summarizeCounts(e.Tasks), e.Reason, e.QA.Reason())
 }
 
 func summarizeCounts(counts map[TaskState]int) string {

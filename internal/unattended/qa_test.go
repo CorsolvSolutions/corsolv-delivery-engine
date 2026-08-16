@@ -124,6 +124,12 @@ func TestMissingMandatoryEvidenceBlocksProgression(t *testing.T) {
 	if empty.Allowed || len(empty.Blocking) != len(empty.Required) {
 		t.Fatalf("an empty ledger produced %+v, want every required gate blocking", empty)
 	}
+
+	// A decision nobody took must not read as a decision that found nothing
+	// wrong — those are opposite claims and the report says so.
+	if got := (ProgressionDecision{}).Reason(); got != "no progression decision was recorded" {
+		t.Fatalf("the zero decision reads as %q", got)
+	}
 }
 
 // ACCEPTANCE 4 — PASS evidence bound to an older revision cannot certify
