@@ -310,3 +310,58 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// A delivery renders TWO documents, and they are not interchangeable.
+//
+// `ProjectionPath` is where the run publisher renders RUN progress: its rows are
+// keyed by run task ids (`publish-wp-add`) and it carries no per-package
+// completion gate, because the run layer does not adjudicate one.
+//
+// `DeliveryProjectionPath` is the delivery projection the driver's project stage
+// renders from the forge and the control ledger, keyed by PACKAGE ids and
+// carrying the gate. It is the document `stage_publish_projection` commits into
+// the project's repository, so it is the one a consumer ever sees.
+//
+// Assess only ever understood the second — every case in this file is keyed by
+// package id — and it was being handed the first. The result was a delivery that
+// had merged all four packages with every gate met reporting "4 of 4 work
+// packages are not complete", because no row could match by construction.
+func TestTheDeliveryProjectionIsNotTheRunProgressProjection(t *testing.T) {
+	host := HostProfile{DeliveryRoot: "/srv/delivery"}
+
+	run := host.ProjectionPath("proj")
+	delivery := host.DeliveryProjectionPath("proj")
+
+	if run == delivery {
+		t.Fatal("the run-progress and delivery projections must be distinct documents")
+	}
+	if filepath.Dir(delivery) != host.ProjectDir("proj") {
+		t.Errorf("the delivery projection belongs beside the record, got %s", delivery)
+	}
+	if filepath.Dir(run) != host.StateDir("proj") {
+		t.Errorf("the run-progress projection belongs in the run's state dir, got %s", run)
+	}
+}
+
+// The failure this reproduces: run-task ids can never satisfy a package-keyed
+// assessment, so reading the wrong document reports a complete delivery as
+// entirely outstanding rather than reporting an error anyone would notice.
+func TestAssessAgainstRunTaskIdsFindsNoPackage(t *testing.T) {
+	in := planIntent()
+	plan := validPlan()
+
+	path := writeProjection(t, in.ProjectID, "abc123",
+		[3]string{"publish-wp-add", "merged", "met"},
+		[3]string{"publish-wp-multiply", "merged", "met"})
+
+	ev, err := Assess(plan, in, path)
+	if err != nil {
+		t.Fatalf("Assess: %v", err)
+	}
+	if ev.Met {
+		t.Fatal("run-task ids must not satisfy a package-keyed gate")
+	}
+	if len(ev.OutstandingPackages) != len(plan.Packages) {
+		t.Fatalf("every package must read outstanding, got %v", ev.OutstandingPackages)
+	}
+}

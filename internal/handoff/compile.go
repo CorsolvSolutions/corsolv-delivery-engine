@@ -126,10 +126,29 @@ func (h HostProfile) StateDir(projectID string) string {
 	return filepath.Join(h.ProjectDir(projectID), "run")
 }
 
-// ProjectionPath is where the run renders its delivery projection before
-// publishing it into the project's repository.
+// ProjectionPath is where the run publisher renders RUN progress, refreshed
+// alongside the heartbeat so a dashboard sees movement during a long run.
+//
+// Its rows are keyed by run task id — `publish-wp-add`, not `wp-add` — and it
+// carries no per-package completion gate, because the run layer does not
+// adjudicate one. It is a view of the queue, not of the delivery.
 func (h HostProfile) ProjectionPath(projectID string) string {
 	return filepath.Join(h.StateDir(projectID), "PROJECT-STATE.yml")
+}
+
+// DeliveryProjectionPath is the delivery projection: the document the driver's
+// project stage renders from the forge and the run's control ledger, and the
+// one its publish-projection stage commits into the project's repository.
+//
+// It is keyed by PACKAGE id and carries each package's completion gate, which is
+// what makes it the document an acceptance assessment can read. Assess only ever
+// understood this shape, and was being handed the run-progress document instead:
+// no row could match by construction, so a delivery that had merged all four
+// packages with every gate met reported every package outstanding. A mismatch
+// that reads as "nothing is done" rather than as an error is the worst kind, so
+// the two documents are named apart here rather than distinguished by comment.
+func (h HostProfile) DeliveryProjectionPath(projectID string) string {
+	return filepath.Join(h.ProjectDir(projectID), "PROJECT-STATE.yml")
 }
 
 // The stages a compiled delivery run executes, in order.

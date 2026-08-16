@@ -667,7 +667,11 @@ func observe(host handoff.HostProfile, projectID string) (handoff.Status, error)
 
 	ev := handoff.Evidence{}
 	if planFound {
-		ev, err = handoff.Assess(plan, record.Intent, host.ProjectionPath(projectID))
+		// The DELIVERY projection, not the run-progress one. Assess is keyed by
+		// package id and reads each package's completion gate; the run publisher's
+		// document has neither, so reading it scored a fully merged, fully gated
+		// delivery as entirely outstanding.
+		ev, err = handoff.Assess(plan, record.Intent, host.DeliveryProjectionPath(projectID))
 		if err != nil {
 			return handoff.Status{}, err
 		}

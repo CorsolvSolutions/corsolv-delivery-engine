@@ -531,3 +531,24 @@ func engineRepo(t *testing.T) string {
 	// corsolv/delivery -> the repository root
 	return filepath.Dir(filepath.Dir(wd))
 }
+
+// The driver renders the delivery projection, and the Go layer assesses it. They
+// are two programs agreeing on one path by convention, and the convention was
+// already wrong once: the assessment read the run publisher's document instead,
+// where no package id can appear, and scored a fully merged delivery as entirely
+// outstanding. This pins the path they must agree on.
+func TestTheDriverRendersTheProjectionTheGoLayerAssesses(t *testing.T) {
+	host := handoff.HostProfile{DeliveryRoot: "/srv/delivery"}
+	projectID := "driver-contract-test"
+
+	// What driver.sh composes: stage_project writes "$STATE/PROJECT-STATE.yml",
+	// and -state is the project directory.
+	driverOutput := filepath.Join(host.ProjectDir(projectID), "PROJECT-STATE.yml")
+
+	if got := host.DeliveryProjectionPath(projectID); got != driverOutput {
+		t.Fatalf("the Go layer assesses %s but the driver renders %s", got, driverOutput)
+	}
+	if host.ProjectionPath(projectID) == driverOutput {
+		t.Fatal("the run-progress projection must not share the driver's path")
+	}
+}
