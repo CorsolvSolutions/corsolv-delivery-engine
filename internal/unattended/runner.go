@@ -34,6 +34,11 @@ type Runner struct {
 	Journal *Journal
 	Queue   *Queue
 
+	// Evidence is the run's QA gate ledger, keyed by gate ID. It is seeded from
+	// the journal on resume and folded by MergeEvidence as gates reach a
+	// verdict, so it never forgets a failure by being restarted.
+	Evidence map[string]GateEvidence
+
 	// Sleep waits out a retry backoff. It is injectable so tests prove the
 	// backoff *policy* without paying it in wall-clock.
 	Sleep func(ctx context.Context, d time.Duration)
@@ -166,6 +171,7 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 			StartedAt: started, Duration: elapsed.Round(time.Millisecond).String(), Succeeded: true,
 		})
 		r.lastMilestone = qt.Task.ID + " succeeded"
+		r.recordGateEvidence(qt, GatePass, "")
 		if qt.Task.Mutates {
 			r.recordAdvance(qt)
 		}
@@ -194,6 +200,14 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 		Detail: class.Reason + " | " + firstLine(Redact(text)) + " | output: " + outputPath,
 	})
 
+	// A gate reaches a verdict when the queue is finished with it, not on every
+	// attempt. An attempt that will be retried has not finished running the
+	// gate, and recording an interim failure would make a retry pointless: the
+	// evidence ledger keeps the worse verdict for a revision on purpose.
+	if qt.State == TaskFailed {
+		r.recordGateEvidence(qt, GateFail, class.Reason+" | "+firstLine(Redact(text))+" | output: "+outputPath)
+	}
+
 	policy := PolicyFor(class.Class)
 	if policy.StopsRun {
 		r.stopReason = fmt.Sprintf("%s failed with a %s failure, which ends the run: %s",
@@ -213,6 +227,69 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 	}
 	r.publish("running", nil)
 	return false
+}
+
+// recordGateEvidence folds a gate task's mechanical verdict into the run's
+// evidence ledger and writes it durably.
+//
+// The revision it binds to is the fence's position at the moment the gate ran,
+// which is what makes the evidence certify code rather than certify a task. A
+// gate that ran before this run committed carries the pre-commit revision, and
+// the progression decision then reports it stale rather than letting it license
+// code it never saw.
+func (r *Runner) recordGateEvidence(qt *QueuedTask, result GateResult, detail string) {
+	if qt.Task.QAGate == "" {
+		return
+	}
+	ev := GateEvidence{
+		GateID:     qt.Task.QAGate,
+		TaskID:     qt.Task.ID,
+		Result:     result,
+		ObservedAt: r.now().UTC(),
+		Reproduce:  qt.Task.Argv,
+		Detail:     detail,
+	}
+	if len(qt.Task.Argv) > 0 {
+		ev.Tool = qt.Task.Argv[0]
+		ev.ToolVersion = r.observedToolVersion(ev.Tool)
+	}
+	if r.Fence != nil {
+		ev.TargetSHA = r.Fence.Head
+	}
+
+	if r.Evidence == nil {
+		r.Evidence = map[string]GateEvidence{}
+	}
+	r.Evidence[ev.GateID] = MergeEvidence(r.Evidence[ev.GateID], ev)
+
+	r.Journal.Append(Record{ //nolint:errcheck
+		Kind: RecordGateEvidence, TaskID: qt.Task.ID, Outcome: string(result),
+		Detail: fmt.Sprintf("gate %s against %s", ev.GateID, shortSHA(ev.TargetSHA)),
+		Gate:   &ev,
+	})
+}
+
+// observedToolVersion reuses what preflight already read about a tool, rather
+// than probing it a second time at a different moment.
+func (r *Runner) observedToolVersion(tool string) string {
+	if r.Report == nil {
+		return ""
+	}
+	c, ok := r.Report.Check("tool." + tool)
+	if !ok || c.Outcome != OutcomePass {
+		return ""
+	}
+	return c.Observed
+}
+
+// QADecision evaluates the packet's progression eligibility against the
+// evidence recorded so far and the revision currently in hand.
+func (r *Runner) QADecision() ProgressionDecision {
+	head := ""
+	if r.Fence != nil {
+		head = r.Fence.Head
+	}
+	return EvaluateProgression(r.Spec.QA, r.Plan.Risk, head, r.Evidence)
 }
 
 // recordAdvance moves the fence to the commit this run just made.
@@ -338,6 +415,14 @@ func (r *Runner) finish() CompletionEvent {
 	}
 	sort.Strings(failures)
 
+	// The QA decision is taken before the task tallies, and it can only ever
+	// refuse. A run whose every task succeeded has not thereby proved its work
+	// is fit to progress: it has proved its commands exited zero, which is a
+	// claim the run makes about itself. Only gate evidence bound to the
+	// revision in hand can license progression, and no assertion, task success
+	// or authored summary substitutes for it.
+	qa := r.QADecision()
+
 	outcome := RunCompleted
 	reason := "every declared task succeeded"
 	switch {
@@ -353,6 +438,9 @@ func (r *Runner) finish() CompletionEvent {
 	case counts[TaskHeld] > 0:
 		outcome = RunBlockedHuman
 		reason = fmt.Sprintf("%d task(s) are held behind a human boundary; everything else the run could do is done", counts[TaskHeld])
+	case !qa.Allowed:
+		outcome = RunFailed
+		reason = "the packet may not progress: " + qa.Reason()
 	}
 
 	finished := r.now()
@@ -373,6 +461,7 @@ func (r *Runner) finish() CompletionEvent {
 		Attempts:     r.attempts,
 		HumanActions: humanActions,
 		Failures:     failures,
+		QA:           qa,
 	}
 }
 

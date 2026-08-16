@@ -19,7 +19,7 @@ func specFor(dir, stateDir string) Spec {
 }
 
 func minimalPlan() Plan {
-	return Plan{RunID: "run-preflight", Tasks: []Task{
+	return Plan{RunID: "run-preflight", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "primary", Band: BandPrimary, Argv: []string{"true"}},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: []string{"true"}},
 	}}
@@ -63,7 +63,7 @@ func TestPreflightRefusesAPlanWithNoFallbackWork(t *testing.T) {
 	// A queue with nothing below the primary band is the exact shape of "the run
 	// stopped at its first dependency".
 	repo := newRepo(t, testOrigin)
-	plan := Plan{RunID: "r", Tasks: []Task{
+	plan := Plan{RunID: "r", Risk: RiskQ0, Tasks: []Task{
 		{ID: "only", Title: "only", Band: BandPrimary, Argv: []string{"true"}},
 	}}
 	r := Preflight(context.Background(), specFor(repo, t.TempDir()), &plan)

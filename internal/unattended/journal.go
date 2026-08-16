@@ -28,6 +28,7 @@ const (
 	RecordTaskFailed    RecordKind = "task-failed"
 	RecordTaskHeld      RecordKind = "task-held"
 	RecordTaskRetry     RecordKind = "task-retry-scheduled"
+	RecordGateEvidence  RecordKind = "gate-evidence"
 	RecordRunFinished   RecordKind = "run-finished"
 )
 
@@ -51,6 +52,12 @@ type Record struct {
 	Detail  string       `json:"detail,omitempty"`
 
 	DurationMS int64 `json:"durationMs,omitempty"`
+
+	// Gate carries a QA gate's structured evidence. The journal is where it
+	// lives because the journal is already the run's durable, append-only,
+	// replayable record; giving gate evidence a second store would give the run
+	// two accounts of itself that can disagree.
+	Gate *GateEvidence `json:"gate,omitempty"`
 }
 
 // Journal is an append-only run log.
@@ -208,6 +215,11 @@ type ResumeState struct {
 	// Interrupted names tasks that started and never reached a terminal record.
 	// They are re-offered, and the interruption is recorded rather than erased.
 	Interrupted map[string]bool
+	// Gates is the QA evidence ledger this run has accumulated, folded by
+	// MergeEvidence. A resumed run inherits it, so work whose gate already ran
+	// is not re-gated — and, more importantly, a gate that already failed
+	// against the code in hand is not forgotten by restarting.
+	Gates map[string]GateEvidence
 	// Finished reports whether the previous run recorded its own end.
 	Finished bool
 	// LastSeq is the highest durable sequence.
@@ -234,6 +246,7 @@ func Replay(records []Record, runID string) ResumeState {
 		Succeeded:   map[string]bool{},
 		Attempts:    map[string]int{},
 		Interrupted: map[string]bool{},
+		Gates:       map[string]GateEvidence{},
 	}
 	for _, r := range records {
 		if r.Seq > st.LastSeq {
@@ -251,6 +264,11 @@ func Replay(records []Record, runID string) ResumeState {
 			delete(st.Interrupted, r.TaskID)
 		case RecordTaskFailed, RecordTaskHeld:
 			delete(st.Interrupted, r.TaskID)
+		case RecordGateEvidence:
+			if r.Gate == nil || r.Gate.GateID == "" {
+				continue
+			}
+			st.Gates[r.Gate.GateID] = MergeEvidence(st.Gates[r.Gate.GateID], *r.Gate)
 		case RecordRunFinished:
 			st.Finished = true
 		}
