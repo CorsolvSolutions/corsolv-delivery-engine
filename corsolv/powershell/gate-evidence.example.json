@@ -1,0 +1,60 @@
+{
+  "schema": "corsolv/qa-001/gate-evidence",
+  "targetSha": "691e9df7be4c4dcd4115293480ab071c93524987",
+  "observedAt": "2026-08-16T14:05:42.3102433Z",
+  "examined": [
+    "CorsolvControllerResult.psm1",
+    "CorsolvControllerResult.Tests.ps1",
+    "Invoke-QAGates.ps1"
+  ],
+  "gates": [
+    {
+      "gateId": "build",
+      "taskId": "powershell-parse",
+      "tool": "pwsh",
+      "toolVersion": "7.6.4",
+      "result": "pass",
+      "observedAt": "2026-08-16T14:05:42.3102433Z",
+      "targetSha": "691e9df7be4c4dcd4115293480ab071c93524987",
+      "reproduce": [
+        "pwsh",
+        "-NoProfile",
+        "-File",
+        "corsolv/powershell/Invoke-QAGates.ps1"
+      ],
+      "detail": ""
+    },
+    {
+      "gateId": "static-analysis",
+      "taskId": "powershell-scriptanalyzer",
+      "tool": "PSScriptAnalyzer",
+      "toolVersion": "1.25.0",
+      "result": "pass",
+      "observedAt": "2026-08-16T14:05:42.3102433Z",
+      "targetSha": "691e9df7be4c4dcd4115293480ab071c93524987",
+      "reproduce": [
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "Invoke-ScriptAnalyzer -Path corsolv/powershell -Recurse -Severity Error,Warning"
+      ],
+      "detail": ""
+    },
+    {
+      "gateId": "unit-test",
+      "taskId": "powershell-pester",
+      "tool": "Pester",
+      "toolVersion": "6.1.0",
+      "result": "pass",
+      "observedAt": "2026-08-16T14:05:42.3102433Z",
+      "targetSha": "691e9df7be4c4dcd4115293480ab071c93524987",
+      "reproduce": [
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "Invoke-Pester -Path corsolv/powershell"
+      ],
+      "detail": "18 passed, 0 failed, 0 skipped"
+    }
+  ]
+}
