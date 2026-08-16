@@ -62,7 +62,7 @@ func sh(script string) []string { return []string{"sh", "-c", script} }
 
 func TestRunCompletesAPlanOfOrdinaryWork(t *testing.T) {
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-complete", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-complete", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "do the thing", Band: BandPrimary, Argv: sh("echo done")},
 		{ID: "validate", Title: "prove it", Band: BandValidation, Argv: sh("true"), Needs: []string{"primary"}},
 		{ID: "document", Title: "write it down", Band: BandDocumentation, Argv: sh("true")},
@@ -88,7 +88,7 @@ func TestRunContinuesPastAnOrdinaryTestFailure(t *testing.T) {
 	// retried and must not end the run, and other work must still get done.
 	f := newRunFixture(t)
 	marker := filepath.Join(f.stateDir, "attempts")
-	s := f.begin(t, Plan{RunID: "run-flaky", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-flaky", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "flaky", Title: "a test that passes on the third attempt", Band: BandPrimary,
 			// Succeeds once three attempt marks exist.
@@ -118,7 +118,7 @@ func TestRunFallsBackWhenThePrimaryPathExhaustsItsAttempts(t *testing.T) {
 	// Acceptance TEST 5. The primary path cannot finish; the run must keep doing
 	// declared work of a lower band rather than ending.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-fallback", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-fallback", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "blocked work", Band: BandPrimary, Argv: sh(`echo "--- FAIL: TestBroken"; exit 1`), MaxAttempts: 1},
 		{ID: "dependent", Title: "needs the primary", Band: BandPrimary, Argv: sh("true"), Needs: []string{"primary"}},
 		{ID: "validate", Title: "tests", Band: BandValidation, Argv: sh("true")},
@@ -156,7 +156,7 @@ func TestRunStopsWhenTheBranchMovesUnderneathIt(t *testing.T) {
 	// somebody else's ref.
 	f := newRunFixture(t)
 	repo := f.repo
-	s := f.begin(t, Plan{RunID: "run-fence", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-fence", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "first", Title: "an early mutation", Band: BandPrimary, Mutates: true,
 			Argv: sh(`echo one > one.txt && git add one.txt && git commit -qm "feat: one"`),
@@ -210,7 +210,7 @@ func TestAuthorisedMutationsAdvanceTheFenceRatherThanTrippingIt(t *testing.T) {
 	// The converse of the previous test: the run's own commits must not read as
 	// external changes, or every mutating plan would stop at its second task.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-advance", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-advance", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "one", Title: "commit one", Band: BandPrimary, Mutates: true,
 			Argv: sh(`echo one > one.txt && git add one.txt && git commit -qm "feat: one"`),
@@ -252,7 +252,7 @@ func TestRunHoldsWorkBehindAHumanBoundaryAndReportsIt(t *testing.T) {
 		Env:         "GC_UNATTENDED_TOKEN_THAT_IS_NOT_SET",
 		HumanAction: "obtain a deployment token from the platform team",
 	}}
-	s := f.begin(t, Plan{RunID: "run-boundary", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-boundary", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "deploy", Title: "deploy", Band: BandPrimary, Argv: sh("true"),
 			RequiresChecks: []string{"credential.deployment-token"},
@@ -290,7 +290,7 @@ func TestSecondWriterIsRefusedAtSessionStart(t *testing.T) {
 	// Acceptance TEST 1, at the level a real run meets it.
 	f := newRunFixture(t)
 	twoBandPlan := func(runID string) Plan {
-		return Plan{RunID: runID, Tasks: []Task{
+		return Plan{RunID: runID, Risk: RiskQ0, Tasks: []Task{
 			{ID: "t", Title: "t", Band: BandPrimary, Argv: sh("true")},
 			{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 		}}
@@ -318,6 +318,7 @@ func TestWrongRepositoryIsRefusedBeforeAnyMutation(t *testing.T) {
 
 	_, err := Begin(context.Background(), f.spec, Plan{
 		RunID: "run-wrong-repo",
+		Risk:  RiskQ0,
 		Tasks: []Task{
 			{ID: "mutate", Title: "mutate", Band: BandPrimary, Mutates: true, Argv: sh("echo x > x.txt")},
 			{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
@@ -346,14 +347,14 @@ func TestInterruptedRunResumesWithoutRepeatingCompletedWork(t *testing.T) {
 			Argv: sh(`mkdir -p ` + f.stateDir + ` && echo ` + id + ` >> ` + counter),
 		}
 	}
-	plan := Plan{RunID: "run-resume", Tasks: []Task{
+	plan := Plan{RunID: "run-resume", Risk: RiskQ0, Tasks: []Task{
 		countingTask("first", BandPrimary),
 		countingTask("second", BandValidation),
 		countingTask("third", BandDocumentation),
 	}}
 
 	// First session: run only the first task, then die without closing cleanly.
-	first, err := Begin(context.Background(), f.spec, Plan{RunID: "run-resume", Tasks: plan.Tasks[:2]})
+	first, err := Begin(context.Background(), f.spec, Plan{RunID: "run-resume", Risk: RiskQ0, Tasks: plan.Tasks[:2]})
 	if err != nil {
 		t.Fatalf("first Begin: %v", err)
 	}
@@ -396,7 +397,7 @@ func TestInterruptedRunResumesWithoutRepeatingCompletedWork(t *testing.T) {
 
 func TestResumeDoesNotDuplicateCompletionEvidence(t *testing.T) {
 	f := newRunFixture(t)
-	plan := Plan{RunID: "run-once", Tasks: []Task{
+	plan := Plan{RunID: "run-once", Risk: RiskQ0, Tasks: []Task{
 		{ID: "only", Title: "only", Band: BandPrimary, Argv: sh("true")},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}}
@@ -433,7 +434,7 @@ func TestResumeDoesNotDuplicateCompletionEvidence(t *testing.T) {
 func TestRunPublishesProgressWhileItIsStillRunning(t *testing.T) {
 	// An unattended run that only answers when questioned is not unattended.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-progress", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-progress", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "primary", Band: BandPrimary, Argv: sh("true")},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}})
@@ -469,7 +470,7 @@ func TestProgressSaysWhenTheRunIsOnFallbackWork(t *testing.T) {
 	// Steady progress on documentation must not look identical to steady
 	// progress on the thing the run was for.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-fallback-flag", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-fallback-flag", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "primary", Band: BandPrimary, Argv: sh("exit 1"), MaxAttempts: 1},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}})
@@ -494,7 +495,7 @@ func TestProgressDoesNotCallOrdinaryWorkAFallback(t *testing.T) {
 	// reading the heartbeat that the run is in trouble when it is doing exactly
 	// what it should — which the first real run did.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-not-fallback", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-not-fallback", Risk: RiskQ0, Tasks: []Task{
 		{ID: "primary", Title: "primary", Band: BandPrimary, Argv: sh("true")},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}})
@@ -515,7 +516,7 @@ func TestProgressDoesNotCallOrdinaryWorkAFallback(t *testing.T) {
 
 func TestCompletionEventIsWrittenForANotificationLayerToFind(t *testing.T) {
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-event", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-event", Risk: RiskQ0, Tasks: []Task{
 		{ID: "t", Title: "t", Band: BandPrimary, Argv: sh("true")},
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}})
@@ -553,7 +554,7 @@ func TestDeliveryProjectionExistsWhileTheRunIsStillRunning(t *testing.T) {
 	// executing the task that needs it.
 	f := newRunFixture(t)
 	f.spec.PublishPath = filepath.Join(f.stateDir, "PROJECT-STATE.yml")
-	s := f.begin(t, Plan{RunID: "run-projection", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-projection", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "ship", Title: "ship", Band: BandPrimary, Argv: sh("true"),
 			DeliveryStatus: "merged", CompletionGate: "a gate", Phase: "p",
@@ -582,7 +583,7 @@ func TestFailureOutputIsCapturedWhereAPersonCanReadIt(t *testing.T) {
 	// say why — and "it failed at three in the morning and I need to know why"
 	// is the entire point of running unattended.
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-capture", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-capture", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "loud", Title: "a task that explains itself before failing", Band: BandPrimary,
 			MaxAttempts: 1,
@@ -625,7 +626,7 @@ func TestFailureOutputIsCapturedWhereAPersonCanReadIt(t *testing.T) {
 
 func TestATaskThatOverrunsItsTimeoutIsAFailureNotAHang(t *testing.T) {
 	f := newRunFixture(t)
-	s := f.begin(t, Plan{RunID: "run-timeout", Tasks: []Task{
+	s := f.begin(t, Plan{RunID: "run-timeout", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "slow", Title: "a task that never finishes", Band: BandPrimary,
 			Argv: sh("sleep 60"), TimeoutSeconds: 1, MaxAttempts: 1,

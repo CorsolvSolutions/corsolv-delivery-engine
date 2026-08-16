@@ -12,6 +12,11 @@
 
 runId = "delivery-engine-endurance-2026-08-11"
 
+# Risk classification — the same control layer, so the same class: orchestration
+# code run without supervision. Q2 makes build, unit-test and static-analysis
+# mandatory.
+risk = "Q2"
+
 # ---------------------------------------------------------------------------
 # primary
 # ---------------------------------------------------------------------------
@@ -22,6 +27,7 @@ title          = "build the gc binary the way the project builds it"
 band           = "primary"
 argv           = ["make", "build"]
 timeoutSeconds = 1800
+qaGate         = "build"
 
 [[task]]
 id             = "race-control-layer"
@@ -44,6 +50,7 @@ title          = "vet the whole tree"
 band           = "validation"
 argv           = ["go", "vet", "./..."]
 timeoutSeconds = 1800
+qaGate         = "static-analysis"
 
 [[task]]
 id             = "unit-baseline"
@@ -51,6 +58,7 @@ title          = "the project's fast unit baseline across every package"
 band           = "validation"
 argv           = ["make", "test"]
 timeoutSeconds = 2400
+qaGate         = "unit-test"
 
 [[task]]
 id             = "cross-compile-fork"

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func planOf(tasks ...Task) Plan { return Plan{RunID: "run-queue", Tasks: tasks} }
+func planOf(tasks ...Task) Plan { return Plan{RunID: "run-queue", Risk: RiskQ0, Tasks: tasks} }
 
 func task(id string, band Band, needs ...string) Task {
 	return Task{ID: id, Title: id, Band: band, Argv: []string{"true"}, Needs: needs}

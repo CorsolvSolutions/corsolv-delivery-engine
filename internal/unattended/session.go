@@ -47,6 +47,14 @@ func Begin(ctx context.Context, spec Spec, plan Plan) (*Session, error) {
 	if err := ValidateClassificationRules(spec.Classification); err != nil {
 		return nil, err
 	}
+	// The QA contract is checked here, before preflight, before the lock and
+	// before any task runs. A packet that cannot say what would have to pass
+	// before it may progress must not start a worker: the alternative is a run
+	// that does hours of work and only then discovers it has no way to certify
+	// any of it.
+	if err := ValidateQAPacket(spec, plan); err != nil {
+		return nil, err
+	}
 
 	s := &Session{Spec: spec, Plan: plan}
 	s.Report = Preflight(ctx, spec, &plan)
@@ -136,6 +144,10 @@ func Begin(ctx context.Context, spec Spec, plan Plan) (*Session, error) {
 	s.Runner = &Runner{
 		Spec: spec, Plan: plan, Report: s.Report,
 		Lock: lock, Fence: s.Fence, Journal: journal, Queue: s.Queue,
+		// The evidence ledger is inherited from the journal unconditionally,
+		// not only when the queue was restored. A resumed run must not be able
+		// to clear a gate failure by starting again.
+		Evidence: resume.Gates,
 	}
 	return s, nil
 }
