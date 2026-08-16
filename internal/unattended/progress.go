@@ -55,6 +55,18 @@ type Progress struct {
 	Resumes int `json:"resumes"`
 	// Boundaries are the human actions this run already knows it cannot take.
 	Boundaries []string `json:"boundaries,omitempty"`
+	// QA is the packet's progression decision as it stands right now: which
+	// gates its risk class made mandatory, which have passing evidence for the
+	// revision in hand, and which do not.
+	//
+	// It is published LIVE, beside the heartbeat, and not only in the terminal
+	// record. A run's own tasks need it while the run is still running: the
+	// delivery driver renders the projection an acceptance assessment reads,
+	// and it renders it from inside the run — so with no live decision to read,
+	// the one document a person treats as the answer would be written by a stage
+	// that had no way of knowing whether the packet's mandatory gates permitted
+	// what it was about to claim.
+	QA ProgressionDecision `json:"qa"`
 }
 
 // RunOutcome is how a run ended.

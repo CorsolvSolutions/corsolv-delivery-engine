@@ -179,3 +179,45 @@ func TestAProjectionPublishedDuringARunNeverOutrunsItsGates(t *testing.T) {
 		t.Fatalf("the completion event and the projection disagree: %s", event.Reason)
 	}
 }
+
+// THE DECISION HAS TO BE READABLE WHILE THE RUN IS STILL RUNNING.
+//
+// The run caps its own projection with it. The delivery driver renders the OTHER
+// projection — the one an acceptance assessment reads — and renders it from
+// inside a task of this run, so it can apply the same cap only if the decision
+// is published before the run ends. Publishing it in the completion event alone
+// would leave the document a person treats as the answer written by a stage with
+// no way of knowing what its packet's gates permitted.
+func TestTheHeartbeatPublishesTheProgressionDecisionWhileTheRunIsStillRunning(t *testing.T) {
+	f := newControllerFixture(t)
+
+	build := supervisedTask("build", BandPrimary)
+	build.QAGate = GateBuild
+	tests := supervisedTask("tests", BandValidation)
+	tests.QAGate = GateUnitTest
+
+	agent := newScriptedAgent().
+		on("build", structured(true, ControllerResult{State: StateComplete}, "built")).
+		on("tests", structured(false, ControllerResult{State: StateFailed, TerminalReason: "assertion"}, "--- FAIL"))
+
+	s := f.begin(t, Plan{RunID: "run-heartbeat", Risk: RiskQ1, Tasks: []Task{build, tests}}, agent)
+	event, err := s.Runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	progress, found, err := ReadProgress(f.stateDir)
+	if err != nil || !found {
+		t.Fatalf("the run published no heartbeat: found=%v err=%v", found, err)
+	}
+	if progress.QA.Allowed {
+		t.Fatalf("the heartbeat says the packet may progress and its own gates say %s", event.QA.Reason())
+	}
+	if progress.QA.Reason() != event.QA.Reason() {
+		t.Fatalf("the heartbeat and the completion event carry different decisions:\n heartbeat:  %s\n completion: %s",
+			progress.QA.Reason(), event.QA.Reason())
+	}
+	if len(progress.QA.Blocking) == 0 {
+		t.Fatal("a refusal that names no gate is one a reader cannot act on")
+	}
+}

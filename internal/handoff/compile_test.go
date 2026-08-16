@@ -100,6 +100,93 @@ func TestCompiledArgvComesOnlyFromTheHostProfile(t *testing.T) {
 	}
 }
 
+// EVERY COMPILED STAGE IS SUPERVISED.
+//
+// Declaring where a stage states its outcome is what makes that statement the
+// verdict and takes the residual exit status out of the decision. The driver
+// produces both directions of that residue — `gc init` exits non-zero for a
+// condition that is correct on a host that already has a supervisor, and a stage
+// that waits out its deadline over unfinished work is not a stage that failed —
+// so a stage compiled without a result path is a stage the run must go back to
+// guessing about.
+func TestEveryCompiledStageStatesItsOwnOutcome(t *testing.T) {
+	_, work, err := Compile(planIntent(), validPlan(), testHost(t), "run-1")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	byPath := map[string]string{}
+	for _, task := range work.Tasks {
+		if task.ResultPath == "" {
+			t.Errorf("task %q declares no result path, so its exit status is all the run would have", task.ID)
+			continue
+		}
+		if filepath.IsAbs(task.ResultPath) {
+			t.Errorf("task %q anchors its result at %q; the run anchors it in the state directory", task.ID, task.ResultPath)
+		}
+		if prior, taken := byPath[task.ResultPath]; taken {
+			t.Errorf("tasks %q and %q state their outcomes in the same file %q, so one would be read as the other",
+				prior, task.ID, task.ResultPath)
+		}
+		byPath[task.ResultPath] = task.ID
+	}
+}
+
+// A STAGE THAT WAITS MUST BE ABLE TO SAY THE WORK IS UNFINISHED BEFORE THE RUN
+// KILLS IT.
+//
+// The run kills a task that exceeds its timeout, and a killed stage states
+// nothing — which is an absence of knowledge and fails safe. So a stage whose own
+// wait expired at the same moment its task timed out could never say "unfinished,
+// not failed": it would be killed a moment before saying so. The compiler passes
+// the wait it wants and bounds the task longer than it.
+func TestAWaitingStageIsGivenRoomToSayTheWorkIsUnfinished(t *testing.T) {
+	in := planIntent()
+	in.Policy.WorkDeadlineSeconds = 600
+
+	_, work, err := Compile(in, validPlan(), testHost(t), "run-1")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	waited := 0
+	for _, task := range work.Tasks {
+		isWait := strings.HasPrefix(task.ID, StageAwait+"-") ||
+			(strings.HasPrefix(task.ID, StagePublish+"-") && task.ID != StagePublishProjection)
+		if !isWait {
+			continue
+		}
+		waited++
+		declared := argValue(task.Argv, "-deadline")
+		if declared != "600" {
+			t.Errorf("task %q waits under %q, not the policy's declared 600 seconds", task.ID, declared)
+		}
+		if task.TimeoutSeconds <= 600 {
+			t.Errorf("task %q is bounded at %ds, which is not longer than the %ss it is told to wait",
+				task.ID, task.TimeoutSeconds, declared)
+		}
+		// Bounded, and bounded small. The wait is the policy's declared budget
+		// for the work, and multiplying it silently would spend a night on a
+		// decision nobody took.
+		if task.MaxResumes < 1 || task.MaxResumes > 3 {
+			t.Errorf("task %q allows %d resume(s); unfinished work needs at least one more pass and a small bound",
+				task.ID, task.MaxResumes)
+		}
+	}
+	if waited == 0 {
+		t.Fatal("the compiled run waits for nothing at all")
+	}
+}
+
+func argValue(argv []string, flag string) string {
+	for i, a := range argv {
+		if a == flag && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
 // Package publication must follow the plan's dependency order, or a dependent
 // package would be published before the upstream it consumes has merged.
 func TestPublicationFollowsDependencyOrder(t *testing.T) {
