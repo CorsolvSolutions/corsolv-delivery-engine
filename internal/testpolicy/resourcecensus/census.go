@@ -160,8 +160,24 @@ var bootstrapPolicy = Ledger{
 			// rather than hidden from it. The untagged Debt baseline is untouched
 			// — driver_recovery_test.go is integration-tagged, and the
 			// projector-gen tests spawn nothing at all.
-			BaselineCalls:   622,
-			BaselineFiles:   176,
+			//
+			// 622/176 -> 628/177: the Bash driver's controller-result parity
+			// regressions (corsolv/delivery/driver_parity_test.go). One
+			// integration-tagged file with six subprocess call sites: the driver's
+			// own producer writing each outcome the shared contract declares, the
+			// driver reading the run's progression decision, three runs of a real
+			// driver stage — one killed mid-wait, one wrapped in a misleading exit
+			// status, one refused by a stubbed forge — and a `go build` of the
+			// projection generator so the stage under test is the stage rather
+			// than a Go build. Every one of them spawns a process because the
+			// contract under test holds between two programs in two languages, and
+			// a test that simulated either half would prove nothing about the pair.
+			//
+			// Raised for the same reason as the entries above: this is the audit
+			// baseline whose invariant is that real test source stays VISIBLE. The
+			// untagged Debt baseline is untouched — the file is integration-tagged.
+			BaselineCalls:   628,
+			BaselineFiles:   177,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
