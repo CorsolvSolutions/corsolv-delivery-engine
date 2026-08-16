@@ -126,8 +126,42 @@ surviving record as `asleep`.
 
 `await` waits only for the packages it is responsible for — the ones dispatch
 gave a worktree. If its deadline expires while any of those is still open, the
-stage **fails**. A deadline is not an outcome, and reporting one as success is
-how a run reached publication with work that had never been done.
+stage says so: **CONTINUE**, the work is unfinished. A deadline is not an
+outcome, and reporting one as success is how a run reached publication with work
+that had never been done — but nor is it a failure, because nothing was proved
+wrong. The run re-offers the stage under a bounded resume budget, and holds it
+for a person if it never converges.
+
+## What a stage says happened
+
+A stage started by a run is **supervised**: the run exports a path, the stage
+states its outcome in a structured document there, and *that statement is the
+verdict*. The exit status is not consulted. Both directions of that residue were
+produced by the pilot — `gc init` exits non-zero for a condition that is correct
+on a host that already has a supervisor, and a wrapper exits zero over work that
+was cut off part-way through.
+
+| The stage says | What the run does |
+| --- | --- |
+| `COMPLETE` | the stage finished its work |
+| `CONTINUE` | unfinished, not failed: re-offered without spending a retry, bounded by the task's resume budget |
+| `HUMAN_BLOCKED` | stops safely for a judgement this run is not entitled to make — a machine-wide supervisor it may not restart |
+| `FAILED` + `authentication_failed` / `permission_denied` | stops safely for a credential, reported apart from a judgement because it is usually seconds of a person's time |
+| `FAILED` + `network_timeout` / `rate_limited` | bounded retry under the external-service policy |
+| `FAILED` | classified from the output, exactly as an unsupervised command is |
+| nothing at all | an absence of knowledge — never a pass. A stage killed at its timeout leaves exactly this |
+
+The vocabulary lives in `corsolv/powershell/controller-result.contract.json`, the
+one document all three implementations are checked against: the Go consumer
+(`internal/unattended/controller.go`), the PowerShell producer, and this driver's
+producer (`controller-contract.sh`). `driver_parity_test.go` drives every outcome
+in that contract through the driver's own writer and asks the run's own
+interpreter what it would do, so the two cannot decide differently about the same
+result.
+
+The driver never decides. It states what happened, and it reads what the run
+decided — including whether the packet's mandatory QA gates permit progression,
+which caps what the delivery projection is allowed to claim.
 
 ## Why the driver is bash
 

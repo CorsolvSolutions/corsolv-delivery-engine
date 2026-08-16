@@ -29,8 +29,18 @@
 #   publish-projection  install the projection into the project's repository
 #
 # Usage: driver.sh <stage> [-package <id>] -project <id> -state <dir>
+#                  [-deadline <seconds>] [-gh <cli>] [-gc <cli>] [-bd <cli>]
+#                  [-provider <name>] [-provider-bin <path>]
 #
-# Exit: 0 the stage completed  1 the stage failed  2 the invocation was wrong
+# WHAT A STAGE SAYS HAPPENED, AND WHAT IT LEAVES BEHIND. A stage started by a
+# run states its outcome in the structured document the run exports a path for,
+# and THAT is the verdict: COMPLETE, CONTINUE, HUMAN_BLOCKED, or FAILED with the
+# terminal reason that separates an expired credential from a failing test. The
+# exit status below is what remains for a caller that is not a run — a person at
+# a terminal — and it is deliberately unchanged, because a residue is all such a
+# caller ever had.
+#
+# Exit: 0 the stage completed  1 the stage did not  2 the invocation was wrong
 
 set -uo pipefail
 
@@ -45,7 +55,70 @@ SOURCE_REPO="${CORSOLV_ENGINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 
 # shellcheck source=../p2-smoke/lib/sa-lib.sh
 . "$SOURCE_REPO/corsolv/p2-smoke/lib/sa-lib.sh"
 
+# The controller-result contract comes from this driver's OWN directory, and not
+# from the configured engine root above. The two are different questions: the
+# shared controller primitives may deliberately be pointed elsewhere, while the
+# document this driver states its outcome in is part of this driver.
+DRIVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=controller-contract.sh
+. "$DRIVER_DIR/controller-contract.sh"
+
 CONTROLLER_ID='Gas City Controller <support@corsolv.com>'
+
+# ---------------------------------------------------------------------------
+# What this stage says happened to it.
+#
+# A supervised stage states its own outcome, and the run adjudicates THAT rather
+# than the exit status this process happens to leave behind. Both directions of
+# the residue were observed in the pilot: a stage exiting non-zero for a
+# condition that was not merely benign but correct, and a wrapper exiting zero
+# over work that had been cut off part-way through.
+#
+# The statement is made in exactly ONE place — here, on the way out. Stages set
+# what they want said and never write a document of their own, because a stage
+# that stated an intermediate outcome and then died would have that intermediate
+# statement adjudicated as its final one. A stage that is KILLED states nothing
+# at all, and nothing is exactly what the run must see: an absent result is an
+# absence of knowledge, and the run fails it safe rather than assuming.
+# ---------------------------------------------------------------------------
+
+RESULT_STATE=''
+RESULT_REASON=''
+RESULT_DETAIL=''
+RESULT_PUBLISHED=''
+
+# PROGRESSION_REFUSAL is why the run refuses to let this packet progress, when
+# it does. It is read from the run in stage_project and caps what the delivery
+# projection may claim; empty means the run's mandatory gates permit progression,
+# or that this stage is not part of a run at all.
+PROGRESSION_REFUSAL=''
+
+# Whatever is at the result path belongs to some earlier attempt. It is removed
+# before this stage does anything, so an interruption leaves an absence rather
+# than a previous attempt's answer.
+cr_clear
+
+publish_result() {
+  local code=$?
+  cr_supervised || return 0
+  [ -z "$RESULT_PUBLISHED" ] || return 0
+  RESULT_PUBLISHED=1
+  if [ -z "$RESULT_STATE" ]; then
+    # A stage that ended without saying so says the safest thing consistent with
+    # what it did. Reaching the end of a stage function IS its work finishing;
+    # every other ending is a path that has not been taught to speak, and the run
+    # must not read one of those as success.
+    if [ "$code" -eq 0 ]; then
+      RESULT_STATE='COMPLETE'
+    else
+      RESULT_STATE='FAILED'
+      RESULT_DETAIL="the stage ended with status $code without stating why"
+    fi
+  fi
+  cr_write --state "$RESULT_STATE" --reason "$RESULT_REASON" --detail "$RESULT_DETAIL" ||
+    printf 'driver[%s]: the structured controller result could not be written\n' "${STAGE:-}" >&2
+}
+trap publish_result EXIT
 
 # ---------------------------------------------------------------------------
 # Invocation.
@@ -55,6 +128,7 @@ STAGE="${1:-}"; shift || true
 PACKAGE=''
 PROJECT=''
 STATE=''
+DEADLINE=''
 
 FORGE=''
 GASCITY=''
@@ -67,6 +141,7 @@ while [ $# -gt 0 ]; do
     -package) PACKAGE="${2:-}"; shift 2 ;;
     -project) PROJECT="${2:-}"; shift 2 ;;
     -state)   STATE="${2:-}"; shift 2 ;;
+    -deadline) DEADLINE="${2:-}"; shift 2 ;;
     -gh)      FORGE="${2:-}"; shift 2 ;;
     -gc)      GASCITY="${2:-}"; shift 2 ;;
     -bd)      BEADS="${2:-}"; shift 2 ;;
@@ -111,6 +186,20 @@ export SA_GC_BIN="$GC"
 # declared binary has to be exposed under the name the city was built with.
 PROVIDER="${PROVIDER:-claude}"
 
+# HOW LONG A STAGE MAY WAIT FOR WORK, DECLARED BY THE RUN THAT STARTED IT.
+#
+# It has to be the run's number rather than this script's own default, and the
+# reason is the turn cap in miniature. The run bounds every task with a timeout
+# and KILLS a task that exceeds it — a killed stage states nothing, and nothing
+# is adjudicated as an absence of knowledge. So a stage whose private deadline
+# outlived its task's timeout could never say "the work is unfinished": it was
+# killed a moment before it would have said so, and an interruption was recorded
+# as silence. The compiler now passes the same number it bounds the task with,
+# and bounds the task slightly longer so this stage always speaks first.
+case "$DEADLINE" in
+  ''|*[!0-9]*) DEADLINE="${DELIVERY_WORK_DEADLINE:-5400}" ;;
+esac
+
 INTENT="$STATE/intent.json"
 PLAN="$STATE/plan.json"
 RUNTIME="$STATE/runtime.json"
@@ -143,8 +232,57 @@ expose_tool "$PROVIDER" "$PROVIDER_BIN"
 PATH="$TOOLBIN:$PATH"
 export PATH
 
-die() { printf 'driver[%s]: %s\n' "$STAGE" "$1" >&2; exit 1; }
 say() { printf 'driver[%s] %s\n' "$STAGE" "$1" >&2; }
+
+# die ends the stage on a failure, and states it as one.
+#
+# The optional second argument is the contract's terminal reason. Naming it is
+# what separates an expired credential from a failing test: the first is a few
+# seconds of a person's time and must not be retried into, the second is
+# ordinary work the run should carry on around. A failure with no named reason
+# is classified by the run from the text below, exactly as an unsupervised
+# command's would be.
+die() {
+  RESULT_STATE='FAILED'
+  RESULT_DETAIL="$1"
+  RESULT_REASON="${2:-}"
+  printf 'driver[%s]: %s\n' "$STAGE" "$1" >&2
+  exit 1
+}
+
+# die_from ends the stage on a failure whose terminal reason is read from what
+# the tool actually said.
+#
+# The stage captures its tools' output into evidence files rather than onto its
+# own stdout, so a signature the run would have recognized never reaches the
+# run's classifier — which is how an authentication refusal reached the queue as
+# an ordinary command failure and was retried into.
+die_from() { die "$2" "$(cr_reason_for_output "$1")"; }
+
+# stop_human ends the stage on a limit only a person can lift.
+#
+# It is stated DISTINCTLY from an authentication boundary, and deliberately:
+# both stop the run and neither is retried, but one is usually seconds of a
+# person's time and the other is a conversation.
+stop_human() {
+  RESULT_STATE='HUMAN_BLOCKED'
+  RESULT_DETAIL="$1"
+  printf 'driver[%s]: %s\n' "$STAGE" "$1" >&2
+  exit 1
+}
+
+# not_finished states that the stage made progress and has more to do.
+#
+# Nothing failed, so nothing is retried: the run re-offers the stage under the
+# bounded resume budget its task declared, and holds it for a person if it never
+# converges. A stage that said this and then exits non-zero is still a failed
+# stage to a caller that is not a run — which is what an unsupervised invocation
+# has always meant, and is left unchanged.
+not_finished() {
+  RESULT_STATE='CONTINUE'
+  RESULT_DETAIL="$1"
+  say "$1"
+}
 
 [ -f "$INTENT" ] || die "no delivery intent at $INTENT"
 [ -f "$PLAN" ] || die "no delivery plan at $PLAN"
@@ -172,7 +310,12 @@ rt_get() { rt_init; jq -r --arg k "$1" '.[$k] // empty' < "$RUNTIME"; }
 rt_set() {
   rt_init
   local tmp; tmp="$(mktemp "$RUNTIME.XXXXXX")"
-  jq --arg k "$1" --arg v "$2" '.[$k] = $v' < "$RUNTIME" > "$tmp" && mv -f "$tmp" "$RUNTIME"
+  jq --arg k "$1" --arg v "$2" '.[$k] = $v' < "$RUNTIME" > "$tmp" && mv -f "$tmp" "$RUNTIME" && return 0
+  # A fact that was not recorded is a fact the next stage reads as absent, and
+  # the stage that wrote it carries on believing it landed. The failure surfaces
+  # an hour later as "no work bead for X" — in a stage that did nothing wrong.
+  rm -f "$tmp"
+  die "recording $1 in the run's runtime facts failed"
 }
 
 CITY="$(rt_get city)"
@@ -221,7 +364,7 @@ branch_for() { printf 'delivery/%s/%s' "$RUN_TAG" "$1"; }
 supervisor_must_reconcile() {
   if ! command "$GC" supervisor reload > "$EVIDENCE/supervisor-reload.txt" 2>&1 ||
      grep -qi 'not running\|unreachable' "$EVIDENCE/supervisor-reload.txt"; then
-    die "the machine-wide supervisor cannot be asked to reconcile this city, so its agents will never start: $(tr '\n' ' ' < "$EVIDENCE/supervisor-reload.txt")— restarting a machine-wide supervisor is a decision for its owner, not for this run"
+    stop_human "the machine-wide supervisor cannot be asked to reconcile this city, so its agents will never start: $(tr '\n' ' ' < "$EVIDENCE/supervisor-reload.txt")— restarting a machine-wide supervisor is a decision for its owner, not for this run"
   fi
   say 'the machine-wide supervisor reconciled this city'
 }
@@ -251,7 +394,8 @@ stage_city_up() {
   # real repository, while the registered checkout is never touched.
   say "cloning $REPO_SLUG into a working rig"
   git -c credential.helper="$GIT_CRED_HELPER" clone -q "$REPO_ORIGIN" "$RIG_PATH" \
-    > "$EVIDENCE/clone.txt" 2>&1 || die "cloning $REPO_SLUG: $(tail -2 "$EVIDENCE/clone.txt")"
+    > "$EVIDENCE/clone.txt" 2>&1 \
+    || die_from "$EVIDENCE/clone.txt" "cloning $REPO_SLUG: $(tail -2 "$EVIDENCE/clone.txt")"
   git -C "$RIG_PATH" config user.name 'Gas City Controller'
   git -C "$RIG_PATH" config user.email 'support@corsolv.com'
   git -C "$RIG_PATH" config credential.helper "$GIT_CRED_HELPER"
@@ -315,6 +459,8 @@ TOML
     printf '\n[option_defaults]\npermission_mode = "bounded-project"\n' >> "$CITY/agents/$agent/agent.toml"
   done
 
+  # The `|| true` is not suppression: the verdict is the resolved configuration
+  # below, and a config command that failed produces a file the greps refuse.
   gcx config show > "$EVIDENCE/config-show.txt" 2>&1 || true
   for id in $(packages); do
     grep -qE "^name = \"worker-$id\"$" "$EVIDENCE/config-show.txt" \
@@ -364,8 +510,16 @@ WORKER_LIVE_STATES='active awake start-pending creating'
 # link: a live session for worker-<id> is a worker holding that package's work.
 worker_is_live() {
   local agent="worker-$1" json
-  json="$(gcx session list --json 2>/dev/null || true)"
-  [ -n "$json" ] || return 1
+  json="$(gcx session list --json 2>> "$EVIDENCE/session-list.err" || true)"
+  # A session list that cannot be read is not an answer, and the caller treats
+  # "no answer" as "no worker" — which routes a bead that may already have one.
+  # That is the safe direction to be wrong in, and it is said out loud rather
+  # than swallowed, because a run that silently duplicates work looks identical
+  # to one that correctly recovered it.
+  [ -n "$json" ] || {
+    say "$1: Gas City could not be asked which sessions are running; treating the worker as absent"
+    return 1
+  }
   jq -e --arg a "$agent" --arg live "$WORKER_LIVE_STATES" '
       ($live | split(" ")) as $ok
       | (.sessions // [])
@@ -416,9 +570,7 @@ recover_worker() {
 
   say "$id: bead $bead is open and no worker holds it; routing it again"
   sa_ledger_note "recovering $id: re-routing open bead $bead with no live worker"
-  gcx sling "$RIG_NAME/worker-$id" "$bead" --no-formula --no-convoy \
-    >> "$EVIDENCE/route-$id.txt" 2>&1 \
-    || say "re-routing $id reported a problem; see route-$id.txt"
+  route_bead "$id" "$bead"
 }
 
 # ===========================================================================
@@ -452,6 +604,48 @@ mk_bead() {
   fi
   [ "$rc" -eq 0 ] || { printf 'driver: creating bead: %s\n' "$(tail -1 <<<"$out")" >&2; return 1; }
   tail -1 <<<"$out"
+}
+
+# stamp_bead applies a controller stamp that must actually land.
+#
+# THE SUPPRESSION THIS REPLACES. Every stamp was written with its output and its
+# exit status both discarded. Publication is adjudicated against these stamps —
+# the authorized scope, the required artifact, the work directory a worker is
+# started in — so a stamp that silently did not land is a package the run
+# believes it described and did not. The refusal is invisible at the moment it
+# happens and surfaces an hour later as a publication that cannot find what it
+# is meant to check, or as a worker with nowhere to work.
+stamp_bead() {
+  local bead="$1" what="$2"
+  shift 2
+  gcx bd update "$bead" "$@" >> "$EVIDENCE/stamp-$bead.txt" 2>&1 \
+    || die "stamping $what on bead $bead: $(tail -2 "$EVIDENCE/stamp-$bead.txt" | tr '\n' ' ')"
+}
+
+# wire_dep makes one bead block another, and refuses to carry on if it did not.
+#
+# The dependency edge is what makes a dependent package wait for repository
+# state instead of for a sibling worker's filesystem. An edge that was silently
+# not wired is a worker started against a base its upstream has not merged into,
+# which is the one thing the whole dependency design exists to prevent.
+wire_dep() {
+  local blocker="$1" blocked="$2" what="$3"
+  gcx bd dep "$blocker" --blocks "$blocked" >> "$EVIDENCE/deps.txt" 2>&1 \
+    || die "wiring $what ($blocker blocks $blocked): $(tail -2 "$EVIDENCE/deps.txt" | tr '\n' ' ')"
+}
+
+# route_bead hands a package's work to its worker.
+#
+# THE SUPPRESSION THIS REPLACES. A routing failure was reported with `say` and
+# the stage carried on to report success. Routing is the only thing that starts
+# a worker, so a package that was not routed has nobody doing its work — and the
+# next stage waits out its entire deadline for a worker that was never asked to
+# exist. A failure here is a failure of the stage.
+route_bead() {
+  local id="$1" bead="$2"
+  gcx sling "$RIG_NAME/worker-$id" "$bead" --no-formula --no-convoy \
+    >> "$EVIDENCE/route-$id.txt" 2>&1 \
+    || die "routing $id to its worker: $(tail -2 "$EVIDENCE/route-$id.txt" | tr '\n' ' ')"
 }
 
 stage_dispatch() {
@@ -489,10 +683,10 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
     mergeBead="$(mk_bead "Controller publishes and merges $id ($bead)")" \
       || die "creating the merge bead for $id"
 
-    gcx bd update "$bead" --set-metadata "gc.required_artifact=$artifact" >/dev/null 2>&1
-    gcx bd update "$bead" --set-metadata "gc.authorised_paths=$paths" >/dev/null 2>&1
-    gcx bd update "$bead" --set-metadata "gc.delivery_package=$id" >/dev/null 2>&1
-    gcx bd update "$mergeBead" -a 'corsolv-controller' -s in_progress >/dev/null 2>&1
+    stamp_bead "$bead" 'the required artifact' --set-metadata "gc.required_artifact=$artifact"
+    stamp_bead "$bead" 'the authorized paths' --set-metadata "gc.authorised_paths=$paths"
+    stamp_bead "$bead" 'the delivery package' --set-metadata "gc.delivery_package=$id"
+    stamp_bead "$mergeBead" "the controller's ownership" -a 'corsolv-controller' -s in_progress
 
     rt_set "bead.$id" "$bead"
     rt_set "merge.$id" "$mergeBead"
@@ -506,9 +700,9 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
   for id in $(packages); do
     bead="$(rt_get "bead.$id")"
     mergeBead="$(rt_get "merge.$id")"
-    gcx bd dep "$bead" --blocks "$mergeBead" >/dev/null 2>&1
+    wire_dep "$bead" "$mergeBead" "$id's work before its publication"
     for dep in $(pkg_deps "$id"); do
-      gcx bd dep "$(rt_get "merge.$dep")" --blocks "$bead" >/dev/null 2>&1
+      wire_dep "$(rt_get "merge.$dep")" "$bead" "$dep's merge before $id's work"
       say "$id waits for $dep to merge"
     done
   done
@@ -526,14 +720,13 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
       wt_is_registered "$RIG_PATH" "$wt" || die "the worktree for $id is not registered"
       prepare_worktree "$wt" "$id"
     fi
-    gcx bd update "$bead" --set-metadata "work_dir=$wt" >/dev/null 2>&1
+    stamp_bead "$bead" 'the work directory' --set-metadata "work_dir=$wt"
     rt_set "wt.$id" "$wt"
     rt_set "branch.$id" "$branch"
   done
 
   for id in $(packages); do
-    gcx sling "$RIG_NAME/worker-$id" "$(rt_get "bead.$id")" --no-formula --no-convoy \
-      > "$EVIDENCE/route-$id.txt" 2>&1 || say "routing $id reported a problem; see route-$id.txt"
+    route_bead "$id" "$(rt_get "bead.$id")"
   done
 
   rt_set dispatched "$(date -u +%FT%TZ)"
@@ -620,8 +813,7 @@ ensure_package_worktree() {
   wt_is_registered "$RIG_PATH" "$wt" || die "the worktree for $id is not registered"
   prepare_worktree "$wt" "$id"
   say "cut $id from the merged base ${mergedBase:0:9} — its worker runs now"
-  gcx sling "$RIG_NAME/worker-$id" "$bead" --no-formula --no-convoy \
-    > "$EVIDENCE/route-$id.txt" 2>&1 || say "re-routing $id reported a problem; see route-$id.txt"
+  route_bead "$id" "$bead"
 }
 
 # ===========================================================================
@@ -645,7 +837,7 @@ stage_await() {
   [ -n "$CITY" ] || die 'no city; city-up has not run'
   cd "$CITY" || die "cannot enter $CITY"
 
-  local deadline=$(( $(date +%s) + ${DELIVERY_WORK_DEADLINE:-5400} ))
+  local deadline=$(( $(date +%s) + DEADLINE ))
   local id bead remaining
 
   # WAIT FOR THE PACKAGE THIS STAGE IS FOR.
@@ -684,11 +876,14 @@ stage_await() {
       # then refused on a missing artifact — naming the wrong thing, hours after
       # the real event, with the run's own record claiming the stage passed.
       #
-      # The truthful answer is that this stage did not achieve what it waited
-      # for. It costs the packages that DID finish their publication in this
-      # run, which is a real loss; the run's state stays honest and resumable,
-      # which is the larger one.
-      say "deadline reached with mandatory work still open:$remaining"
+      # Nor is it a failure. Nothing was proved wrong: the work simply is not
+      # finished, which is the same shape as a harness stopping an agent at its
+      # turn cap. Stated as CONTINUE it costs no retry budget, and the run
+      # re-offers this stage under the bounded resume budget its task declared —
+      # re-deriving on the way back in which packages still have no worker. A
+      # stage that never converges is HELD for a person rather than failed,
+      # because what to do about work that did not finish is a person's call.
+      not_finished "the work this stage waits for is still open:$remaining"
       return 1
     fi
     sleep 15
@@ -739,14 +934,26 @@ stage_publish() {
   # worker, and nothing left in the run that would ever start one.
   if ! bead_is_closed "$bead"; then
     [ "$hadWorktree" = 'yes' ] && recover_worker "$PACKAGE"
-    local deadline=$(( $(date +%s) + ${DELIVERY_WORK_DEADLINE:-5400} ))
+    local deadline=$(( $(date +%s) + DEADLINE ))
     while ! bead_is_closed "$bead"; do
-      [ "$(date +%s)" -ge "$deadline" ] && die "$PACKAGE did not finish before its deadline"
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        # The same statement the await stage makes, for the same reason: work
+        # that has not finished has not failed, and the run re-offers this stage
+        # under its bounded resume budget rather than spending a retry on it.
+        not_finished "$PACKAGE has not finished; its work bead $bead is still open"
+        return 1
+      fi
       sleep 15
     done
   fi
 
-  capture_final_bead_state "$bead" "$EVIDENCE" >/dev/null || true
+  # The final-state re-read is EVIDENCE OF A CLOSURE, and it reports whether it
+  # actually observed one. That verdict was discarded, which is exactly what
+  # sa-lib warns against: a caller that stores a non-final record as final. The
+  # rest of this stage publishes on the strength of that record, so a record
+  # that does not show a closed bead has to stop it.
+  capture_final_bead_state "$bead" "$EVIDENCE" >/dev/null \
+    || die "$PACKAGE: re-reading bead $bead after it closed did not observe a closed bead, so there is no final record to publish against"
 
   # THE BOUNDARY: what actually changed. bounded-project grants Write/Edit, so
   # the permission list buys scope clarity rather than containment. What
@@ -788,24 +995,32 @@ under bounded-project and is denied git by policy." "${pathList[@]}")" \
   say "$PACKAGE committed ${commit:0:9}"
 
   git -C "$wt" push -q -u origin "$branch" > "$EVIDENCE/push-$PACKAGE.txt" 2>&1 \
-    || die "pushing $branch: $(tail -2 "$EVIDENCE/push-$PACKAGE.txt")"
+    || die_from "$EVIDENCE/push-$PACKAGE.txt" "pushing $branch: $(tail -2 "$EVIDENCE/push-$PACKAGE.txt")"
 
+  # The `|| true` stays, and it is not suppression: a pull request that already
+  # exists for this branch is a legitimate non-zero exit from a resumed
+  # publication, and the verdict is taken below from whether a pull request
+  # exists rather than from this command's status. What the refusal in this file
+  # DOES decide is why it does not exist, when it does not.
   "$GH" pr create --repo "$REPO_SLUG" --base "$DEFAULT_BRANCH" --head "$branch" \
     --title "feat($PACKAGE): $(pkg_field "$PACKAGE" title)" \
     --body "Managed delivery via Gas City. The worker produced this change under bounded-project; the controller validated, committed, pushed and opened this pull request. Package \`$PACKAGE\`, bead \`$bead\`." \
     > "$EVIDENCE/pr-$PACKAGE.txt" 2>&1 || true
 
   local prNum prHead
-  prNum="$("$GH" pr list --repo "$REPO_SLUG" --head "$branch" --json number --jq '.[0].number' 2>/dev/null)"
-  [ -n "$prNum" ] || die "no pull request for $branch: $(tail -2 "$EVIDENCE/pr-$PACKAGE.txt")"
-  prHead="$("$GH" pr view "$prNum" --repo "$REPO_SLUG" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
-  [ "$prHead" = "$commit" ] || die "PR #$prNum head $prHead is not the controller commit $commit"
+  prNum="$("$GH" pr list --repo "$REPO_SLUG" --head "$branch" --json number --jq '.[0].number' 2>> "$EVIDENCE/pr-$PACKAGE.txt")"
+  [ -n "$prNum" ] || die_from "$EVIDENCE/pr-$PACKAGE.txt" \
+    "no pull request for $branch: $(tail -2 "$EVIDENCE/pr-$PACKAGE.txt" | tr '\n' ' ')"
+  prHead="$("$GH" pr view "$prNum" --repo "$REPO_SLUG" --json headRefOid --jq '.headRefOid' 2>> "$EVIDENCE/pr-$PACKAGE.txt")"
+  [ "$prHead" = "$commit" ] || die_from "$EVIDENCE/pr-$PACKAGE.txt" \
+    "PR #$prNum head ${prHead:-unknown} is not the controller commit $commit"
   say "$PACKAGE opened PR #$prNum at ${prHead:0:9}"
   rt_set "pr.$PACKAGE" "$prNum"
   rt_set "head.$PACKAGE" "$prHead"
 
   if [ "$NEED_CHECKS" = 'true' ]; then
-    await_required_ci "$PACKAGE" "$prHead" || die "$PACKAGE did not pass required CI on its exact head"
+    await_required_ci "$PACKAGE" "$prHead" \
+      || die_from "$EVIDENCE/ci-$PACKAGE.err" "$PACKAGE did not pass required CI on its exact head"
   fi
 
   if [ "$NEED_MERGE" != 'true' ]; then
@@ -814,22 +1029,39 @@ under bounded-project and is denied git by policy." "${pathList[@]}")" \
     return 0
   fi
 
-  merge_pr "$PACKAGE" "$prNum" || die "$PACKAGE was not merged"
+  merge_pr "$PACKAGE" "$prNum" \
+    || die_from "$EVIDENCE/merge-$PACKAGE.txt" \
+      "$PACKAGE was not merged: $(tail -2 "$EVIDENCE/merge-$PACKAGE.txt" | tr '\n' ' ')"
   rt_set "published.$PACKAGE" "merged"
 
   # Close the controller's merge bead with a typed shipped record, against a
   # local ref that has actually been moved to what GitHub did — the work-record
   # gate verifies reachability, and claiming it against a stale ref is a claim
   # that cannot be verified.
-  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null
-  git -C "$RIG_PATH" update-ref "refs/heads/$DEFAULT_BRANCH" "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null
+  # THE SUPPRESSION THIS REPLACES, AND WHY IT MATTERS MOST HERE. All four
+  # commands wrote to /dev/null and discarded their status. Closing this bead is
+  # what UNBLOCKS every package that depends on this one — the dependency edge
+  # runs from the merge bead — and the work-record gate can legitimately refuse
+  # the close when the shipped claim names a commit the local ref cannot reach.
+  # So a silent refusal here left a merged package looking merged while every
+  # dependent package's work bead stayed shut, and the run waited out deadline
+  # after deadline for workers that were never eligible to start.
+  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH" > "$EVIDENCE/merge-ref-$PACKAGE.txt" 2>&1 \
+    || die_from "$EVIDENCE/merge-ref-$PACKAGE.txt" \
+      "$PACKAGE merged, but its merge commit could not be fetched, so the shipped claim cannot be verified: $(tail -2 "$EVIDENCE/merge-ref-$PACKAGE.txt" | tr '\n' ' ')"
+  git -C "$RIG_PATH" update-ref "refs/heads/$DEFAULT_BRANCH" "refs/remotes/origin/$DEFAULT_BRANCH" \
+    >> "$EVIDENCE/merge-ref-$PACKAGE.txt" 2>&1 \
+    || die "$PACKAGE merged, but $DEFAULT_BRANCH could not be moved to what the forge did, so the shipped claim would name an unreachable commit"
   local mergedSha; mergedSha="$(rt_get "merged.$PACKAGE")"
-  gcx bd update "$mergeBead" \
+  stamp_bead "$mergeBead" 'the shipped work record' \
     --set-metadata 'gc.work_outcome=shipped' \
     --set-metadata "gc.work_commit=$mergedSha" \
-    --set-metadata "gc.work_branch=$DEFAULT_BRANCH" >/dev/null 2>&1
-  gcx bd close "$mergeBead" --reason 'controller published, CI-verified and merged this package' >/dev/null 2>&1
-  capture_final_bead_state "$mergeBead" "$EVIDENCE" >/dev/null || true
+    --set-metadata "gc.work_branch=$DEFAULT_BRANCH"
+  gcx bd close "$mergeBead" --reason 'controller published, CI-verified and merged this package' \
+    >> "$EVIDENCE/stamp-$mergeBead.txt" 2>&1 \
+    || die "closing the merge bead $mergeBead for $PACKAGE, which is what unblocks the packages that depend on it: $(tail -2 "$EVIDENCE/stamp-$mergeBead.txt" | tr '\n' ' ')"
+  capture_final_bead_state "$mergeBead" "$EVIDENCE" >/dev/null \
+    || die "$PACKAGE: the merge bead $mergeBead was closed and the re-read did not observe a closed bead"
   say "$PACKAGE merged as ${mergedSha:0:9}"
 }
 
@@ -880,24 +1112,29 @@ run_project_gates() {
 await_required_ci() {
   local id="$1" head="$2"
   local deadline=$(( $(date +%s) + ${DELIVERY_CI_DEADLINE:-2700} ))
-  local runId concl runHead
+  local runId='' concl='' runHead=''
+  # The forge's own refusals are kept rather than dropped down /dev/null. A
+  # credential this run cannot use and a workflow that has not started yet look
+  # identical from here — both produce no run id — and reporting the first as
+  # the second sends a person looking for a CI problem that does not exist.
+  local errors="$EVIDENCE/ci-$id.err"
 
   while [ "$(date +%s)" -lt "$deadline" ]; do
     runId="$("$GH" api "repos/$REPO_SLUG/actions/runs?head_sha=$head&event=pull_request" \
-      --jq '[.workflow_runs[]] | sort_by(.id) | last | .id' 2>/dev/null)"
+      --jq '[.workflow_runs[]] | sort_by(.id) | last | .id' 2>> "$errors")"
     if [ -n "$runId" ] && [ "$runId" != 'null' ]; then
-      concl="$("$GH" api "repos/$REPO_SLUG/actions/runs/$runId" --jq '.conclusion' 2>/dev/null)"
+      concl="$("$GH" api "repos/$REPO_SLUG/actions/runs/$runId" --jq '.conclusion' 2>> "$errors")"
       [ -n "$concl" ] && [ "$concl" != 'null' ] && break
     fi
     sleep 15
   done
 
   if [ -z "$runId" ] || [ "$runId" = 'null' ]; then
-    say "$id: no workflow run was found for head $head"
+    say "$id: no workflow run was found for head $head$( [ -s "$errors" ] && printf ': %s' "$(tail -2 "$errors" | tr '\n' ' ')")"
     return 1
   fi
-  runHead="$("$GH" api "repos/$REPO_SLUG/actions/runs/$runId" --jq '.head_sha' 2>/dev/null)"
-  "$GH" api "repos/$REPO_SLUG/actions/runs/$runId" > "$EVIDENCE/ci-$id.json" 2>/dev/null || true
+  runHead="$("$GH" api "repos/$REPO_SLUG/actions/runs/$runId" --jq '.head_sha' 2>> "$errors")"
+  "$GH" api "repos/$REPO_SLUG/actions/runs/$runId" > "$EVIDENCE/ci-$id.json" 2>> "$errors" || true
   [ "$runHead" = "$head" ] || { say "$id: run $runId tested $runHead, not the PR head $head"; return 1; }
   [ "$concl" = 'success' ] || { say "$id: run $runId concluded '$concl'"; return 1; }
   say "$id: required CI passed on the exact head (run $runId)"
@@ -926,8 +1163,27 @@ merge_pr() {
 # STAGE project — render the delivery projection
 # ===========================================================================
 
+# run_progression_refusal is the run's own answer to whether this packet may
+# progress, read from where the run publishes it.
+#
+# It is READ and never derived. The run evaluates its mandatory gates against
+# evidence bound to a revision (internal/unattended/qa.go) and applies that
+# decision as a ceiling to its own projection; this stage renders the OTHER
+# projection — the delivery one an acceptance assessment reads — and a ceiling
+# on one document but not the other is two accounts of the same run, of which a
+# reader gets the more reassuring.
+run_progression_refusal() {
+  local dir
+  dir="$(cr_state_dir)"
+  [ -n "$dir" ] || return 0
+  cr_progression_refusal "$dir/heartbeat.json"
+}
+
 stage_project() {
   [ -n "$CITY" ] || die 'no city; city-up has not run'
+
+  PROGRESSION_REFUSAL="$(run_progression_refusal)"
+  [ -z "$PROGRESSION_REFUSAL" ] || say "the projection is capped: $PROGRESSION_REFUSAL"
 
   local facts="$STATE/facts.json"
   local out="$STATE/PROJECT-STATE.yml"
@@ -1046,26 +1302,53 @@ emit_task_facts() {
 # A control with no durable fact behind it is omitted, never invented: the
 # projector reads an absent row as not-met, which is the answer that keeps an
 # unverified package from scoring as an accepted one.
+# THE CEILING THE RUN'S OWN GATES PUT ON THIS LEDGER.
+#
+# A control row is a CLAIM that something was verified, and the projection's
+# completion gate is derived from the rows that claim PASS. When the run's
+# mandatory QA gates refuse this packet — a gate that failed, never ran, or ran
+# against different code — no claim of verification is available to make, and a
+# ledger that made one anyway would license the exact false completion QA-001
+# exists to prevent, from the one document an acceptance assessment reads.
+#
+# The FACTS are not erased; they are recorded with the claim withheld. The
+# controller really did re-run the gates and the forge really did report that
+# run — losing that would make a refused packet indistinguishable from one that
+# never got anywhere. What changes is the status column, which is the column
+# that certifies.
 build_controls() {
   local ledger="$EVIDENCE/controls.tsv" id v
+  local status='PASS' withheld=''
+  if [ -n "$PROGRESSION_REFUSAL" ]; then
+    status='BLOCKED'
+    withheld=" — the claim is withheld: $PROGRESSION_REFUSAL"
+  fi
   printf 'control\tstatus\treason\n' > "$ledger"
   for id in $(packages); do
     v="$(rt_get "ci.$id")"
-    [ -n "$v" ] && printf '%s\tPASS\t%s\n' \
-      "$id required CI passed on the exact pull-request head" "run $v" >> "$ledger"
-    [ -n "$(rt_get "published.$id")" ] && printf '%s\tPASS\t%s\n' \
-      "$id independent assurance passed" \
-      "the controller re-ran the package's declared gates" >> "$ledger"
+    [ -n "$v" ] && printf '%s\t%s\t%s\n' \
+      "$id required CI passed on the exact pull-request head" "$status" "run $v$withheld" >> "$ledger"
+    [ -n "$(rt_get "published.$id")" ] && printf '%s\t%s\t%s\n' \
+      "$id independent assurance passed" "$status" \
+      "the controller re-ran the package's declared gates$withheld" >> "$ledger"
     v="$(rt_get "merged.$id")"
-    [ -n "$v" ] && printf '%s\tPASS\t%s\n' \
-      "$id merged through repository governance" "$v" >> "$ledger"
+    [ -n "$v" ] && printf '%s\t%s\t%s\n' \
+      "$id merged through repository governance" "$status" "$v$withheld" >> "$ledger"
   done
-  say "control ledger: $(( $(wc -l < "$ledger") - 1 )) adjudicated control(s)"
+  say "control ledger: $(( $(wc -l < "$ledger") - 1 )) adjudicated control(s), recorded $status"
 }
 
 package_status() {
   local id="$1"
-  [ -n "$(rt_get "merged.$id")" ] && { printf 'merged'; return; }
+  if [ -n "$(rt_get "merged.$id")" ]; then
+    # The same ceiling the run applies to its own projection, applied here for
+    # the same reason: a merge is publication, and publication is not
+    # acceptance. A package the run's mandatory gates refuse is reported as
+    # blocked on that refusal, never as delivered.
+    [ -z "$PROGRESSION_REFUSAL" ] || { printf 'blocked'; return; }
+    printf 'merged'
+    return
+  fi
   [ -n "$(rt_get "pr.$id")" ] && { printf 'pr-open'; return; }
   local bead; bead="$(rt_get "bead.$id")"
   if [ -n "$bead" ] && bead_is_closed "$bead" 2>/dev/null; then printf 'blocked'; return; fi
@@ -1087,6 +1370,7 @@ overall_rag_reason() {
     [ "$(package_status "$id")" = 'merged' ] && done=$((done + 1))
   done
   printf '%d of %d work packages merged through repository governance.' "$done" "$total"
+  [ -z "$PROGRESSION_REFUSAL" ] || printf ' %s.' "$PROGRESSION_REFUSAL"
 }
 
 # ===========================================================================
@@ -1103,7 +1387,7 @@ stage_publish_projection() {
   rm -rf "$pub"
   git -c credential.helper="$GIT_CRED_HELPER" clone -q --depth 1 --branch "$DEFAULT_BRANCH" \
     "$REPO_ORIGIN" "$pub" > "$EVIDENCE/publish-clone.txt" 2>&1 \
-    || die "cloning to publish the projection: $(tail -2 "$EVIDENCE/publish-clone.txt")"
+    || die_from "$EVIDENCE/publish-clone.txt" "cloning to publish the projection: $(tail -2 "$EVIDENCE/publish-clone.txt")"
   git -C "$pub" config user.name 'Gas City Controller'
   git -C "$pub" config user.email 'support@corsolv.com'
   git -C "$pub" config credential.helper "$GIT_CRED_HELPER"
@@ -1130,7 +1414,7 @@ Generated by the delivery engine's projector from this run's own evidence.
 Hand edits are overwritten and are not a source of truth." \
     || die 'committing the projection'
   git -C "$pub" push -q origin "$DEFAULT_BRANCH" > "$EVIDENCE/publish-push.txt" 2>&1 \
-    || die "pushing the projection: $(tail -2 "$EVIDENCE/publish-push.txt")"
+    || die_from "$EVIDENCE/publish-push.txt" "pushing the projection: $(tail -2 "$EVIDENCE/publish-push.txt")"
   say "projection published to $REPO_SLUG:$target"
 }
 

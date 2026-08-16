@@ -655,6 +655,12 @@ func (r *Runner) boundaries() map[string]string {
 // stop doing it.
 func (r *Runner) publish(stage string, current *QueuedTask) {
 	now := r.now()
+	// Taken once and used twice, deliberately. The heartbeat a task reads and
+	// the projection this function refreshes must be the same decision: two
+	// evaluations a moment apart could disagree, and the disagreement would be
+	// between the document a stage caps its claims with and the document those
+	// claims land in.
+	qa := r.QADecision()
 	p := Progress{
 		RunID:         r.Plan.RunID,
 		ProjectID:     r.Spec.ProjectID,
@@ -670,6 +676,7 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 		Tasks:         r.Queue.Counts(),
 		Attempts:      r.attempts,
 		Resumes:       r.resumes,
+		QA:            qa,
 	}
 	if r.Lock != nil {
 		p.WriterOwner = r.Lock.Owner().RunID
@@ -711,7 +718,7 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 	// that needs it. Refreshing it alongside the heartbeat also means the
 	// dashboard sees delivery state *during* a long run instead of only once it
 	// is over, which is the more useful behavior anyway.
-	if _, err := PublishDelivery(r.Spec, r.Queue, r.Fence, r.QADecision(), now); err != nil {
+	if _, err := PublishDelivery(r.Spec, r.Queue, r.Fence, qa, now); err != nil {
 		r.Journal.Append(Record{ //nolint:errcheck
 			Kind: RecordPreflight, Outcome: "delivery-projection-failed", Detail: err.Error(),
 		})

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -298,7 +299,23 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 			Needs:          needs,
 			Mutates:        mutates,
 			TimeoutSeconds: timeout,
-			MaxAttempts:    1,
+			// EVERY STAGE IS SUPERVISED. Declaring where a stage states its
+			// outcome is what makes that statement the verdict and takes the
+			// residual exit status out of the decision — and the driver produces
+			// both directions of that residue. `gc init` exits non-zero for a
+			// condition that is correct on any host that already has a
+			// supervisor; a stage that waits out its deadline over unfinished
+			// work is not a stage that failed.
+			ResultPath: driverResultPath(id),
+			// No MaxAttempts override. It used to be one, which capped every
+			// stage at a single attempt whatever went wrong — so a rate limit
+			// from the forge ended a delivery that the external-service policy
+			// would have carried through five attempts and a long backoff. The
+			// override was the right caution while a stage's failure class came
+			// from guessing at its output; now the stage NAMES its terminal
+			// reason, the class is its own declaration, and the class policy is
+			// what should govern. Every stage is idempotent by design, which is
+			// what makes a second attempt safe to allow.
 		}
 	}
 
@@ -339,6 +356,7 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	if awaitTimeout <= 0 {
 		awaitTimeout = 5400
 	}
+	waitBudget := strconv.Itoa(awaitTimeout)
 
 	// WAITING IS PER PACKAGE, AND SO IS PUBLICATION.
 	//
@@ -369,24 +387,21 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		awaitNeeds := append([]string{StageDispatch}, upstream...)
 		publishNeeds := append([]string{awaitID}, upstream...)
 
-		work.Tasks = append(work.Tasks,
-			stage(awaitID, "wait for "+wp.ID+": "+wp.Title,
-				unattended.BandPrimary, awaitNeeds, false, awaitTimeout,
-				append([]string{StageAwait, "-package", wp.ID}, project...)...),
-			unattended.Task{
-				ID:             StagePublish + "-" + wp.ID,
-				Title:          "publish " + wp.ID + ": " + wp.Title,
-				Band:           unattended.BandPrimary,
-				Argv:           append([]string{host.Driver, StagePublish, "-package", wp.ID}, project...),
-				Needs:          publishNeeds,
-				Mutates:        true,
-				TimeoutSeconds: 3600,
-				MaxAttempts:    1,
-				DeliveryStatus: publishedStatus(in.Policy),
-				CompletionGate: "required CI passed + independent assurance passed + merged through repository governance",
-				Phase:          wp.Phase,
-			},
-		)
+		awaitTask := stage(awaitID, "wait for "+wp.ID+": "+wp.Title,
+			unattended.BandPrimary, awaitNeeds, false, awaitTimeout+driverResultMargin,
+			append([]string{StageAwait, "-package", wp.ID, "-deadline", waitBudget}, project...)...)
+		awaitTask.MaxResumes = driverMaxResumes
+
+		publishTask := stage(StagePublish+"-"+wp.ID, "publish "+wp.ID+": "+wp.Title,
+			unattended.BandPrimary, publishNeeds, true,
+			awaitTimeout+publishCIBudget+driverResultMargin,
+			append([]string{StagePublish, "-package", wp.ID, "-deadline", waitBudget}, project...)...)
+		publishTask.MaxResumes = driverMaxResumes
+		publishTask.DeliveryStatus = publishedStatus(in.Policy)
+		publishTask.CompletionGate = "required CI passed + independent assurance passed + merged through repository governance"
+		publishTask.Phase = wp.Phase
+
+		work.Tasks = append(work.Tasks, awaitTask, publishTask)
 	}
 
 	publishProjectionNeeds := []string{StageProject}
@@ -411,6 +426,50 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		return spec, work, fmt.Errorf("compiling the delivery run: %w", err)
 	}
 	return spec, work, nil
+}
+
+// The bounds a compiled delivery stage runs under.
+const (
+	// driverResultMargin is how much longer a stage's task timeout is than the
+	// deadline the stage itself is given to wait for work.
+	//
+	// The run KILLS a task that exceeds its timeout, and a killed stage states
+	// nothing — which is an absence of knowledge, and fails safe. So a stage
+	// whose own deadline expired at the same moment its task timed out could
+	// never say "the work is unfinished, not failed": it would be killed a
+	// moment before saying so, and an interruption would reach the run as
+	// silence. This margin is the stage's room to speak.
+	driverResultMargin = 300
+
+	// publishCIBudget is the time a publication may spend waiting for required
+	// CI on its exact head, on top of any wait for the work itself. It matches
+	// the driver's own DELIVERY_CI_DEADLINE default, because a task timeout that
+	// did not cover the wait the stage is about to perform is a stage killed
+	// part-way through publishing.
+	publishCIBudget = 2700
+
+	// driverMaxResumes bounds how many times a stage that reports unfinished
+	// work is re-offered.
+	//
+	// One. The deadline a stage waits under is the policy's declared budget for
+	// the work, and multiplying it silently would spend a night on a decision
+	// nobody took. A single further pass is worth having because the stage
+	// re-derives on the way back in which packages have no worker and routes
+	// them again; beyond that the task is HELD, which puts an unfinished
+	// delivery in front of a person instead of failing it as though something
+	// had been proved wrong.
+	driverMaxResumes = 1
+)
+
+// driverResultPath is where a stage states what happened to it, relative to the
+// run's state directory.
+//
+// One file per task, named for the task: two stages sharing a path would let
+// one stage's statement be adjudicated as another's, and the run clears the
+// path before each attempt so a stale statement can never survive into the next
+// one.
+func driverResultPath(taskID string) string {
+	return "results/" + taskID + ".json"
 }
 
 // publishedStatus is the projection status a successful publication

@@ -83,6 +83,13 @@ case "${1:-} ${2:-}" in
   'rig list')
     printf '%s:\n    Beads: initialized\n' "${GC_STUB_RIG:-rig}"
     ;;
+  'supervisor reload')
+    # The one answer city-up treats as authoritative. A stale machine-wide
+    # supervisor is the pilot's third failure, and a test that wants one says so
+    # here rather than through the absence of a reply.
+    printf '%s\n' "${GC_STUB_SUPERVISOR_REPLY:-reconciled 1 city}"
+    exit "${GC_STUB_SUPERVISOR_CODE:-0}"
+    ;;
 esac
 exit 0
 `
