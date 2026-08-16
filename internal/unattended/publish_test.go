@@ -21,7 +21,7 @@ func publishFixture(t *testing.T) (Spec, Plan, *Queue) {
 			Role: RoleWriter, Session: "s",
 		},
 	}
-	plan := Plan{RunID: "run-publish", Tasks: []Task{
+	plan := Plan{RunID: "run-publish", Risk: RiskQ0, Tasks: []Task{
 		{
 			ID: "ship", Title: "ship the control layer", Band: BandPrimary, Argv: sh("true"),
 			DeliveryStatus: "merged", CompletionGate: "CI green at the exact merged SHA", Phase: "delivery",

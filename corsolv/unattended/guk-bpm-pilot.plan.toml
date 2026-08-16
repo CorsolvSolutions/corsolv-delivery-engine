@@ -8,6 +8,11 @@
 
 runId = "guk-bpm-pilot-005"
 
+# Risk classification — the pilot changes infrastructure and delivery tooling
+# for a target project, so a defect here reaches beyond the process that has it.
+# Q2 makes build, unit-test and static-analysis mandatory.
+risk = "Q2"
+
 # --- primary: what the pilot exists to do ---------------------------------
 
 [[task]]
@@ -27,6 +32,7 @@ timeoutSeconds = 1800
 deliveryStatus = "checks-passing"
 completionGate = "the project builds from a clean dependency install on the pinned Node major"
 phase          = "pilot"
+qaGate         = "build"
 
 # --- validation -----------------------------------------------------------
 
@@ -37,6 +43,7 @@ band           = "validation"
 argv           = ["npm", "run", "lint"]
 needs          = ["install"]
 timeoutSeconds = 1200
+qaGate         = "static-analysis"
 
 [[task]]
 id             = "unit"
@@ -45,6 +52,7 @@ band           = "validation"
 argv           = ["npm", "run", "test"]
 needs          = ["install"]
 timeoutSeconds = 2400
+qaGate         = "unit-test"
 
 [[task]]
 id             = "readonly-guards"

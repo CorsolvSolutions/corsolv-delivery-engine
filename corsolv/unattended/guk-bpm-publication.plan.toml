@@ -8,6 +8,12 @@
 
 runId = "guk-bpm-publication-001"
 
+# Risk classification — this packet authors no code and compiles nothing. It
+# installs a projection document that the pilot packet's gates already
+# certified, so no code-certifying gate applies to it and Q0 requires none.
+# Changing what this packet does is a change to this line first.
+risk = "Q0"
+
 [[task]]
 id             = "install"
 title          = "install the exact declared dependency set"

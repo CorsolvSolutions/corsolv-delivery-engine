@@ -93,11 +93,24 @@ type Task struct {
 	CompletionGate string `toml:"completionGate,omitempty" json:"completionGate,omitempty"`
 	// Phase is the delivery phase the task belongs to, for the projection.
 	Phase string `toml:"phase,omitempty" json:"phase,omitempty"`
+
+	// QAGate names the catalog gate this task's mechanical execution
+	// produces evidence for. It is what makes a gate pluggable: the gate is a
+	// class of evidence, and the packet says which command satisfies it here.
+	// The exit status is the verdict, and the fence's position when the task
+	// ran is the revision the verdict is bound to.
+	QAGate string `toml:"qaGate,omitempty" json:"qaGate,omitempty"`
 }
 
-// Plan is the declared work queue for a run.
+// Plan is the declared work queue for a run — the work packet.
 type Plan struct {
 	RunID string `toml:"runId" json:"runId"`
+
+	// Risk is the packet's declared risk class. It is required: it is the
+	// input to mandatory-gate selection, so a packet without one cannot be
+	// asked what would have to pass before it may progress.
+	Risk RiskClass `toml:"risk" json:"risk"`
+
 	Tasks []Task `toml:"task" json:"tasks"`
 }
 
@@ -127,6 +140,17 @@ var ErrPlanInvalid = fmt.Errorf("unattended: work plan is invalid")
 // with no way to ask.
 func (p Plan) Validate() error {
 	var problems []string
+	// Risk is checked here as well as in ValidateQAPacket so that loading a
+	// plan on its own — which is what `preflight -plan` does — already refuses
+	// a packet that never classified itself.
+	if !p.Risk.Valid() {
+		declared := string(p.Risk)
+		if strings.TrimSpace(declared) == "" {
+			declared = "unset"
+		}
+		problems = append(problems, fmt.Sprintf("risk %s is not a declared class (%s)",
+			quoteOrBare(declared), joinRiskClasses()))
+	}
 	seen := map[string]bool{}
 	for i, t := range p.Tasks {
 		switch {

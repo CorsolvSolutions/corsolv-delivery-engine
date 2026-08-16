@@ -44,6 +44,10 @@ type Spec struct {
 	// judgement about a specific project's tooling.
 	Classification []ClassificationRule `toml:"classify,omitempty" json:"classification,omitempty"`
 
+	// QA is the project's half of mandatory-gate selection. It may add gates
+	// the packet's risk class does not already require; it cannot remove one.
+	QA QAPolicy `toml:"qa,omitempty" json:"qa,omitempty"`
+
 	// StateDir is where durable run evidence — journal, heartbeat, checkpoint —
 	// is written. It must be outside the mutable worktree so that a checkout,
 	// a branch switch or a cleanliness check never touches it.
@@ -279,6 +283,11 @@ func (s Spec) Validate() error {
 		}
 		if c.Env == "" && c.File == "" && len(c.Probe) == 0 && c.NotAfter.IsZero() {
 			problems = append(problems, fmt.Sprintf("credential[%d] (%s) declares nothing to check", i, c.ID))
+		}
+	}
+	for _, id := range s.QA.RequireGates {
+		if _, ok := LookupGate(id); !ok {
+			problems = append(problems, fmt.Sprintf("qa.requireGates names %q, which is not a catalog gate (%s)", id, joinGateIDs()))
 		}
 	}
 	if s.GitHub != nil && !strings.Contains(s.GitHub.Repo, "/") {

@@ -107,6 +107,12 @@ type CompletionEvent struct {
 	HumanActions []string `json:"humanActions,omitempty"`
 	// Failures name the tasks that exhausted their attempts.
 	Failures []string `json:"failures,omitempty"`
+	// QA is the packet's progression decision: which gates its risk class made
+	// mandatory, which have passing evidence for the revision in hand, and
+	// which do not. It is published whether or not it permitted progression,
+	// because a reader's first question about a completed run is what was
+	// actually proved about it.
+	QA ProgressionDecision `json:"qa"`
 }
 
 // WriteProgress publishes live progress atomically.
