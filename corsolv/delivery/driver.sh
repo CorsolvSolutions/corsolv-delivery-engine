@@ -937,6 +937,7 @@ stage_project() {
   # ledger and the forge — and never from what was planned. A package with no
   # merge recorded projects as whatever it actually reached, not as merged.
   build_facts > "$facts" || die 'assembling the projection facts'
+  build_controls || die 'assembling the run control ledger'
 
   local gen="$STATE/projector-gen"
   if [ ! -x "$gen" ]; then
@@ -1016,6 +1017,50 @@ emit_task_facts() {
   printf '      "worktreePath": %s,\n' "$(jq -Rn --arg v "$(rt_get "wt.$id")" '$v')"
   printf '      "gateLabel": %s\n' "$(jq -Rn --arg v "$id" '$v')"
   printf '    }'
+}
+
+# build_controls writes the run's control ledger — one row per control the
+# controller actually adjudicated, in the two-column shape projector-gen parses.
+#
+# The projection's completion gate is DERIVED from these rows and never from a
+# task's status, because "merged" says a pull request landed while these say the
+# exact head was tested by required CI, that the controller re-derived the result
+# itself before merging, and that the merge went through the repository's own
+# governance. A merge without them is publication without acceptance.
+#
+# The driver never wrote one, so every delivery run reached `project` and died
+# reading a file that had never existed — after all four packages had merged.
+#
+# It is derived from the runtime ledger rather than appended during publication,
+# so a RESUMED run produces the same ledger as an uninterrupted one. A run that
+# re-enters publish for an already-published package returns early and would
+# otherwise record nothing, and the projection would score verified work as
+# unverified. Every fact here is durable and was written when it was adjudicated:
+#
+#   ci.<id>         the workflow run id await_required_ci accepted on the exact head
+#   published.<id>  set only past `run_project_gates ... || die`, so the
+#                   controller's own re-run of the package's declared gates
+#                   passed; there is no path to this key without it
+#   merged.<id>     the commit `gh pr merge` produced on the authoritative branch
+#
+# A control with no durable fact behind it is omitted, never invented: the
+# projector reads an absent row as not-met, which is the answer that keeps an
+# unverified package from scoring as an accepted one.
+build_controls() {
+  local ledger="$EVIDENCE/controls.tsv" id v
+  printf 'control\tstatus\treason\n' > "$ledger"
+  for id in $(packages); do
+    v="$(rt_get "ci.$id")"
+    [ -n "$v" ] && printf '%s\tPASS\t%s\n' \
+      "$id required CI passed on the exact pull-request head" "run $v" >> "$ledger"
+    [ -n "$(rt_get "published.$id")" ] && printf '%s\tPASS\t%s\n' \
+      "$id independent assurance passed" \
+      "the controller re-ran the package's declared gates" >> "$ledger"
+    v="$(rt_get "merged.$id")"
+    [ -n "$v" ] && printf '%s\tPASS\t%s\n' \
+      "$id merged through repository governance" "$v" >> "$ledger"
+  done
+  say "control ledger: $(( $(wc -l < "$ledger") - 1 )) adjudicated control(s)"
 }
 
 package_status() {
