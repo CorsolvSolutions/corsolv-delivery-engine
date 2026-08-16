@@ -267,7 +267,28 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		},
 	}
 
-	work = unattended.Plan{RunID: runID}
+	// Risk classification — the packet's half of mandatory-gate selection.
+	//
+	// This packet authors no code and compiles nothing. Every line of code a
+	// managed delivery produces is written inside a WORKER's own packet, and is
+	// certified there: by the gates that package declared, re-run independently
+	// by the controller before it publishes, by required CI on the exact
+	// pull-request head, and by a governed merge — the three controls the run's
+	// own ledger records and the projection's completion gate is derived from.
+	// So no code-certifying gate applies to this packet, and Q0 requires none.
+	//
+	// Q0 rather than Q2 is a deliberate reading of what this packet IS, not a
+	// way around Q2's gates. The compiled run's every task invokes the declared
+	// driver and nothing else — TestCompiledArgvComesOnlyFromTheHostProfile
+	// holds that line — so it structurally cannot run a build, a test suite or
+	// a linter of its own to satisfy them. Declaring Q2 here would not make the
+	// delivery safer; it would make `Begin` refuse every delivery for want of
+	// evidence the packet is forbidden from producing, which is the same
+	// precedent guk-bpm-publication.plan.toml settled: classify by what the
+	// packet authors, not by what its product touches.
+	//
+	// Changing what this packet does is a change to this classification first.
+	work = unattended.Plan{RunID: runID, Risk: unattended.RiskQ0}
 	stage := func(id, title string, band unattended.Band, needs []string, mutates bool, timeout int, args ...string) unattended.Task {
 		return unattended.Task{
 			ID:             id,

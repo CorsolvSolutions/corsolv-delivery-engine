@@ -542,3 +542,47 @@ func publishStatusOf(p unattended.Plan, pkg string) string {
 	}
 	return ""
 }
+
+// The compiled run must classify its own risk, and must classify it as
+// something it can actually cover.
+//
+// QA-001 makes risk mandatory and derives the required gate set from it, and a
+// packet that requires a gate no task produces is refused at Begin — before
+// preflight, before the lock, before any work. So an unclassified plan and an
+// over-classified one fail the same way: the delivery never starts.
+//
+// This packet authors no code. Its every task invokes the declared driver, which
+// TestCompiledArgvComesOnlyFromTheHostProfile holds, so it cannot run a build, a
+// suite or a linter of its own to satisfy Q1/Q2 gates. Q0 is what it can cover
+// honestly; the code it publishes is certified inside each worker's own packet.
+func TestTheCompiledRunClassifiesItsRiskAsSomethingItCanCover(t *testing.T) {
+	host := testHost(t)
+	in := planIntent()
+	plan := validPlan()
+
+	spec, work, err := Compile(in, plan, host, "run-risk-test")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if !work.Risk.Valid() {
+		t.Fatalf("the compiled plan must declare a risk class, got %q", work.Risk)
+	}
+
+	// The binding assertion: every gate this classification makes mandatory must
+	// have a task that produces it. This is the check Begin performs, brought
+	// forward to the compiler that authors the packet.
+	produced := map[string]bool{}
+	for _, task := range work.Tasks {
+		if task.QAGate != "" {
+			produced[task.QAGate] = true
+		}
+	}
+	for _, id := range unattended.RequiredGates(spec.QA, work.Risk) {
+		if !produced[id] {
+			t.Errorf("risk %s requires gate %q and no compiled task produces it; "+
+				"either the classification is wrong or the run must declare a producer",
+				work.Risk, id)
+		}
+	}
+}
