@@ -46,6 +46,29 @@ unattended delivery survivable.
 The two `WORKER_RETRY` rows are both driver defects found by running rather than
 reading, and both are fixed. Neither would have been found by review.
 
+## Correction: the 17:10 recovery was not a recovery
+
+The row above reads as a success and was recorded as one. Re-reading the same
+run against the driver showed it was not: `dispatch` completed in 0s *because it
+did nothing*. Bead `r2-ghj` was still open, its worktree had survived the kill,
+and no worker existed — but the runtime ledger's `dispatched` timestamp was
+being read as "a worker exists and owns every open bead", so the stage returned
+immediately and never started one.
+
+`await` then polled that orphaned bead for its full 30 minutes and reported
+**success** when its deadline expired, because an expired deadline was treated
+as a survivable outcome rather than a failed wait. Publication refused on the
+missing `src/slugify.ts` — the right refusal, for the wrong stated reason, half
+an hour after the real event.
+
+So the `WORKER_FAILURE` row's reason is incomplete. The provider block is why no
+worker could have produced the artifact; it is not why no worker was started.
+Two defects were, and both are now fixed in `driver.sh`: resume re-derives
+worker liveness per package instead of trusting `dispatched`, and an expired
+await deadline fails the stage. `driver_recovery_test.go` holds the regression
+coverage, and every one of those tests fails against the driver as it stood
+during this run.
+
 ## Second pilot — Website Status Checker Pilot v2
 
 Project: `website-status-checker-pilot-v2`
