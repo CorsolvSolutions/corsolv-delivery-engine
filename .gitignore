@@ -76,3 +76,9 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Live PowerShell QA gate evidence. It is bound to the exact revision the gates
+# examined, so committing it would change that revision and leave a record that
+# certifies code it never saw. corsolv/powershell/gate-evidence.example.json is
+# the checked-in golden for the document's shape.
+corsolv/powershell/qa-gate-evidence.json

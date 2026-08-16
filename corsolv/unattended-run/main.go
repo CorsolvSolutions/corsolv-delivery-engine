@@ -228,8 +228,9 @@ func cmdRun(ctx context.Context, args []string) int {
 	}
 
 	// The delivery projection is published after the run, from the same queue
-	// the run drained, so it can never disagree with the journal beside it.
-	if _, perr := unattended.PublishDelivery(spec, session.Queue, session.Fence, time.Now()); perr != nil {
+	// the run drained and under the same progression decision the completion
+	// event carries, so it can never disagree with either.
+	if _, perr := unattended.PublishDelivery(spec, session.Queue, session.Fence, event.QA, time.Now()); perr != nil {
 		fmt.Fprintf(os.Stderr, "unattended-run: publishing the delivery projection: %v\n", perr)
 	}
 

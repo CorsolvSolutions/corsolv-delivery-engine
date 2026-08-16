@@ -79,6 +79,26 @@ type Task struct {
 	// the policy, which is almost always right.
 	MaxAttempts int `toml:"maxAttempts,omitempty" json:"maxAttempts,omitempty"`
 
+	// ResultPath names the file this task writes its structured controller
+	// result to, relative to the run's state directory. Declaring it is what
+	// makes a task SUPERVISED: its own statement of what happened becomes the
+	// verdict, and the exit status it leaves behind stops being consulted.
+	//
+	// The path is exported to the task as GC_UNATTENDED_RESULT_PATH, and the
+	// run deletes any previous copy before each attempt — a stale result read
+	// as this attempt's would be the same false-pass the contract exists to
+	// prevent, one attempt later.
+	ResultPath string `toml:"resultPath,omitempty" json:"resultPath,omitempty"`
+	// MaxResumes bounds how many times a resumable outcome — the task's own
+	// CONTINUE, or a harness turn cap — may re-offer this task. Zero uses
+	// DefaultMaxResumes.
+	//
+	// A resume is not a retry and is counted apart from MaxAttempts: nothing
+	// failed, so spending the failure budget on it would end a task that was
+	// making progress. The bound exists because "drive it again" with no limit
+	// is a run that never converges and never says so.
+	MaxResumes int `toml:"maxResumes,omitempty" json:"maxResumes,omitempty"`
+
 	// DeliveryStatus, when set, is the delivery-projection status this task's
 	// success establishes — one of the projector's canonical vocabulary.
 	//

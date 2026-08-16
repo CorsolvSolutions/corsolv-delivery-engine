@@ -48,6 +48,11 @@ type Progress struct {
 
 	Tasks    map[TaskState]int `json:"tasks"`
 	Attempts int               `json:"attempts"`
+	// Resumes counts the drives that ended resumably — a supervised task's own
+	// CONTINUE, or a harness turn cap. They are reported apart from attempts
+	// because they are not failures: a run that folded them together would say
+	// a healthy long-running agent had failed once per interruption.
+	Resumes int `json:"resumes"`
 	// Boundaries are the human actions this run already knows it cannot take.
 	Boundaries []string `json:"boundaries,omitempty"`
 }
@@ -103,6 +108,8 @@ type CompletionEvent struct {
 
 	Tasks    map[TaskState]int `json:"tasks"`
 	Attempts int               `json:"attempts"`
+	// Resumes counts the drives that ended resumably. See Progress.Resumes.
+	Resumes int `json:"resumes"`
 	// HumanActions are exactly what a person must do next, in order.
 	HumanActions []string `json:"humanActions,omitempty"`
 	// Failures name the tasks that exhausted their attempts.

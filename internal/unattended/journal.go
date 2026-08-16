@@ -28,8 +28,13 @@ const (
 	RecordTaskFailed    RecordKind = "task-failed"
 	RecordTaskHeld      RecordKind = "task-held"
 	RecordTaskRetry     RecordKind = "task-retry-scheduled"
-	RecordGateEvidence  RecordKind = "gate-evidence"
-	RecordRunFinished   RecordKind = "run-finished"
+	// RecordTaskResumed records a resumable outcome — the task's own CONTINUE,
+	// or a harness turn cap. It is a kind of its own rather than a retry
+	// because nothing failed, and a reader who cannot tell an interruption from
+	// a failure cannot tell a healthy long-running task from a flaky one.
+	RecordTaskResumed  RecordKind = "task-resumed"
+	RecordGateEvidence RecordKind = "gate-evidence"
+	RecordRunFinished  RecordKind = "run-finished"
 )
 
 // Record is one durable fact about a run.
@@ -212,6 +217,10 @@ type ResumeState struct {
 	// retry budget rather than restarting it — the alternative is a crash loop
 	// that retries forever, one crash at a time.
 	Attempts map[string]int
+	// Resumes counts durable resumable outcomes per task, for the same reason
+	// and against the same failure: a run that forgot them on restart would get
+	// a fresh resume budget every crash and could drive one task forever.
+	Resumes map[string]int
 	// Interrupted names tasks that started and never reached a terminal record.
 	// They are re-offered, and the interruption is recorded rather than erased.
 	Interrupted map[string]bool
@@ -245,6 +254,7 @@ func Replay(records []Record, runID string) ResumeState {
 	st := ResumeState{
 		Succeeded:   map[string]bool{},
 		Attempts:    map[string]int{},
+		Resumes:     map[string]int{},
 		Interrupted: map[string]bool{},
 		Gates:       map[string]GateEvidence{},
 	}
@@ -262,6 +272,16 @@ func Replay(records []Record, runID string) ResumeState {
 		case RecordTaskSucceeded:
 			st.Succeeded[r.TaskID] = true
 			delete(st.Interrupted, r.TaskID)
+		case RecordTaskResumed:
+			// A resume did not spend an attempt — the queue never recorded one
+			// — so the task-started record that preceded it must not be counted
+			// as though it had. Without this correction a long supervised task
+			// arrives at its resume looking like a task that has already failed
+			// half a dozen times, and is refused a retry it never used.
+			st.Resumes[r.TaskID]++
+			if st.Attempts[r.TaskID] > 0 {
+				st.Attempts[r.TaskID]--
+			}
 		case RecordTaskFailed, RecordTaskHeld:
 			delete(st.Interrupted, r.TaskID)
 		case RecordGateEvidence:

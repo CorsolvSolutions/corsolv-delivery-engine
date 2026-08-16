@@ -50,10 +50,36 @@ type QueuedTask struct {
 	// Interrupted records that a previous run started this task and did not
 	// finish it. The attempt is preserved rather than erased.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Resumes counts the resumable outcomes — the task's own CONTINUE, or a
+	// harness turn cap — this task has PRODUCED. The last one may be the one
+	// that exceeded the budget and was therefore not acted on, so a task held
+	// for not converging carries one more resume than its budget allowed.
+	//
+	// It is counted apart from Attempts because nothing failed. Folding a turn
+	// cap into the retry budget is what made a long agent job look like a
+	// flaky command: three interruptions and the task was "exhausted" without
+	// anything having gone wrong.
+	Resumes int `json:"resumes,omitempty"`
 }
 
 // AttemptCount is how many attempts this task has consumed.
 func (t *QueuedTask) AttemptCount() int { return len(t.Attempts) }
+
+// DefaultMaxResumes bounds resumable outcomes for a task that declares no bound
+// of its own.
+//
+// It is generous because a turn cap is ordinary operation for a supervised
+// agent rather than a symptom, and it is finite because a run that drives one
+// task forever is indistinguishable from a hung one.
+const DefaultMaxResumes = 20
+
+// resumeBudget is how many resumable outcomes this task may consume.
+func (t *QueuedTask) resumeBudget() int {
+	if t.Task.MaxResumes > 0 {
+		return t.Task.MaxResumes
+	}
+	return DefaultMaxResumes
+}
 
 // budget is the attempt allowance for a task, from its own override or from the
 // policy for the class of failure it last hit.
@@ -128,6 +154,12 @@ func (q *Queue) Restore(st ResumeState) {
 					Reason: "attempt recorded by an earlier run of this journal",
 				})
 			}
+		}
+		// The resume budget is durable for the same reason the retry budget is:
+		// a run that forgot it on restart would get a fresh one every crash and
+		// could drive one task forever, one crash at a time.
+		if n := st.Resumes[qt.Task.ID]; n > qt.Resumes {
+			qt.Resumes = n
 		}
 		if st.Interrupted[qt.Task.ID] {
 			qt.Interrupted = true
@@ -221,6 +253,19 @@ func (q *Queue) RecordAttempt(qt *QueuedTask, attempt TaskAttempt) (retryIn time
 	}
 	qt.State = TaskPending
 	return PolicyFor(attempt.Class).Backoff(len(qt.Attempts)), true
+}
+
+// RecordResume folds a resumable outcome into the queue and reports whether the
+// task may be driven again.
+//
+// The task stays pending either way; what changes is whether the run is still
+// entitled to re-offer it. A task that has spent its resume budget has not
+// failed at anything — it simply has not converged — so exhausting the budget
+// is left to the caller to hold rather than being turned into a failure here.
+func (q *Queue) RecordResume(qt *QueuedTask) (used, budget int, mayResume bool) {
+	qt.Resumes++
+	qt.State = TaskPending
+	return qt.Resumes, qt.resumeBudget(), qt.Resumes <= qt.resumeBudget()
 }
 
 // Hold marks a task un-attemptable for a stated reason.
