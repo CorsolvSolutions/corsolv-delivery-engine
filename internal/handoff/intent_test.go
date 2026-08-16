@@ -57,7 +57,7 @@ func TestIntentCarriesNoExecutableContent(t *testing.T) {
 			return
 		}
 		switch rt.Kind() {
-		case reflect.Ptr, reflect.Slice, reflect.Array:
+		case reflect.Pointer, reflect.Slice, reflect.Array:
 			walk(rt.Elem(), path, depth+1)
 			return
 		case reflect.Map:
