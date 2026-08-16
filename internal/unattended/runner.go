@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -45,6 +46,15 @@ type Runner struct {
 	// Now is the clock, injectable for the same reason.
 	Now func() time.Time
 
+	// Observe produces one attempt's raw outcome: the process result, plus the
+	// structured controller result when the task declared one.
+	//
+	// It is injectable so the controller-safety regressions drive the real
+	// decision path — the same runOne, the same queue, the same journal —
+	// against exact outcomes, rather than against a shell script's approximation
+	// of them. Nil uses the real execution.
+	Observe func(ctx context.Context, t Task) Execution
+
 	// OnProgress is called after every state change, before the heartbeat is
 	// written, so a caller can mirror progress somewhere else.
 	OnProgress func(Progress)
@@ -53,7 +63,12 @@ type Runner struct {
 	lastMilestone string
 	stopReason    string
 	stopClass     FailureClass
-	attempts      int
+	// stopOutcome overrides how a stop is reported. A stop is failure by
+	// default; a stop taken because a person must act is not, and reporting it
+	// as one trains people to ignore the report.
+	stopOutcome RunOutcome
+	attempts    int
+	resumes     int
 }
 
 func (r *Runner) now() time.Time {
@@ -157,33 +172,54 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 		Kind: RecordTaskStarted, TaskID: qt.Task.ID, Attempt: attemptNumber,
 		Detail: strings.Join(qt.Task.Argv, " "),
 	})
-	r.attempts++
 
-	out, ok, err := r.execute(ctx, qt.Task)
+	exec := r.observe(ctx, qt.Task)
 	elapsed := r.now().Sub(started)
 
-	if ok && err == nil {
+	// THE PRECEDENCE RULE. What the task SAID happened decides what happens
+	// next; the exit status it left behind is consulted only when the task
+	// promised nothing. See controller.go for the four pilot failures that made
+	// the residual exit status untrustworthy in both directions.
+	verdict := InterpretExecution(exec, r.Spec.Classification)
+	text := exec.text()
+
+	// A drive that ends resumably is counted as a resume and not as an attempt.
+	// Conflating the two is the reported defect in miniature: a run that drove
+	// a supervised agent four times through two turn caps would say it made
+	// four attempts, which reads as three things having gone wrong.
+	if !verdict.Disposition.Resumable() {
+		r.attempts++
+	}
+
+	switch verdict.Disposition {
+	case DispositionSucceeded:
 		r.Journal.Append(Record{ //nolint:errcheck
 			Kind: RecordTaskSucceeded, TaskID: qt.Task.ID, Attempt: attemptNumber,
-			DurationMS: elapsed.Milliseconds(),
+			DurationMS: elapsed.Milliseconds(), Detail: verdict.Reason,
 		})
 		r.Queue.RecordAttempt(qt, TaskAttempt{
 			StartedAt: started, Duration: elapsed.Round(time.Millisecond).String(), Succeeded: true,
 		})
 		r.lastMilestone = qt.Task.ID + " succeeded"
-		r.recordGateEvidence(qt, GatePass, "")
+		r.recordGateEvidence(qt, verdict.GateResult, "")
 		if qt.Task.Mutates {
 			r.recordAdvance(qt)
 		}
 		r.publish("running", nil)
 		return false
+
+	case DispositionContinue, DispositionResume:
+		return r.driveAgain(qt, verdict, elapsed)
+
+	case DispositionHumanBlocked:
+		return r.stopOnHumanBoundary(qt, verdict, attemptNumber, text)
 	}
 
-	text := out
-	if err != nil {
-		text = err.Error() + "\n" + out
-	}
-	class := Classify(text, r.Spec.Classification)
+	// Retry and fail-safe both travel the ordinary failure path. They differ in
+	// the class they carry and in the gate verdict they record — a fail-safe
+	// records an absence of knowledge rather than a failure of the code — and
+	// not in how the queue treats the attempt.
+	class := verdict.Class
 	// The journal keeps one line per record so a truncated tail stays
 	// recoverable, which means a failure's actual output has nowhere to go in
 	// it. Without this the run says a task failed and cannot say why — and
@@ -192,12 +228,12 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 	outputPath := r.captureFailure(qt.Task.ID, attemptNumber, text)
 	delay, willRetry := r.Queue.RecordAttempt(qt, TaskAttempt{
 		StartedAt: started, Duration: elapsed.Round(time.Millisecond).String(),
-		Succeeded: false, Class: class.Class, Reason: class.Reason, Output: truncate(Redact(text)),
+		Succeeded: false, Class: class, Reason: verdict.Reason, Output: truncate(Redact(text)),
 	})
 	r.Journal.Append(Record{ //nolint:errcheck
 		Kind: RecordTaskFailed, TaskID: qt.Task.ID, Attempt: attemptNumber,
-		Class: class.Class, Outcome: string(qt.State), DurationMS: elapsed.Milliseconds(),
-		Detail: class.Reason + " | " + firstLine(Redact(text)) + " | output: " + outputPath,
+		Class: class, Outcome: string(qt.State), DurationMS: elapsed.Milliseconds(),
+		Detail: verdict.Reason + " | " + firstLine(Redact(text)) + " | output: " + outputPath,
 	})
 
 	// A gate reaches a verdict when the queue is finished with it, not on every
@@ -205,21 +241,21 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 	// gate, and recording an interim failure would make a retry pointless: the
 	// evidence ledger keeps the worse verdict for a revision on purpose.
 	if qt.State == TaskFailed {
-		r.recordGateEvidence(qt, GateFail, class.Reason+" | "+firstLine(Redact(text))+" | output: "+outputPath)
+		r.recordGateEvidence(qt, verdict.GateResult, verdict.Reason+" | "+firstLine(Redact(text))+" | output: "+outputPath)
 	}
 
-	policy := PolicyFor(class.Class)
+	policy := PolicyFor(class)
 	if policy.StopsRun {
 		r.stopReason = fmt.Sprintf("%s failed with a %s failure, which ends the run: %s",
-			qt.Task.ID, class.Class, policy.Why)
-		r.stopClass = class.Class
+			qt.Task.ID, class, policy.Why)
+		r.stopClass = class
 		r.publish("stopping", nil)
 		return true
 	}
 	if willRetry {
 		r.Journal.Append(Record{ //nolint:errcheck
 			Kind: RecordTaskRetry, TaskID: qt.Task.ID, Attempt: attemptNumber,
-			Class: class.Class, Detail: "retrying in " + delay.String(),
+			Class: class, Detail: "retrying in " + delay.String(),
 		})
 		r.publish("retrying", qt)
 		r.sleep(ctx, delay)
@@ -227,6 +263,116 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 	}
 	r.publish("running", nil)
 	return false
+}
+
+// driveAgain re-offers a task that reported it has more to do, or that a
+// harness cut off at its turn cap.
+//
+// Neither is a failure, so neither spends the task's retry budget. Both are
+// bounded, because "drive it again" with no limit is a run that never converges
+// and never says so — and a task that exhausts the bound is HELD rather than
+// failed: nothing about it was proved wrong, it simply did not finish, and what
+// to do about that is a person's call.
+func (r *Runner) driveAgain(qt *QueuedTask, verdict ControllerVerdict, elapsed time.Duration) (stop bool) {
+	used, budget, mayResume := r.Queue.RecordResume(qt)
+	r.resumes++
+	r.Journal.Append(Record{ //nolint:errcheck
+		Kind: RecordTaskResumed, TaskID: qt.Task.ID, Attempt: qt.AttemptCount(),
+		Outcome: string(verdict.Disposition), DurationMS: elapsed.Milliseconds(),
+		Detail: fmt.Sprintf("%s (resume %d of %d)", verdict.Reason, used, budget),
+	})
+	if !mayResume {
+		reason := fmt.Sprintf("did not converge within its %d resume(s): %s", budget, verdict.Reason)
+		r.Queue.Hold(qt, reason)
+		r.Journal.Append(Record{ //nolint:errcheck
+			Kind: RecordTaskHeld, TaskID: qt.Task.ID, Outcome: string(TaskHeld), Detail: reason,
+		})
+		r.recordGateEvidence(qt, GateError, reason)
+		r.publish("running", nil)
+		return false
+	}
+	r.lastMilestone = fmt.Sprintf("%s %s (resume %d of %d)", qt.Task.ID, verdict.Disposition, used, budget)
+	// A resumable outcome is not a failure, so it carries no backoff. What
+	// bounds it is the resume budget above, and the cancellation check at the
+	// top of the run loop.
+	r.publish("resuming", qt)
+	return false
+}
+
+// stopOnHumanBoundary ends the run on a limit only a person can lift.
+//
+// The stop is SAFE rather than failed: the task is held with the reason
+// attached, the run's evidence is complete, and the completion event says
+// whether an authentication or a judgement is wanted. Those two are reported
+// apart because the work they ask of a person is not comparable — one is
+// usually seconds, the other is a conversation.
+func (r *Runner) stopOnHumanBoundary(qt *QueuedTask, verdict ControllerVerdict, attemptNumber int, text string) (stop bool) {
+	outputPath := r.captureFailure(qt.Task.ID, attemptNumber, text)
+	r.Queue.Hold(qt, verdict.Reason)
+	r.Journal.Append(Record{ //nolint:errcheck
+		Kind: RecordTaskHeld, TaskID: qt.Task.ID, Attempt: attemptNumber,
+		Class: verdict.Class, Outcome: string(TaskHeld),
+		Detail: verdict.Reason + " | output: " + outputPath,
+	})
+	r.recordGateEvidence(qt, verdict.GateResult, verdict.Reason+" | output: "+outputPath)
+
+	r.stopReason = fmt.Sprintf("%s reached a boundary this run may not cross: %s", qt.Task.ID, verdict.Reason)
+	r.stopClass = verdict.Class
+	if verdict.Class == FailureAuth {
+		r.stopOutcome = RunAwaitingAuth
+	} else {
+		r.stopOutcome = RunBlockedHuman
+	}
+	r.publish("stopping", nil)
+	return true
+}
+
+// observe runs one attempt and reads whatever the task said about it.
+func (r *Runner) observe(ctx context.Context, t Task) Execution {
+	if r.Observe != nil {
+		return r.Observe(ctx, t)
+	}
+	e := Execution{DeclaredResult: t.ResultPath != ""}
+	resultPath := r.resultPath(t)
+	if e.DeclaredResult {
+		// A previous attempt's result must never be read as this one's. It is
+		// removed before the command runs rather than after it, so a task that
+		// dies without writing leaves an absence — which fails safe — instead
+		// of the last attempt's answer, which would not.
+		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+			e.ResultErr = fmt.Errorf("%w: clearing %s before the attempt: %w",
+				ErrControllerResultUnusable, resultPath, err)
+			return e
+		}
+	}
+
+	out, ok, err := r.execute(ctx, t, resultPath)
+	e.Output, e.ExitedZero, e.Err = out, ok, err
+	if !e.DeclaredResult {
+		return e
+	}
+	res, rerr := ReadControllerResult(resultPath)
+	if rerr != nil {
+		e.ResultErr = rerr
+		return e
+	}
+	e.Result = &res
+	return e
+}
+
+// resultPath resolves where a supervised task's structured result lives.
+//
+// It is anchored in the run's state directory rather than in the worktree,
+// because the state directory is the one place a run owns that a checkout, a
+// branch switch or a cleanliness check never touches.
+func (r *Runner) resultPath(t Task) string {
+	if t.ResultPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(t.ResultPath) {
+		return t.ResultPath
+	}
+	return stateDirPath(r.Spec.StateDir, t.ResultPath)
 }
 
 // recordGateEvidence folds a gate task's mechanical verdict into the run's
@@ -239,6 +385,14 @@ func (r *Runner) runOne(ctx context.Context, qt *QueuedTask) (stop bool) {
 // code it never saw.
 func (r *Runner) recordGateEvidence(qt *QueuedTask, result GateResult, detail string) {
 	if qt.Task.QAGate == "" {
+		return
+	}
+	// A verdict with no result is not a verdict. Recording one would put an
+	// unrecognized value in the ledger, and GateResult.Passed() is an equality
+	// against pass precisely so that such a value blocks — but a ledger entry
+	// that blocks for the wrong reason is worse than no entry, which blocks for
+	// the right one.
+	if result == "" {
 		return
 	}
 	ev := GateEvidence{
@@ -312,7 +466,12 @@ func (r *Runner) recordAdvance(qt *QueuedTask) {
 }
 
 // execute runs a task's command, bounded and with output captured.
-func (r *Runner) execute(ctx context.Context, t Task) (out string, ok bool, err error) {
+//
+// resultPath, when non-empty, is exported so a supervised task knows where to
+// state what happened to it. It is the only channel by which the task learns
+// the path: repeating it inside the command line would let the plan and the
+// runner disagree about which file the verdict is read from.
+func (r *Runner) execute(ctx context.Context, t Task, resultPath string) (out string, ok bool, err error) {
 	timeout := timeoutOr(t.TimeoutSeconds, defaultTaskTimeout)
 	dir := t.Dir
 	if dir == "" {
@@ -335,6 +494,12 @@ func (r *Runner) execute(ctx context.Context, t Task) (out string, ok bool, err 
 		"GC_UNATTENDED_TASK_ID="+t.ID,
 		"GC_UNATTENDED_STATE_DIR="+r.Spec.StateDir,
 	)
+	if resultPath != "" {
+		if err := osMkdirAll(filepath.Dir(resultPath)); err != nil {
+			return "", false, err
+		}
+		cmd.Env = append(cmd.Env, "GC_UNATTENDED_RESULT_PATH="+resultPath)
+	}
 	raw, runErr := cmd.CombinedOutput()
 	out = strings.TrimSpace(string(raw))
 
@@ -427,7 +592,13 @@ func (r *Runner) finish() CompletionEvent {
 	reason := "every declared task succeeded"
 	switch {
 	case r.stopReason != "":
+		// A stop is a failure by default and is NOT one when the run stopped
+		// because a person must act. Reporting a safe stop on an authentication
+		// boundary as a failed run is how a report stops being read.
 		outcome = RunFailed
+		if r.stopOutcome != "" {
+			outcome = r.stopOutcome
+		}
 		reason = r.stopReason
 	case len(failures) > 0:
 		outcome = RunFailed
@@ -459,6 +630,7 @@ func (r *Runner) finish() CompletionEvent {
 		Head:         r.Fence.Head,
 		Tasks:        counts,
 		Attempts:     r.attempts,
+		Resumes:      r.resumes,
 		HumanActions: humanActions,
 		Failures:     failures,
 		QA:           qa,
@@ -497,6 +669,7 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 		Head:          r.Fence.Head,
 		Tasks:         r.Queue.Counts(),
 		Attempts:      r.attempts,
+		Resumes:       r.resumes,
 	}
 	if r.Lock != nil {
 		p.WriterOwner = r.Lock.Owner().RunID
@@ -538,7 +711,7 @@ func (r *Runner) publish(stage string, current *QueuedTask) {
 	// that needs it. Refreshing it alongside the heartbeat also means the
 	// dashboard sees delivery state *during* a long run instead of only once it
 	// is over, which is the more useful behavior anyway.
-	if _, err := PublishDelivery(r.Spec, r.Queue, r.Fence, now); err != nil {
+	if _, err := PublishDelivery(r.Spec, r.Queue, r.Fence, r.QADecision(), now); err != nil {
 		r.Journal.Append(Record{ //nolint:errcheck
 			Kind: RecordPreflight, Outcome: "delivery-projection-failed", Detail: err.Error(),
 		})

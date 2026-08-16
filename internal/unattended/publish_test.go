@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// qaPermits is the progression decision a Q0 packet gets: its risk class makes
+// no gate mandatory, so nothing is refused. These tests are about what the
+// projection says the run did; the tests about what QA lets it claim are in
+// projection_consistency_test.go.
+func qaPermits() ProgressionDecision {
+	return EvaluateProgression(QAPolicy{}, RiskQ0, "abc123def456", nil)
+}
+
 func publishFixture(t *testing.T) (Spec, Plan, *Queue) {
 	t.Helper()
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -40,7 +48,7 @@ func TestPublishRendersTheProjectorSchema(t *testing.T) {
 	ship, _ := q.Task("ship")
 	q.RecordAttempt(ship, TaskAttempt{Succeeded: true, StartedAt: time.Now().UTC(), Duration: "2s"})
 
-	data, err := PublishDelivery(spec, q, &Fence{Branch: "main", Head: "abc123def456"}, time.Now())
+	data, err := PublishDelivery(spec, q, &Fence{Branch: "main", Head: "abc123def456"}, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -62,7 +70,7 @@ func TestPublishOmitsInternalMachinery(t *testing.T) {
 	internal, _ := q.Task("internal")
 	q.RecordAttempt(internal, TaskAttempt{Succeeded: true, StartedAt: time.Now().UTC(), Duration: "1s"})
 
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -73,7 +81,7 @@ func TestPublishOmitsInternalMachinery(t *testing.T) {
 
 func TestPublishNeverClaimsADeliveryStatusTheWorkDidNotEarn(t *testing.T) {
 	spec, _, q := publishFixture(t)
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -94,7 +102,7 @@ func TestPublishRefusesAStatusOutsideTheConsumerVocabulary(t *testing.T) {
 	plan.Tasks[0].DeliveryStatus = "mostly-merged"
 	q := NewQueue(plan, nil)
 
-	if _, err := PublishDelivery(spec, q, nil, time.Now()); err == nil {
+	if _, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now()); err == nil {
 		t.Fatal("an invented delivery status must be refused, not rendered")
 	}
 }
@@ -104,7 +112,7 @@ func TestPublishProjectsAHeldTaskAsAwaitingHuman(t *testing.T) {
 	ship, _ := q.Task("ship")
 	q.Hold(ship, "a human reviewer must approve the pull request")
 
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -124,7 +132,7 @@ func TestPublishRecordsRealAttemptTimings(t *testing.T) {
 	q.RecordAttempt(ship, TaskAttempt{Succeeded: false, StartedAt: when, Duration: "5s", Class: FailureRetryable, Reason: "a transient failure"})
 	q.RecordAttempt(ship, TaskAttempt{Succeeded: true, StartedAt: when.Add(time.Minute), Duration: "3s"})
 
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -145,7 +153,7 @@ func TestPublishDoesNotMeetAGateThatWasNeverDeclared(t *testing.T) {
 	ship, _ := q.Task("ship")
 	q.RecordAttempt(ship, TaskAttempt{Succeeded: true, StartedAt: time.Now().UTC(), Duration: "1s"})
 
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}
@@ -159,7 +167,7 @@ func TestPublishWithNoPathStillRenders(t *testing.T) {
 	// for evidence, rather than silently doing nothing.
 	spec, _, q := publishFixture(t)
 	spec.PublishPath = ""
-	data, err := PublishDelivery(spec, q, nil, time.Now())
+	data, err := PublishDelivery(spec, q, nil, qaPermits(), time.Now())
 	if err != nil {
 		t.Fatalf("PublishDelivery: %v", err)
 	}

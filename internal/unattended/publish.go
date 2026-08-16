@@ -19,7 +19,12 @@ import (
 // Only tasks that declare a delivery status appear. Most of a run is internal
 // machinery — a lint pass, an evidence sweep — and projecting every green
 // command as delivery progress would overstate what actually shipped.
-func PublishDelivery(spec Spec, q *Queue, fence *Fence, now time.Time) ([]byte, error) {
+//
+// The progression decision is a parameter rather than something derived here,
+// and it is not optional. A task's commands exiting zero proves its commands
+// exited zero; it does not prove the packet may progress, and the projection is
+// the document a reader treats as though it did. See applyProgressionCeiling.
+func PublishDelivery(spec Spec, q *Queue, fence *Fence, qa ProgressionDecision, now time.Time) ([]byte, error) {
 	state := projector.NewState(spec.ProjectID)
 	state.Project.LastUpdateTimestamp = now.UTC()
 	state.Project.AuthoritativeRef = spec.Ownership.ExpectedOrigin
@@ -54,6 +59,11 @@ func PublishDelivery(spec Spec, q *Queue, fence *Fence, now time.Time) ([]byte, 
 	}
 
 	state.RecomputeBlockers()
+	// The QA decision has the last word, after dependency recomputation rather
+	// than before it: RecomputeBlockers promotes and demotes statuses of its
+	// own accord, and a ceiling applied first would be silently lifted again.
+	applyProgressionCeiling(state, qa)
+
 	data, err := projector.Render(state)
 	if err != nil {
 		return nil, fmt.Errorf("rendering delivery projection: %w", err)
@@ -64,6 +74,58 @@ func PublishDelivery(spec Spec, q *Queue, fence *Fence, now time.Time) ([]byte, 
 		}
 	}
 	return data, nil
+}
+
+// terminalDeliveryStatuses are the statuses the consumer reads as "this is
+// done". They are the ones the progression ceiling refuses.
+//
+// It duplicates the consumer's own isTerminalStatus deliberately: that function
+// is unexported and belongs to the projector's blocker arithmetic, and taking
+// a dependency on it would couple a QA refusal to a rule that exists for a
+// different purpose and may reasonably change.
+var terminalDeliveryStatuses = map[projector.TaskStatus]bool{
+	projector.StatusMerged:      true,
+	projector.StatusDeployedUAT: true,
+	projector.StatusAppliedUAT:  true,
+	projector.StatusVerified:    true,
+	projector.StatusComplete:    true,
+}
+
+// applyProgressionCeiling refuses to project completion the packet's mandatory
+// gates do not license.
+//
+// THE DEFECT IT EXISTS FOR. A task's declared delivery status was projected the
+// moment its command exited zero, and its completion gate went to met with it —
+// so a packet whose mandatory QA gate had failed, or had never run, or had run
+// against different code, still rendered `status: complete` and
+// `completionGateStatus: met` in the document the dashboard scores 100% from.
+// The run's own completion event refused that packet; the projection beside it
+// said it had shipped. Two accounts of the same run, and the reassuring one was
+// the one a person reads.
+//
+// The ceiling is a ceiling and not a rewrite: it can only ever lower a claim.
+// A permitted packet is left exactly as the run described it.
+func applyProgressionCeiling(state *projector.State, qa ProgressionDecision) {
+	if qa.Allowed {
+		return
+	}
+	reason := "the packet may not progress: " + qa.Reason()
+	for _, t := range state.Tasks {
+		// No task claims a met completion gate while the packet is refused.
+		// The gate the consumer reserves 100% for is a claim about the change
+		// as a whole, and this run has not earned it.
+		if t.CompletionGateStatus == projector.GateMet {
+			t.CompletionGateStatus = projector.GateNotMet
+		}
+		if !terminalDeliveryStatuses[t.Status] {
+			continue
+		}
+		t.Status = projector.StatusBlocked
+		t.Blocker = reason
+		if t.NextPhysicalAction == "" {
+			t.NextPhysicalAction = reason
+		}
+	}
 }
 
 // projectTask maps one queued task onto the consumer's task shape.

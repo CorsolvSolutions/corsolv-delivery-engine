@@ -1,0 +1,147 @@
+{
+  "$comment": [
+    "The controller-result contract, in one document, read mechanically by both",
+    "sides of it.",
+    "",
+    "The consumer is Go: internal/unattended/controller.go decides what a run",
+    "does next from a supervised task's own statement of what happened. The",
+    "producer is whatever writes that statement, and on the Windows host this",
+    "engine's pilot runs on that is PowerShell:",
+    "corsolv/powershell/CorsolvControllerResult.psm1.",
+    "",
+    "Two implementations of one wire format drift. This file is what stops",
+    "them: internal/unattended/controller_contract_test.go asserts the Go",
+    "vocabulary and adjudication match it, and",
+    "corsolv/powershell/CorsolvControllerResult.Tests.ps1 asserts the module",
+    "emits and validates exactly these documents. Neither side is the",
+    "authority; this file is, and both are checked against it."
+  ],
+  "version": 1,
+  "resultPathEnvVar": "GC_UNATTENDED_RESULT_PATH",
+  "states": [
+    "COMPLETE",
+    "CONTINUE",
+    "FAILED",
+    "HUMAN_BLOCKED"
+  ],
+  "terminalReasons": {
+    "resumable": [
+      "max_turns",
+      "error_max_turns"
+    ],
+    "retryable": [
+      "network_timeout",
+      "rate_limited"
+    ],
+    "humanBoundary": [
+      "authentication_failed",
+      "permission_denied"
+    ]
+  },
+  "fixtures": [
+    {
+      "name": "continue",
+      "why": "the agent has more to do and says so; the run drives it again",
+      "document": { "state": "CONTINUE", "num_turns": 4 },
+      "exitedZero": true,
+      "expectDisposition": "continue"
+    },
+    {
+      "name": "continue-after-a-nonzero-exit",
+      "why": "a wrapper's residual exit status must not override the statement",
+      "document": { "state": "CONTINUE" },
+      "exitedZero": false,
+      "expectDisposition": "continue"
+    },
+    {
+      "name": "complete",
+      "why": "the task finished the work it was given",
+      "document": { "state": "COMPLETE", "num_turns": 11 },
+      "exitedZero": true,
+      "expectDisposition": "succeeded"
+    },
+    {
+      "name": "complete-after-a-nonzero-exit",
+      "why": "the pilot's gc init: a non-zero exit for a condition that was correct",
+      "document": { "state": "COMPLETE" },
+      "exitedZero": false,
+      "expectDisposition": "succeeded"
+    },
+    {
+      "name": "max-turns",
+      "why": "the harness stopped the agent at its turn cap; the work is unfinished",
+      "document": { "state": "FAILED", "terminal_reason": "max_turns", "is_error": true },
+      "exitedZero": false,
+      "expectDisposition": "resume"
+    },
+    {
+      "name": "error-max-turns",
+      "why": "the same event under the name an agent runtime reports it by",
+      "document": { "state": "FAILED", "subtype": "error_max_turns", "is_error": true },
+      "exitedZero": false,
+      "expectDisposition": "resume"
+    },
+    {
+      "name": "max-turns-while-exiting-zero",
+      "why": "a wrapper that swallows the cap and exits clean must not read as success",
+      "document": { "state": "COMPLETE", "terminal_reason": "max_turns" },
+      "exitedZero": true,
+      "expectDisposition": "resume"
+    },
+    {
+      "name": "network-timeout",
+      "why": "a bounded transport failure retries under the external-service policy",
+      "document": { "state": "FAILED", "terminal_reason": "network_timeout" },
+      "exitedZero": false,
+      "expectDisposition": "retry"
+    },
+    {
+      "name": "rate-limited",
+      "why": "a third party refusing for load recovers on its own",
+      "document": { "state": "FAILED", "terminal_reason": "rate_limited" },
+      "exitedZero": false,
+      "expectDisposition": "retry"
+    },
+    {
+      "name": "authentication-failed",
+      "why": "a credential does not become valid by being asked again",
+      "document": { "state": "FAILED", "terminal_reason": "authentication_failed" },
+      "exitedZero": false,
+      "expectDisposition": "human-blocked"
+    },
+    {
+      "name": "permission-denied",
+      "why": "the runtime refused the action itself; only a person changes the answer",
+      "document": { "state": "FAILED", "terminal_reason": "permission_denied" },
+      "exitedZero": false,
+      "expectDisposition": "human-blocked"
+    },
+    {
+      "name": "human-blocked",
+      "why": "the pilot's stale machine-wide supervisor: its owner's decision, not this run's",
+      "document": {
+        "state": "HUMAN_BLOCKED",
+        "detail": "replacing a machine-wide supervisor is its owner's decision"
+      },
+      "exitedZero": true,
+      "expectDisposition": "human-blocked"
+    },
+    {
+      "name": "human-blocked-while-exiting-zero",
+      "why": "the clean exit is a residue; the block is the statement",
+      "document": { "state": "HUMAN_BLOCKED" },
+      "exitedZero": true,
+      "expectDisposition": "human-blocked"
+    }
+  ],
+  "invalid": [
+    { "name": "empty", "raw": "" },
+    { "name": "whitespace-only", "raw": "   \n\t " },
+    { "name": "truncated-json", "raw": "{\"state\":\"COMP" },
+    { "name": "not-an-object", "raw": "[\"COMPLETE\"]" },
+    { "name": "no-state", "raw": "{\"terminal_reason\":\"max_turns\"}" },
+    { "name": "empty-state", "raw": "{\"state\":\"\"}" },
+    { "name": "invented-state", "raw": "{\"state\":\"MOSTLY_DONE\"}" },
+    { "name": "state-is-not-a-string", "raw": "{\"state\":7}" }
+  ]
+}

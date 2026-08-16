@@ -472,7 +472,11 @@ func executeRun(ctx context.Context, host handoff.HostProfile, planner handoff.P
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "delivery: %v\n", runErr)
 	}
-	if _, perr := unattended.PublishDelivery(spec, session.Queue, session.Fence, time.Now()); perr != nil {
+	// The projection is published under the same progression decision the
+	// completion event carries. A projection that could claim more than the
+	// run's own gates licensed would be the reassuring account of two, and the
+	// one a person reads.
+	if _, perr := unattended.PublishDelivery(spec, session.Queue, session.Fence, event.QA, time.Now()); perr != nil {
 		fmt.Fprintf(os.Stderr, "delivery: publishing the run projection: %v\n", perr)
 	}
 
