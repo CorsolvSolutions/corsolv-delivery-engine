@@ -127,6 +127,35 @@ function Get-CertifiedRevision {
     return $head.Trim()
 }
 
+function Get-RepositoryRelativePath {
+    <#
+    .SYNOPSIS
+        A path as a reader would type it, from the repository root.
+    .DESCRIPTION
+        Reproduce instructions carrying this host's absolute paths are
+        instructions only this host can follow, and the evidence they belong to
+        outlives the host. Falls back to the path as given when the location is
+        not inside a repository.
+    .PARAMETER Target
+        The path to express.
+    .OUTPUTS
+        System.String
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string] $Target)
+
+    $prefix = (& git -C $Target rev-parse --show-prefix 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        return $Target
+    }
+    $trimmed = ($prefix | Out-String).Trim().TrimEnd('/')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return '.'
+    }
+    return $trimmed
+}
+
 function New-GateRecord {
     <#
     .SYNOPSIS
@@ -185,6 +214,7 @@ function New-GateRecord {
 if ([string]::IsNullOrWhiteSpace($TargetSha)) {
     $TargetSha = Get-CertifiedRevision -RepositoryPath $Path
 }
+$relativePath = Get-RepositoryRelativePath -Target $Path
 
 $files = Get-ExaminedFile -Root $Path
 $observedAt = [DateTime]::UtcNow.ToString('o')
@@ -227,7 +257,7 @@ if ([string]::IsNullOrWhiteSpace($analyzerVersion)) {
         -Tool 'PSScriptAnalyzer' -ToolVersion $analyzerVersion `
         -Result $(if ($lines.Count -eq 0) { 'pass' } else { 'fail' }) `
         -ObservedAt $observedAt -TargetSha $TargetSha `
-        -Reproduce @('pwsh', '-NoProfile', '-Command', "Invoke-ScriptAnalyzer -Path $Path -Recurse -Severity Error,Warning") `
+        -Reproduce @('pwsh', '-NoProfile', '-Command', "Invoke-ScriptAnalyzer -Path $relativePath -Recurse -Severity Error,Warning") `
         -Detail ($lines -join '; ')
 }
 
@@ -251,7 +281,7 @@ if ([string]::IsNullOrWhiteSpace($pesterVersion)) {
         -Tool 'Pester' -ToolVersion $pesterVersion `
         -Result $(if ($run.FailedCount -eq 0 -and $run.PassedCount -gt 0) { 'pass' } else { 'fail' }) `
         -ObservedAt $observedAt -TargetSha $TargetSha `
-        -Reproduce @('pwsh', '-NoProfile', '-Command', "Invoke-Pester -Path $Path") `
+        -Reproduce @('pwsh', '-NoProfile', '-Command', "Invoke-Pester -Path $relativePath") `
         -Detail "$($run.PassedCount) passed, $($run.FailedCount) failed, $($run.SkippedCount) skipped"
 }
 
