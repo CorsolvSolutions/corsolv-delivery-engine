@@ -340,3 +340,95 @@ shipped package:
 
 The worker was right twice, and had to spend a bead close reason to say so.
 That is recorded as remaining work, not fixed here.
+
+## Website Status Checker Pilot v2 — completed
+
+Same project, same intent, same plan, same city, same rig, same beads. No v3,
+no replan, no hand-written application code, and no package closed by hand.
+
+| Time (UTC) | Event | Package | Actor | Reason | Outcome | Mins |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20:43 | `RECOVERY` | `wp-scaffold` | automatic | Two transient probes quarantined into evidence; declared gates re-run by the controller | PR #1 green on `ba1282ee`, merged | 1 |
+| 20:44 | `RECOVERY` | `wp-status-core` | automatic | Worker launched 3s after package 1 merged | worker `c2-2kl` active in its own worktree | — |
+| 20:59 | `COMPLETION_EVIDENCE` | `wp-status-core` | automatic | Domain core and its deterministic tests; controller re-ran `npm ci`, lint, typecheck, tests | PR #2 merged as `df182efd9` | 15 |
+| 21:16 | `COMPLETION_EVIDENCE` | `wp-web-app` | automatic | HTTP API, browser UI, entry point and README | PR #3 merged as `512367c82` | 17 |
+| 21:17 | `WORKER_FAILURE` | `wp-acceptance` | **controller (deliberate)** | Worker session `worker-wp-acceptance-c2-zp8` killed to exercise recovery | session record survived; Gas City read it `asleep` | — |
+| 21:19 | `RECOVERY` | `wp-acceptance` | automatic | Replacement worker `c2-jz7` woke on the same bead, branch and worktree | **a killed worker was replaced without human repair** | 1 |
+| 21:35 | `COMPLETION_EVIDENCE` | `wp-acceptance` | automatic | `npm run acceptance` drove the real application over HTTP against a local fixture server | PR #4 merged as `72dc547bd` | 16 |
+| 21:41 | `COMPLETION_EVIDENCE` | — | automatic | 12 of 12 tasks succeeded; projection rendered and published to `delivery/gascity/PROJECT-STATE.yml` | **delivery completed** | — |
+
+### The recovery, and which mechanism performed it
+
+The interruption was deliberate and pilot-owned: one worker session on the
+pilot's own tmux socket, killed with `kill-session` rather than by stopping a
+server. Nothing outside this pilot was touched.
+
+What the kill proved first is the defect class the liveness fix was written
+for. The session RECORD survived it. `gc session list` reported the killed
+session as `asleep`, because it asks the runtime provider whether the process
+is really there rather than trusting what the record remembers — so a reader
+that trusted the record would have seen a worker that did not exist.
+
+The replacement then arrived **before the delivery run was resumed**. Its
+worktree setup ran at 22:19:31 local and the session woke at 22:19:59, against
+a resume issued at 22:19:57; the city's standing `nudge-on-route` order is what
+put a worker back on routed, still-open work. The driver's own `recover_worker`
+ran a second later, found a live worker holding the bead, and declined to route
+it again — `route-wp-acceptance.txt` is untouched from 22:18:11, which is the
+mechanical proof it did not act. Two independent observers, converging on the
+same state without duplicating the work, is the intended behaviour rather than
+a coincidence.
+
+Recovery is therefore attributed to Gas City's own reconciliation, not to the
+delivery driver and not to a human. `driver_recovery_test.go` holds the
+regression coverage for the driver's half.
+
+### The last two defects, both found by finishing rather than by reading
+
+**The projection could never be rendered.** `projector-gen` derives each
+package's completion gate from a control ledger and never from its status, and
+the delivery driver never wrote one. Every delivery run therefore reached
+`project` and died on `open .../evidence/controls.tsv: no such file or
+directory` — after all four packages had merged. The driver already adjudicated
+all three controls; it now records them, derived from durable runtime state so
+a resumed run produces the same ledger as an uninterrupted one.
+
+**The assessment read the wrong document.** A delivery renders two, and both
+were called the projection: the run publisher's view of the queue, keyed by run
+task id, and the driver's delivery projection, keyed by package id and carrying
+each package's gate. `Assess` only ever understood the second and was being
+handed the first, so no row could match by construction and a fully merged,
+fully gated delivery reported "4 of 4 work packages are not complete". Not an
+error — just every package reported outstanding, which is indistinguishable
+from work that has not been done.
+
+### What the finished delivery is
+
+```
+state: completed
+packagesComplete: 4 of 4
+acceptanceMet: ac-1 ac-2 ac-3 ac-4 ac-5 ac-6 ac-7 ac-8 ac-9
+mergedMainSha: 72dc547bdbce72830ef226e40021280f5b6bf91d
+```
+
+Verified independently of the engine, from a fresh clone of the authoritative
+branch rather than from any worker's tree: 77 tests pass, lint and typecheck
+are clean, and the application starts and serves the journey — add a website,
+list it, Check now (`healthy`, HTTP 200, 85ms), restart the process, list it
+again with its last check still there, remove it, list empty. Persistence is
+proven across a real restart rather than asserted.
+
+The `wp-acceptance` worker proved the same journey its own way, spawning the
+application as a child process and driving it over HTTP against a local fixture
+server answering 200 and 500, so the result depends on no public internet
+service.
+
+### Still unfixed, and deliberately so
+
+The worker still has no escalation channel. Its prompt tells it to run
+`gc mail send mayor` when blocked, and `gc mail send` is not in the bounded
+worker's allowlist — so the instruction cannot be followed. Both rulings the
+scaffold worker raised through a bead close reason were correct and are visible
+in the shipped `package.json`: the `@types/node` it added, and the test script
+it corrected because the plan's spelling cannot pass on the Node its own CI
+pins. It was right twice and had to spend a close reason to say so.
