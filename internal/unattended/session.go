@@ -2,6 +2,7 @@ package unattended
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -32,6 +33,16 @@ type Session struct {
 	TruncatedTail bool
 }
 
+// ErrRunAlreadyCompleted is returned when a run id is re-entered after that run
+// durably recorded a COMPLETED terminal state.
+//
+// A completed run is history. Re-entering it republishes its heartbeat,
+// re-evaluates its gates against whatever revision is in hand by then, and
+// rewrites its terminal record — so a delivery that finished at one revision
+// can be reported as running, or refused, by a session that did no work. A new
+// revision starts a new run id; it does not reopen a finished one.
+var ErrRunAlreadyCompleted = errors.New("unattended: this run already recorded a completed terminal state")
+
 // Begin runs preflight, claims the worktree, and prepares the queue.
 //
 // It refuses a NOT-READY verdict rather than starting and failing later, and it
@@ -57,6 +68,25 @@ func Begin(ctx context.Context, spec Spec, plan Plan) (*Session, error) {
 	}
 
 	s := &Session{Spec: spec, Plan: plan}
+
+	// The run's own durable journal is read here — before preflight, before the
+	// lock, before the fence — because one of the things it can say is that
+	// this run is already over. A completed run that got as far as claiming a
+	// worktree would have republished its heartbeat under an id whose delivery
+	// finished, and a session that must not start must not claim anything on
+	// its way to finding that out.
+	journalPath := stateDirPath(spec.StateDir, JournalName)
+	records, truncated, err := ReadJournal(journalPath)
+	if err != nil {
+		return nil, err
+	}
+	resume := Replay(records, plan.RunID)
+	if resume.Finished && resume.FinalOutcome == RunCompleted {
+		return nil, fmt.Errorf("%w: run %q recorded outcome %s in %s — a new revision starts a new run id rather than reopening a finished one",
+			ErrRunAlreadyCompleted, plan.RunID, resume.FinalOutcome, journalPath)
+	}
+	s.TruncatedTail = truncated
+
 	s.Report = Preflight(ctx, spec, &plan)
 
 	// The verdict is written before it is acted on, so a refused run still
@@ -91,18 +121,12 @@ func Begin(ctx context.Context, spec Spec, plan Plan) (*Session, error) {
 
 	s.Fence = TakeFence(s.Report.Repo, lockDir, lock.Owner())
 
-	journal, err := OpenJournal(stateDirPath(spec.StateDir, JournalName), plan.RunID)
+	journal, err := OpenJournal(journalPath, plan.RunID)
 	if err != nil {
 		return nil, err
 	}
 	s.Journal = journal
 
-	records, truncated, err := ReadJournal(stateDirPath(spec.StateDir, JournalName))
-	if err != nil {
-		return nil, err
-	}
-	s.TruncatedTail = truncated
-	resume := Replay(records, plan.RunID)
 	// Resumed means this run has been here before — not that the journal has
 	// other runs in it. A state directory belongs to a project and accumulates
 	// every run it has had.

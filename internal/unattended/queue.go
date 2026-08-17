@@ -161,6 +161,20 @@ func (q *Queue) Restore(st ResumeState) {
 		if n := st.Resumes[qt.Task.ID]; n > qt.Resumes {
 			qt.Resumes = n
 		}
+		// A task that already spent its resume budget stays spent. Restoring the
+		// COUNT and not the hold it had produced is what made the bound
+		// per-restart rather than per-task: the task came back pending, was
+		// driven once more, and was held again — so a supervisor that restarts
+		// the engine drives one unconverged task forever, a full agent turn at a
+		// time. Nothing about it failed and nothing about it changed by
+		// restarting, so the hold is the durable fact and not the count alone.
+		if qt.Resumes > qt.resumeBudget() {
+			qt.State = TaskHeld
+			qt.HeldReason = fmt.Sprintf(
+				"did not converge within its %d resume(s); the bound is durable and restarting does not renew it",
+				qt.resumeBudget())
+			continue
+		}
 		if st.Interrupted[qt.Task.ID] {
 			qt.Interrupted = true
 		}

@@ -353,13 +353,29 @@ func TestInterruptedRunResumesWithoutRepeatingCompletedWork(t *testing.T) {
 		countingTask("third", BandDocumentation),
 	}}
 
-	// First session: run only the first task, then die without closing cleanly.
-	first, err := Begin(context.Background(), f.spec, Plan{RunID: "run-resume", Risk: RiskQ0, Tasks: plan.Tasks[:2]})
+	// First session: it does the first task and is then interrupted, which is
+	// what the second session has to continue from.
+	//
+	// The interruption is real rather than simulated by giving the session a
+	// shorter plan. A session that ran a truncated plan to the end did not get
+	// interrupted — it FINISHED, and finishing is a different durable fact: a
+	// run that recorded a completed terminal state is history and is refused a
+	// resume (ErrRunAlreadyCompleted). Canceling mid-plan is the state a
+	// crashed or killed session actually leaves behind, and it is the one this
+	// test exists to prove recoverable.
+	firstCtx, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	first, err := Begin(firstCtx, f.spec, Plan{RunID: "run-resume", Risk: RiskQ0, Tasks: plan.Tasks[:2]})
 	if err != nil {
 		t.Fatalf("first Begin: %v", err)
 	}
 	first.Runner.Sleep = func(context.Context, time.Duration) {}
-	if _, err := first.Runner.Run(context.Background()); err != nil {
+	first.Runner.OnProgress = func(p Progress) {
+		if p.LastMilestone == "first succeeded" {
+			interrupt()
+		}
+	}
+	if _, err := first.Runner.Run(firstCtx); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	if err := first.Close(); err != nil {
@@ -402,18 +418,28 @@ func TestResumeDoesNotDuplicateCompletionEvidence(t *testing.T) {
 		{ID: "docs", Title: "docs", Band: BandDocumentation, Argv: sh("true")},
 	}}
 
-	for i := 0; i < 2; i++ {
-		s, err := Begin(context.Background(), f.spec, plan)
-		if err != nil {
-			t.Fatalf("Begin %d: %v", i, err)
-		}
-		s.Runner.Sleep = func(context.Context, time.Duration) {}
-		if _, err := s.Runner.Run(context.Background()); err != nil {
-			t.Fatalf("Run %d: %v", i, err)
-		}
-		if err := s.Close(); err != nil {
-			t.Fatalf("Close %d: %v", i, err)
-		}
+	s, err := Begin(context.Background(), f.spec, plan)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	s.Runner.Sleep = func(context.Context, time.Duration) {}
+	if _, err := s.Runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The run recorded a completed terminal state, so re-entering its id is
+	// refused outright rather than being allowed to re-derive the same evidence
+	// — which is the stronger form of what this test has always asserted.
+	second, err := Begin(context.Background(), f.spec, plan)
+	if err == nil {
+		second.Close() //nolint:errcheck
+		t.Fatal("a completed run was reopened under the same id")
+	}
+	if !errors.Is(err, ErrRunAlreadyCompleted) {
+		t.Fatalf("reopening a completed run failed with %v, want ErrRunAlreadyCompleted", err)
 	}
 
 	records, _, err := ReadJournal(stateDirPath(f.stateDir, JournalName))
