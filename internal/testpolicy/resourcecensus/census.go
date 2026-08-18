@@ -176,8 +176,22 @@ var bootstrapPolicy = Ledger{
 			// Raised for the same reason as the entries above: this is the audit
 			// baseline whose invariant is that real test source stays VISIBLE. The
 			// untagged Debt baseline is untouched — the file is integration-tagged.
-			BaselineCalls:   628,
-			BaselineFiles:   177,
+			//
+			// 628/177 -> 630/178: what a red required check does to a package
+			// (corsolv/delivery/driver_sendback_test.go). One integration-tagged
+			// file with two subprocess call sites: building the fixture — a real
+			// origin, a real rig, a real worktree — with git, and running the
+			// driver's publish stage with bash. Both spawn because the defect is
+			// what the driver DOES to a git branch and a bead when the forge
+			// reports a failed check, and a simulated branch would prove nothing
+			// about the publication that dies on an empty index.
+			//
+			// The untagged Debt baseline is untouched twice over: this file is
+			// integration-tagged, and the line-ending policy test beside it
+			// (script_eol_test.go) walks the filesystem rather than asking git,
+			// so it stays in the fast lane and spawns nothing.
+			BaselineCalls:   630,
+			BaselineFiles:   178,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,25 +47,44 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// trackedShellScripts lists the repository's tracked *.sh files, relative to the
-// repository root. It reports false when git cannot answer — a source tarball
-// with no .git is a legitimate place to run the suite, and failing there would
-// be reporting the absence of git as a line-ending defect.
-func trackedShellScripts(t *testing.T, root string) ([]string, bool) {
+// shellScriptsUnder walks the repository for *.sh files.
+//
+// It walks rather than asking git, deliberately. This test belongs in the fast
+// unit lane, where it catches a bad checkout in half a second, and the lane's
+// subprocess census is a budget the repository keeps on purpose — spending a
+// process spawn on a question the filesystem can answer would push this file
+// into the integration tag and out of the lane where it is useful.
+//
+// Vendored and generated trees are skipped: their line endings are not this
+// repository's to decide.
+func shellScriptsUnder(t *testing.T, root string) []string {
 	t.Helper()
-	cmd := exec.Command("git", "-C", root, "ls-files", "*.sh")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, false
-	}
+	skip := map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true}
+
 	var paths []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		if p := strings.TrimSpace(line); p != "" {
-			paths = append(paths, p)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".sh") {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			paths = append(paths, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
 	}
-	return paths, len(paths) > 0
+	return paths
 }
 
 // The rule itself. A checkout that happens to be correct today proves nothing
@@ -91,9 +110,9 @@ func TestGitattributesPinsShellScriptsToLF(t *testing.T) {
 // named defect.
 func TestShellScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
 	root := repoRoot(t)
-	scripts, ok := trackedShellScripts(t, root)
-	if !ok {
-		t.Skip("git could not list tracked files; nothing to check in this checkout")
+	scripts := shellScriptsUnder(t, root)
+	if len(scripts) == 0 {
+		t.Fatal("no shell scripts found; this test is not looking where it thinks it is")
 	}
 
 	var offenders []string

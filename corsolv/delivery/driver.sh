@@ -1300,6 +1300,7 @@ build_facts() {
     printf '    "latestAcceptedMainSha": %s\n' "$(jq -Rn --arg v "$mainSha" '$v')"
     printf '  },\n'
     printf '  "runId": %s,\n' "$(jq -Rn --arg v "$RUN_TAG" '$v')"
+    printf '  "deliverables": %s,\n' "$(deliverable_facts)"
     printf '  "tasks": [\n'
     local first=1
     for id in $(packages); do
@@ -1309,6 +1310,32 @@ build_facts() {
     done
     printf '\n  ]\n}\n'
   }
+}
+
+# deliverable_facts joins what the project must deliver to what claimed it.
+#
+# WHAT THE PROJECTION WAS MISSING. It carried work packages and nothing else, so
+# a portal reading it could say four packages merged and could not say which of
+# seven deliverables were finished — different taxonomies, and one cannot stand
+# for the other. The pilot watched a project sit at "0 of 7" with its first
+# package merged and its deliverable evidenced, because the document that
+# reaches the portal had no word for the thing the project agreed to produce.
+#
+# Both halves here are FACTS, taken from the two validated documents and nothing
+# else: the acceptance criteria the intent carries, and the `satisfies` each
+# package declared in the plan. No verdict is formed. Whether a deliverable is
+# met is derived by the projector from the task rows, under the same two
+# conditions handoff.Assess applies when it reads the document back.
+deliverable_facts() {
+  jq -c --slurpfile plan "$PLAN" '
+    [ .acceptance[]
+      | . as $c
+      | { id: $c.id,
+          statement: $c.statement,
+          satisfiedBy: [ $plan[0].packages[]
+                         | select(any(.satisfies[]?; . == $c.id))
+                         | .id ] }
+    ]' < "$INTENT"
 }
 
 emit_task_facts() {

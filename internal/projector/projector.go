@@ -89,8 +89,69 @@ type Task struct {
 type State struct {
 	Project           ProjectMeta
 	Tasks             map[string]*Task
+	Deliverables      []Deliverable
 	CurrentBlockers   []Blocker
 	CompletedOutcomes []CompletedOutcome
+}
+
+// Deliverable is one thing the PROJECT must deliver, and its state.
+//
+// WHY THE PROJECTION CARRIES THESE AT ALL. A work package is how delivery got
+// something done; a deliverable is what the project agreed to produce. They are
+// not the same taxonomy and one cannot stand for the other — four merged
+// packages do not tell a portal which of seven deliverables are finished, and
+// the pilot that found this watched a project sit at "0 of 7" with its first
+// package merged, because the only thing this document carried was packages.
+//
+// The DEFINITION is not ours. The project's own records say what its
+// deliverables are, which stage each belongs to and how they are worded; this
+// document says only which of them delivery has evidenced, keyed by the ids
+// those records already gave them. A consumer joins on Deliverable.ID and keeps
+// its own statement and stage — so nothing here can rename a deliverable, move
+// it between stages, or invent one the project never agreed.
+type Deliverable struct {
+	// ID is the acceptance-criterion id the project and the delivery brief
+	// share. It is the join key and the only thing a consumer must match on.
+	ID string
+	// Statement is carried for a reader looking at this file directly. A
+	// consumer with its own record of the deliverable uses that one.
+	Statement string
+	// SatisfiedBy names the work packages that claimed this deliverable, in
+	// plan order. Empty means nothing claimed it — which is why Met is false
+	// and must not be read as "trivially satisfied".
+	SatisfiedBy []string
+	// Met is true only when EVERY package that claimed this deliverable is
+	// terminal with its completion gate met. One package of three finishing
+	// does not make the deliverable true, and a package that reached the forge
+	// without earning its gate has not delivered anything — the same two
+	// conditions handoff.Assess applies to the same rows of this document.
+	Met bool
+}
+
+// resolveDeliverables decides each deliverable's state from the packages that
+// claimed it.
+//
+// The rule is stated once, here, over this document's own task rows: terminal
+// status AND a met completion gate, for every claiming package. It is the rule
+// handoff.Assess applies when it reads this file back, and the two are checked
+// against one another rather than trusted to agree.
+func (s *State) resolveDeliverables() {
+	for i := range s.Deliverables {
+		d := &s.Deliverables[i]
+		if len(d.SatisfiedBy) == 0 {
+			d.Met = false
+			continue
+		}
+		met := true
+		for _, pkg := range d.SatisfiedBy {
+			t, ok := s.Tasks[pkg]
+			if !ok || !isTerminalStatus(t.Status) || t.CompletionGateStatus != GateMet {
+				met = false
+				break
+			}
+		}
+		d.Met = met
+	}
 }
 
 // NewState returns an empty projection.
@@ -401,6 +462,22 @@ func Render(s *State) ([]byte, error) {
 			fmt.Fprintf(&b, "        outcome: %s\n", yamlScalar(a.Outcome))
 			fmt.Fprintf(&b, "        summary: %s\n", yamlScalar(a.Summary))
 			fmt.Fprintf(&b, "        evidence: %s\n", yamlOpt(a.Evidence))
+		}
+	}
+
+	// The deliverables, after the tasks that evidence them. A consumer joins on
+	// id and keeps its own statement and stage; what it cannot know without
+	// this section is which of them delivery has actually finished.
+	s.resolveDeliverables()
+	if len(s.Deliverables) == 0 {
+		fmt.Fprintf(&b, "deliverables: []\n")
+	} else {
+		fmt.Fprintf(&b, "deliverables:\n")
+		for _, d := range s.Deliverables {
+			fmt.Fprintf(&b, "  - deliverableId: %s\n", yamlScalar(d.ID))
+			fmt.Fprintf(&b, "    statement: %s\n", yamlScalar(d.Statement))
+			fmt.Fprintf(&b, "    met: %t\n", d.Met)
+			writeList(&b, "    ", "satisfiedBy", d.SatisfiedBy)
 		}
 	}
 
