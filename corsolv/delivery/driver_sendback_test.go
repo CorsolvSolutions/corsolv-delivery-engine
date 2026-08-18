@@ -1,0 +1,251 @@
+//go:build integration
+
+// What happens to a package whose pull request fails the repository's check.
+//
+// The pilot found this on its very first package. `wp-foundation` wrote a
+// package.json declaring an npm `test` script for a directory a LATER package
+// creates. It passed its own declared gates — the ones the controller re-runs —
+// and then failed the repository's required CI on `Could not find 'test/'`.
+//
+// What followed was a dead end, and every part of it looked like something
+// else:
+//
+//	the run reported FAILED, which is what a broken platform reports, for a
+//	worker writing code that does not pass its gate — the ordinary condition
+//	of writing code;
+//
+//	the work bead was closed, so a resumed dispatch left it alone, since
+//	closed work is finished work;
+//
+//	the branch already carried the controller's commit, so each retried
+//	publication died at `git commit` with nothing to commit — reporting a
+//	commit problem, at the publish stage, for a red check.
+//
+// Three attempts, three misleading messages, no route back to a worker. The
+// only remaining move was a person editing the project's source by hand, and a
+// controller that writes the code is forging the evidence it later checks.
+//
+// These tests pin the route back: the verdict is written where a worker will
+// read it, the bead is reopened, and the stage says CONTINUE rather than ending
+// the run. And they pin its floor: a worker sent back that returns the same
+// tree stops for a person instead of presenting the head that already failed.
+//
+// Like the other driver tests these spawn bash, so they carry the integration
+// tag. SAFETY: every git operation happens inside a repository the test created
+// in its own temp directory, with the live repository's git environment
+// scrubbed out — see recoveryEnv.scrubbedEnv, which must not be relaxed.
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// ghFailedCI is a `gh` that answers the two api questions await_required_ci
+// asks — which run tested this head, and how did it conclude — with a run that
+// tested the exact head and failed. Everything else it is asked (pr create, pr
+// list, pr view) it answers well enough for the publication to reach CI.
+const ghFailedCI = `#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+
+case "${1:-}" in
+  api)
+    case "${2:-}" in
+      *actions/runs?head_sha=*) printf '%s\n' "${GH_STUB_RUN_ID:-4242}" ;;
+      *actions/runs/*)
+        # --jq selects one field; the driver asks for .conclusion, then
+        # .head_sha, then dumps the whole object into evidence.
+        case "${*}" in
+          *.conclusion*) printf '%s\n' "${GH_STUB_CONCLUSION:-failure}" ;;
+          *.head_sha*)   printf '%s\n' "@HEAD@" ;;
+          *)             printf '{"id":%s}\n' "${GH_STUB_RUN_ID:-4242}" ;;
+        esac
+        ;;
+    esac
+    ;;
+  pr)
+    case "${2:-}" in
+      create) printf 'https://example.invalid/pr/7\n' ;;
+      list)   printf '7\n' ;;
+      view)
+        case "${*}" in
+          *headRefOid*) printf '%s\n' "@HEAD@" ;;
+          *)            printf '{}\n' ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`
+
+// npmStub stands in for the package's declared gates. They are not what these
+// tests are about — a package that failed its own gates never reaches the forge
+// — so they pass, and the failure under test is the repository's check.
+const npmStub = "#!/usr/bin/env bash\nexit 0\n"
+
+// sendbackEnv is a delivery that has run: a real origin, a rig cloned from it,
+// a worktree holding finished work, and a closed work bead. Publication is the
+// only stage left.
+type sendbackEnv struct {
+	*recoveryEnv
+	worktree string
+	ghLog    string
+}
+
+func newSendbackEnv(t *testing.T) *sendbackEnv {
+	t.Helper()
+	e := newRecoveryEnv(t)
+
+	// An origin the publication can really push to. `git push` runs before the
+	// CI await, so without one the test would never reach the code it is for.
+	origin := filepath.Join(e.root, "origin.git")
+	mustGit(t, e, "", "init", "-q", "--bare", "-b", "main", origin)
+
+	base := e.initRig()
+	mustGit(t, e, e.rigPath, "remote", "add", "origin", origin)
+	mustGit(t, e, e.rigPath, "push", "-q", "origin", "main")
+
+	branch := "delivery/20260814T164300Z/wp-one"
+	wt := filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "worker-wp-one")
+	mustGit(t, e, e.rigPath, "worktree", "add", "-q", "-b", branch, wt, base)
+
+	// The work the worker finished, inside its one authorized path.
+	if err := os.MkdirAll(filepath.Join(wt, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "src", "one.ts"), []byte("export const one = 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &sendbackEnv{
+		recoveryEnv: e,
+		worktree:    wt,
+		ghLog:       filepath.Join(e.root, "gh-calls.log"),
+	}
+
+	// The forge must answer with whatever the controller actually committed:
+	// the driver refuses to wait on CI for a PR whose head is not its own
+	// commit, so a fixed sha here would stop the test before the code it exists
+	// for. Reading the branch is the honest answer to "what is the PR head".
+	writeStub(t, filepath.Join(e.binDir, "gh"),
+		strings.ReplaceAll(ghFailedCI, "@HEAD@", "$(git -C "+shquote(wt)+" rev-parse HEAD)"))
+	writeStub(t, filepath.Join(e.binDir, "npm"), npmStub)
+
+	e.seedRuntime(map[string]string{
+		"dispatched":    "2026-08-14T16:43:00Z",
+		"baseSha":       base,
+		"bead.wp-one":   beadOne,
+		"merge.wp-one":  beadTwo,
+		"wt.wp-one":     wt,
+		"branch.wp-one": branch,
+	})
+	e.setBead(beadOne, "closed")
+	e.setBead(beadTwo, "open")
+	return s
+}
+
+func writeStub(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // a test stub must be executable
+		t.Fatal(err)
+	}
+}
+
+func mustGit(t *testing.T, e *recoveryEnv, dir string, args ...string) {
+	t.Helper()
+	full := args
+	if dir != "" {
+		full = append([]string{"-C", dir}, args...)
+	}
+	cmd := exec.Command("git", full...)
+	cmd.Env = e.scrubbedEnv(nil)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// runPublish invokes the publish stage the way the compiled run does, with the
+// stub forge the driver is told to use by name.
+func (s *sendbackEnv) runPublish() (int, string) {
+	s.t.Helper()
+	argv := []string{
+		driverPath(s.t), "publish",
+		"-project", s.project, "-state", s.state,
+		"-package", "wp-one",
+		"-gh", filepath.Join(s.binDir, "gh"),
+	}
+	cmd := exec.Command("bash", argv...) //nolint:gosec // the driver under test
+	cmd.Env = s.scrubbedEnv([]string{
+		"GH_STUB_LOG=" + s.ghLog,
+		"DELIVERY_CI_DEADLINE=30",
+	})
+	out, _ := cmd.CombinedOutput()
+	return cmd.ProcessState.ExitCode(), string(out)
+}
+
+// THE ROUTE BACK. A red required check sends the package to a worker, and says
+// so in the one place a worker reads.
+func TestAFailedRequiredCheckReopensTheWorkForAWorker(t *testing.T) {
+	s := newSendbackEnv(t)
+	code, out := s.runPublish()
+
+	if code == 0 {
+		t.Fatalf("a package that failed required CI must not report a successful publication:\n%s", out)
+	}
+	if got := beadStatus(t, s.recoveryEnv, beadOne); got != "open" {
+		t.Errorf("the work bead must be reopened so a worker can be sent back to it, got %q\n%s", got, out)
+	}
+	calls := s.gcCalls()
+	if len(callsContaining(calls, "--append-notes")) == 0 {
+		t.Errorf("the CI verdict must be written onto the work bead — a worker reads its bead and nothing else.\ncalls: %v\n%s", calls, out)
+	}
+	if !strings.Contains(out, "required CI") {
+		t.Errorf("the driver must say what actually failed, got:\n%s", out)
+	}
+	// The message that made this a three-hour diagnosis rather than a one-line
+	// one. A CI failure must never be reported as a commit problem.
+	if strings.Contains(out, "committing wp-one") {
+		t.Errorf("a failed check must not be reported as a commit failure:\n%s", out)
+	}
+}
+
+// THE FLOOR. A worker sent back that returns the same tree cannot be sent back
+// again — republishing would present the head that already failed — so it stops
+// for a person rather than looping.
+func TestAPackageSentBackThatChangesNothingStopsForAPerson(t *testing.T) {
+	s := newSendbackEnv(t)
+	// First publication: commits the work, fails CI, sends the package back.
+	if code, out := s.runPublish(); code == 0 {
+		t.Fatalf("the first publication must not succeed:\n%s", out)
+	}
+	// The worker is sent back and returns the same tree. The bead closes again
+	// with nothing new in the worktree.
+	s.setBead(beadOne, "closed")
+
+	code, out := s.runPublish()
+	if code == 0 {
+		t.Fatalf("republishing an unchanged tree must not succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "returned no change") {
+		t.Errorf("the driver must say the worker returned nothing rather than blaming git, got:\n%s", out)
+	}
+	if strings.Contains(out, "committing wp-one") {
+		t.Errorf("an unchanged tree must not be reported as a commit failure:\n%s", out)
+	}
+}
+
+// beadStatus reads what the stub bead store holds, which is what the driver's
+// own `bd show` sees.
+func beadStatus(t *testing.T, e *recoveryEnv, id string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(e.beadsDir, id))
+	if err != nil {
+		t.Fatalf("reading bead %s: %v", id, err)
+	}
+	return strings.TrimSpace(string(data))
+}

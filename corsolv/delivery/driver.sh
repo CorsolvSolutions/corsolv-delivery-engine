@@ -890,6 +890,54 @@ stage_await() {
   done
 }
 
+# send_back_to_worker returns a package whose pull request failed required CI.
+#
+# THE DEAD END THIS REPLACES. A package that reached the forge and failed the
+# repository's required check ended the run. It was reported as FAILED, which is
+# the one thing it is not: nothing about the platform went wrong, and nothing
+# was proved impossible — a worker wrote code that does not pass the gate it is
+# judged by, which is the ordinary condition of writing code.
+#
+# The dead end was total. The work bead was closed, so a resumed dispatch left
+# it alone; the branch already carried the controller's commit, so a retried
+# publication died at `git commit` with nothing to commit — reporting a commit
+# problem for a CI failure, which is the wrong cause as well as the wrong stage.
+# Every route back to a worker was shut, and the only remaining move was a
+# person editing the project's source by hand. A controller that writes the code
+# is forging the evidence it later checks, so that move is not available.
+#
+# The pilot found it on its first package: `wp-foundation` declared an npm
+# `test` script for a directory a later package creates, passed its own declared
+# gates, and failed the repository's CI on `Could not find 'test/'`.
+#
+# So the failure goes back where it can be acted on. The verdict is appended to
+# the work bead — a worker reads its bead and nothing else, so a failure not
+# written there is a failure it cannot see — the bead is reopened, and the stage
+# says CONTINUE. That is already a state this driver knows: the re-offered
+# publication finds an open bead, routes a worker to it through the same
+# recovery an interrupted run uses, waits for it to close, and republishes.
+#
+# It is bounded by the run's own resume budget rather than by a counter here. A
+# package that never converges is HELD for a person, which is the correct end
+# for work that repeatedly cannot pass its gate.
+send_back_to_worker() {
+  local id="$1" bead="$2" prNum="$3"
+  local why; why="$(tail -3 "$EVIDENCE/ci-$id.err" 2>/dev/null | tr '\n' ' ')"
+
+  gcx bd update "$bead" --append-notes "Required CI failed on PR #$prNum for this package's head. \
+The work is not accepted and this package is open again. Read the failing run on the pull request, \
+fix the cause inside this package's authorized paths, and verify with this package's declared gates \
+before finishing. ${why}" >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
+    || say "$id: the CI verdict could not be appended to bead $bead; it is reopened without it"
+
+  gcx bd update "$bead" -s open >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
+    || die_from "$EVIDENCE/sendback-$id.txt" \
+      "$id did not pass required CI and its work bead $bead could not be reopened, so no worker can be sent back to it"
+
+  sa_ledger_note "$id failed required CI on PR #$prNum; reopened bead $bead for a worker"
+  not_finished "$id did not pass required CI on its exact head; its work bead $bead is open again for a worker to fix"
+}
+
 # ===========================================================================
 # STAGE publish
 # ===========================================================================
@@ -986,6 +1034,22 @@ stage_publish() {
 
   local -a pathList=()
   IFS=',' read -r -a pathList <<< "$paths"
+
+  # A republication with nothing new is a fact about the WORKER, not about git.
+  #
+  # `git commit` exits non-zero on an empty index, so a publication resumed
+  # after its pull request failed CI — where the controller's commit is already
+  # on the branch — died reporting "committing wp-x". That named the wrong
+  # cause, at the wrong stage, for a package whose real problem was a red check.
+  # Said plainly here, it is the one thing a person needs to know: the worker
+  # was sent back and returned the same tree, so republishing would present the
+  # head that already failed.
+  git -C "$wt" add -- "${pathList[@]}" > "$EVIDENCE/stage-$PACKAGE.txt" 2>&1 \
+    || die_from "$EVIDENCE/stage-$PACKAGE.txt" "staging $PACKAGE's authorized paths"
+  if git -C "$wt" diff --cached --quiet && [ -n "$(rt_get "head.$PACKAGE")" ]; then
+    stop_human "$PACKAGE was sent back after failing required CI and has returned no change, so republishing would present the same head that already failed; a person needs to decide what this package should do differently"
+  fi
+
   local commit
   commit="$(controller_commit "$wt" "feat($PACKAGE): $artifact
 
@@ -1019,8 +1083,7 @@ under bounded-project and is denied git by policy." "${pathList[@]}")" \
   rt_set "head.$PACKAGE" "$prHead"
 
   if [ "$NEED_CHECKS" = 'true' ]; then
-    await_required_ci "$PACKAGE" "$prHead" \
-      || die_from "$EVIDENCE/ci-$PACKAGE.err" "$PACKAGE did not pass required CI on its exact head"
+    await_required_ci "$PACKAGE" "$prHead" || { send_back_to_worker "$PACKAGE" "$bead" "$prNum"; return 1; }
   fi
 
   if [ "$NEED_MERGE" != 'true' ]; then

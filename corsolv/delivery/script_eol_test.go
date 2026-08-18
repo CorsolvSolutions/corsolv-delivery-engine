@@ -26,7 +26,7 @@ import (
 //
 // So the ending is pinned in .gitattributes rather than left to host
 // configuration, and these tests check both halves of that: the rule is
-// declared, and this checkout actually honours it.
+// declared, and this checkout actually honors it.
 
 // repoRoot walks up from the package directory to the directory holding go.mod.
 func repoRoot(t *testing.T) string {
