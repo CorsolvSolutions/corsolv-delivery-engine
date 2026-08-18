@@ -80,6 +80,19 @@ case "${1:-} ${2:-}" in
     printf 'open' > "$GC_STUB_BEADS/$id"
     printf '%s\n' "$id"
     ;;
+  'bd update')
+    # Status changes are honored so a test can see what the driver did to a
+    # bead rather than only that it said something. Everything else an update
+    # carries — notes, metadata — is recorded by the call log above.
+    id="${3:-}"
+    prev=''
+    for arg in "$@"; do
+      case "$prev" in
+        -s|--status) printf '%s' "$arg" > "$GC_STUB_BEADS/$id" ;;
+      esac
+      prev="$arg"
+    done
+    ;;
   'rig list')
     printf '%s:\n    Beads: initialized\n' "${GC_STUB_RIG:-rig}"
     ;;

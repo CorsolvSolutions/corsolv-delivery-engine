@@ -58,6 +58,17 @@ type factsFile struct {
 		// gate verdict is DERIVED from those rows, never asserted here.
 		GateLabel string `json:"gateLabel"`
 	} `json:"tasks"`
+
+	// Deliverables are what the PROJECT agreed to produce, and which packages
+	// claimed each one. Both are facts the driver reads from the two validated
+	// documents — the intent's acceptance criteria and the plan's `satisfies`
+	// — and neither is a verdict. Whether a deliverable is MET is derived from
+	// the task rows above, by the projector, and never asserted here.
+	Deliverables []struct {
+		ID          string   `json:"id"`
+		Statement   string   `json:"statement"`
+		SatisfiedBy []string `json:"satisfiedBy"`
+	} `json:"deliverables"`
 }
 
 // beadRecord is the slice of a bead's terminal record the projection needs.
@@ -118,6 +129,14 @@ func main() {
 	state.Project.OverallRag = facts.Project.OverallRag
 	state.Project.OverallRagReason = facts.Project.OverallRagReason
 	state.Project.LatestAcceptedMainSha = facts.Project.LatestAcceptedMainSha
+
+	for _, fd := range facts.Deliverables {
+		state.Deliverables = append(state.Deliverables, projector.Deliverable{
+			ID:          fd.ID,
+			Statement:   fd.Statement,
+			SatisfiedBy: fd.SatisfiedBy,
+		})
+	}
 
 	byBead := map[string]string{}
 	terminal := map[string]time.Time{}
