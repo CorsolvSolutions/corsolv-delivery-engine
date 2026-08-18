@@ -12,3 +12,16 @@ internal/api/dashboardspa/dist/** -diff linguist-generated
 # to authored complexity. Drift is still caught by content-based build/regeneration
 # gates, since a blob-hash change is detected even with -diff.
 internal/api/genclient/client_gen.go -diff linguist-generated
+
+# Shell scripts run under Linux — under WSL on the Windows hosts that drive
+# managed delivery, and in CI. Git's autocrlf is commonly on for a Windows
+# checkout, and a script it rewrites to CRLF is not a script Linux can run:
+# the kernel reads the shebang's trailing carriage return as part of the
+# interpreter name and reports `env: 'bash\r': No such file or directory`.
+#
+# That is exactly how a real delivery run failed — the driver the engine shells
+# out to was unrunnable on a clone whose only difference from a working one was
+# core.autocrlf. Pin the ending to the platform that has to execute them, so no
+# host configuration can decide it.
+*.sh text eol=lf
+.githooks/* text eol=lf
