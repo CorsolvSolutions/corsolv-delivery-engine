@@ -196,8 +196,15 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		phases[ph] = true
 	}
 	criteria := map[string]bool{}
+	// human are the criteria only a person may accept. Delivery may prepare what
+	// that person reads and may never claim their answer, so these are excluded
+	// from both halves of the coverage rule below.
+	human := map[string]bool{}
 	for _, c := range in.Acceptance {
 		criteria[c.ID] = true
+		if c.IsHuman() {
+			human[c.ID] = true
+		}
 	}
 
 	ids := map[string]bool{}
@@ -281,10 +288,18 @@ func (p DeliveryPlan) Validate(in Intent) error {
 			add("%s satisfies no acceptance criterion — work nobody asked for is not delivery", label)
 		}
 		for _, c := range wp.Satisfies {
-			if !criteria[c] {
+			switch {
+			case !criteria[c]:
 				add("%s satisfies %q, which the intent does not declare as an acceptance criterion", label, c)
+			case human[c]:
+				// THE DEFECT THIS REFUSAL EXISTS FOR. The package merges, the
+				// merge is read as evidence, and a criterion reserved for a
+				// person is scored met without one ever looking at it. A package
+				// may produce the record a reviewer signs; it may not sign it.
+				add("%s satisfies %q, which only a person may accept — a work package may prepare what a reviewer reads and may never claim their acceptance", label, c)
+			default:
+				satisfied[c] = true
 			}
-			satisfied[c] = true
 		}
 	}
 
@@ -308,6 +323,11 @@ func (p DeliveryPlan) Validate(in Intent) error {
 	// complete — and saying so now beats discovering it at the completion gate.
 	var uncovered []string
 	for _, c := range in.Acceptance {
+		if c.IsHuman() {
+			// Not uncovered: answered by a person, outside this plan. Demanding
+			// coverage here would make the only valid plan the one that lies.
+			continue
+		}
 		if !satisfied[c.ID] {
 			uncovered = append(uncovered, c.ID)
 		}

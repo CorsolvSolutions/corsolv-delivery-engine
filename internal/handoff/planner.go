@@ -46,6 +46,10 @@ func PlanPrompt(in Intent) string {
 	b.WriteString(strings.ReplaceAll(in.Objective, "\n", "\n  "))
 	b.WriteString("\n\nACCEPTANCE CRITERIA\n")
 	for _, c := range in.Acceptance {
+		if c.IsHuman() {
+			fmt.Fprintf(&b, "  %s: %s [ACCEPTED BY A PERSON - do not claim it]\n", c.ID, c.Statement)
+			continue
+		}
 		fmt.Fprintf(&b, "  %s: %s\n", c.ID, c.Statement)
 	}
 
@@ -74,8 +78,13 @@ OUTPUT SHAPE
 
 RULES — a plan breaking any of these is rejected and you will be asked again.
 
- 1. Every acceptance criterion above must be satisfied by at least one package.
-    A criterion nothing addresses means the project can never complete.
+ 1. Every acceptance criterion above must be satisfied by at least one package,
+    EXCEPT one marked "ACCEPTED BY A PERSON". A criterion nothing addresses
+    means the project can never complete.
+ 1a. A criterion marked "ACCEPTED BY A PERSON" must appear in NO package's
+    satisfies list. A package may produce the record that person reads - a
+    release note, a sample output, a sign-off sheet left blank - and may
+    never claim their answer. Listing one is rejected.
  2. authorizedPaths must list EVERY file the package will create or change,
     including its tests. A worker may not touch anything outside its list, so a
     missing path means the work is thrown away at publication.

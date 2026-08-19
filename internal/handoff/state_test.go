@@ -92,7 +92,7 @@ func TestAssessRequiresBothMergeAndGate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeProjection(t, in.ProjectID, tc.mainSha, tc.rows...)
-			ev, err := Assess(plan, in, path)
+			ev, err := Assess(plan, in, path, nil)
 			if err != nil {
 				t.Fatalf("Assess: %v", err)
 			}
@@ -119,7 +119,7 @@ func TestAcceptedMainIsOnlyDemandedWhenMergeWasGranted(t *testing.T) {
 	path := writeProjection(t, in.ProjectID, "",
 		[3]string{"wp-add", "merged", "met"}, [3]string{"wp-multiply", "merged", "met"})
 
-	ev, err := Assess(validPlan(), in, path)
+	ev, err := Assess(validPlan(), in, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestPartialAcceptanceCoverageIsNotMet(t *testing.T) {
 	path := writeProjection(t, in.ProjectID, "abc123",
 		[3]string{"wp-add", "merged", "met"}, [3]string{"wp-multiply", "pr-open", "not-met"})
 
-	ev, err := Assess(plan, in, path)
+	ev, err := Assess(plan, in, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestPartialAcceptanceCoverageIsNotMet(t *testing.T) {
 
 func TestMissingProjectionIsNotAnEmptyProject(t *testing.T) {
 	in := planIntent()
-	ev, err := Assess(validPlan(), in, filepath.Join(t.TempDir(), "absent.yml"))
+	ev, err := Assess(validPlan(), in, filepath.Join(t.TempDir(), "absent.yml"), nil)
 	if err != nil {
 		t.Fatalf("an absent projection is normal, got: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestUnreadableProjectionIsRefusedNotIgnored(t *testing.T) {
 	if err := os.WriteFile(path, []byte("this: [is not: valid yaml\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Assess(validPlan(), planIntent(), path); !errors.Is(err, ErrProjectionUnreadable) {
+	if _, err := Assess(validPlan(), planIntent(), path, nil); !errors.Is(err, ErrProjectionUnreadable) {
 		t.Fatalf("an unparseable projection must be refused, got: %v", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestUnreadableProjectionIsRefusedNotIgnored(t *testing.T) {
 func TestProjectionForAnotherProjectIsRefused(t *testing.T) {
 	path := writeProjection(t, "someone-elses-project", "abc123",
 		[3]string{"wp-add", "merged", "met"}, [3]string{"wp-multiply", "merged", "met"})
-	if _, err := Assess(validPlan(), planIntent(), path); !errors.Is(err, ErrProjectionUnreadable) {
+	if _, err := Assess(validPlan(), planIntent(), path, nil); !errors.Is(err, ErrProjectionUnreadable) {
 		t.Fatalf("a projection for another project must be refused, got: %v", err)
 	}
 }
@@ -354,7 +354,7 @@ func TestAssessAgainstRunTaskIdsFindsNoPackage(t *testing.T) {
 		[3]string{"publish-wp-add", "merged", "met"},
 		[3]string{"publish-wp-multiply", "merged", "met"})
 
-	ev, err := Assess(plan, in, path)
+	ev, err := Assess(plan, in, path, nil)
 	if err != nil {
 		t.Fatalf("Assess: %v", err)
 	}
