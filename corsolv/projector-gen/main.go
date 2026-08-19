@@ -68,6 +68,12 @@ type factsFile struct {
 		ID          string   `json:"id"`
 		Statement   string   `json:"statement"`
 		SatisfiedBy []string `json:"satisfiedBy"`
+		// AcceptedBy and AcceptedAt are the acceptance record's own words for a
+		// criterion a person had to answer. They are facts like the rest: the
+		// driver reads them from the durable record, and the verdict they
+		// support is still the projector's to derive.
+		AcceptedBy string `json:"acceptedBy"`
+		AcceptedAt string `json:"acceptedAt"`
 	} `json:"deliverables"`
 }
 
@@ -135,6 +141,8 @@ func main() {
 			ID:          fd.ID,
 			Statement:   fd.Statement,
 			SatisfiedBy: fd.SatisfiedBy,
+			AcceptedBy:  fd.AcceptedBy,
+			AcceptedAt:  fd.AcceptedAt,
 		})
 	}
 

@@ -1385,11 +1385,27 @@ build_facts() {
 # met is derived by the projector from the task rows, under the same two
 # conditions handoff.Assess applies when it reads the document back.
 deliverable_facts() {
-  jq -c --slurpfile plan "$PLAN" '
+  # THE THIRD DOCUMENT. A criterion reserved for a person is claimed by no work
+  # package, so the plan says nothing about it and the task rows never will
+  # either — and the projector, deriving `met` from claiming packages, could
+  # never report one as done however many people accepted it. The pilot proved
+  # that the hard way: a real acceptance was recorded, the engine's own state
+  # turned `completed`, and the document the dashboard reads went on saying 6 of
+  # 7 with nothing anywhere to say which was right.
+  #
+  # So the durable record joins the intent and the plan here. It is read as
+  # FACTS like the other two — who accepted, and when — and forms no verdict;
+  # whether that makes the deliverable met stays the projector's to decide.
+  local record="$STATE/delivery.json"
+  [ -f "$record" ] || record='/dev/null'
+  jq -c --slurpfile plan "$PLAN" --slurpfile record "$record" '
     [ .acceptance[]
       | . as $c
+      | ($record[0].acceptances // [] | map(select(.criterionId == $c.id)) | first) as $a
       | { id: $c.id,
           statement: $c.statement,
+          acceptedBy: ($a.by // ""),
+          acceptedAt: ($a.at // ""),
           satisfiedBy: [ $plan[0].packages[]
                          | select(any(.satisfies[]?; . == $c.id))
                          | .id ] }
