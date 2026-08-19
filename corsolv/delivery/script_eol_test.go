@@ -96,7 +96,7 @@ func TestGitattributesPinsShellScriptsToLF(t *testing.T) {
 		t.Fatalf("reading .gitattributes: %v", err)
 	}
 	text := string(data)
-	for _, rule := range []string{"*.sh text eol=lf", ".githooks/* text eol=lf"} {
+	for _, rule := range []string{"*.sh text eol=lf", ".githooks/* text eol=lf", "scripts/** text eol=lf"} {
 		if !strings.Contains(text, rule) {
 			t.Errorf("`.gitattributes` does not declare %q.\n"+
 				"Without it a Windows clone with core.autocrlf=true checks the driver out with CRLF, "+
@@ -131,6 +131,86 @@ func TestShellScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
 		t.Errorf("%d shell script(s) are checked out with CRLF and cannot run on Linux: %s\n"+
 			"Fix this checkout with `git add --renormalize .` after confirming .gitattributes pins *.sh to LF, "+
 			"or strip the carriage returns in place.",
+			len(offenders), strings.Join(offenders, ", "))
+	}
+}
+
+// shebangScriptsUnder walks dir for files that begin with a shebang, whatever
+// they are called.
+//
+// The extension is not what breaks. `scripts/precommit-format-staged-go` has no
+// extension, carries `#!/usr/bin/env bash`, and is shelled out to by this
+// repository's own pre-commit hook — so on a Windows checkout the hook died on
+// `env: 'bash': No such file or directory` and the mandatory quality gate did
+// nothing at all, on every clone, silently. `*.sh` could never have caught it.
+func shebangScriptsUnder(t *testing.T, root, dir string) []string {
+	t.Helper()
+	skip := map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true}
+
+	var paths []string
+	err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		f, openErr := os.Open(path) //nolint:gosec // a path this test walked to
+		if openErr != nil {
+			return openErr
+		}
+		head := make([]byte, 2)
+		n, _ := f.Read(head)
+		_ = f.Close()
+		if n < 2 || !bytes.Equal(head, []byte("#!")) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", dir, err)
+	}
+	return paths
+}
+
+// The gate that guards the gate. A pre-commit hook that cannot execute is worse
+// than one that is not installed: `git commit` succeeds, so nothing about the
+// commit says the checks were skipped.
+func TestExecutableScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
+	root := repoRoot(t)
+
+	var scripts []string
+	for _, dir := range []string{"scripts", ".githooks"} {
+		scripts = append(scripts, shebangScriptsUnder(t, root, dir)...)
+	}
+	if len(scripts) == 0 {
+		t.Fatal("no executable scripts found; this test is not looking where it thinks it is")
+	}
+
+	var offenders []string
+	for _, rel := range scripts {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Errorf("reading %s: %v", rel, err)
+			continue
+		}
+		if bytes.Contains(data, []byte("\r\n")) {
+			offenders = append(offenders, rel)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Errorf("%d executable script(s) are checked out with CRLF and cannot run on Linux: %s\n"+
+			"The pre-commit hook shells out to one of these, so this is a checkout whose quality gate does nothing. "+
+			"Confirm .gitattributes pins them to LF, then `git add --renormalize .`.",
 			len(offenders), strings.Join(offenders, ", "))
 	}
 }
