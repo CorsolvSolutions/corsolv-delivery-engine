@@ -96,7 +96,14 @@ func TestGitattributesPinsShellScriptsToLF(t *testing.T) {
 		t.Fatalf("reading .gitattributes: %v", err)
 	}
 	text := string(data)
-	for _, rule := range []string{"*.sh text eol=lf", ".githooks/* text eol=lf", "scripts/** text eol=lf"} {
+	for _, rule := range []string{
+		"*.sh text eol=lf",
+		".githooks/* text eol=lf",
+		"scripts/** text eol=lf",
+		"contrib/** text eol=lf",
+		".github/workflows/scripts/** text eol=lf",
+		"internal/bootstrap/packs/core/overlay/** text eol=lf",
+	} {
 		if !strings.Contains(text, rule) {
 			t.Errorf("`.gitattributes` does not declare %q.\n"+
 				"Without it a Windows clone with core.autocrlf=true checks the driver out with CRLF, "+
@@ -135,6 +142,26 @@ func TestShellScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
 	}
 }
 
+// mayCarryAShebang is the cheap filter that keeps this test in the fast lane.
+//
+// The walk covers the whole repository, and opening every file in it costs two
+// minutes on a network-mounted checkout — a price the fast lane does not pay. A
+// shebang only appears on a file with no extension or with a script extension,
+// so everything else is skipped without being read. The filter is over the NAME,
+// never the directory: scoping by directory is what let the defect survive in
+// `contrib/` after it had been fixed in `scripts/`.
+func mayCarryAShebang(name string) bool {
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return true
+	}
+	switch ext {
+	case ".sh", ".bash", ".zsh", ".py", ".mjs", ".cjs", ".js", ".rb", ".pl":
+		return true
+	}
+	return false
+}
+
 // shebangScriptsUnder walks dir for files that begin with a shebang, whatever
 // they are called.
 //
@@ -156,6 +183,9 @@ func shebangScriptsUnder(t *testing.T, root, dir string) []string {
 			if skip[d.Name()] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if !mayCarryAShebang(d.Name()) {
 			return nil
 		}
 		f, openErr := os.Open(path) //nolint:gosec // a path this test walked to
@@ -187,10 +217,13 @@ func shebangScriptsUnder(t *testing.T, root, dir string) []string {
 func TestExecutableScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
 	root := repoRoot(t)
 
-	var scripts []string
-	for _, dir := range []string{"scripts", ".githooks"} {
-		scripts = append(scripts, shebangScriptsUnder(t, root, dir)...)
-	}
+	// The WHOLE repository, not a list of directories somebody remembered. The
+	// first version of this test walked `scripts/` and `.githooks/` — the two
+	// places the defect had been seen — and the repository's own fast test lane
+	// then failed on `contrib/mail-scripts/gc-mail-mcp-agent-mail` with the same
+	// `env: 'bash'`. A scoped check is a check that has to be widened by the
+	// next person who trips over it.
+	scripts := shebangScriptsUnder(t, root, ".")
 	if len(scripts) == 0 {
 		t.Fatal("no executable scripts found; this test is not looking where it thinks it is")
 	}

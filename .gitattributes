@@ -33,3 +33,6 @@ internal/api/genclient/client_gen.go -diff linguist-generated
 # quality gate silently did nothing on every such clone. `*.sh` above did not
 # cover it because the file has no extension.
 scripts/** text eol=lf
+contrib/** text eol=lf
+.github/workflows/scripts/** text eol=lf
+internal/bootstrap/packs/core/overlay/** text eol=lf
