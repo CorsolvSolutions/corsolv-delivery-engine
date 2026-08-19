@@ -190,8 +190,21 @@ var bootstrapPolicy = Ledger{
 			// integration-tagged, and the line-ending policy test beside it
 			// (script_eol_test.go) walks the filesystem rather than asking git,
 			// so it stays in the fast lane and spawns nothing.
-			BaselineCalls:   630,
-			BaselineFiles:   178,
+			//
+			// 630/178 -> 631/179: publication as two steps, resumed
+			// (corsolv/delivery/driver_publish_resume_test.go). One
+			// integration-tagged file with one subprocess call site: git, run
+			// against a real worktree. It spawns because the two defects it
+			// pins are what publication does to a real branch — a push naming a
+			// ref nothing created, and a retry that cannot commit because the
+			// work is already committed. Neither is observable without a branch
+			// that really exists.
+			//
+			// The untagged Debt baseline is untouched again: the file is
+			// integration-tagged, and the observeRun regressions added beside it
+			// read two JSON documents from a temp dir and spawn nothing at all.
+			BaselineCalls:   631,
+			BaselineFiles:   179,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
