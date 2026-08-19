@@ -126,6 +126,19 @@ type Deliverable struct {
 	// without earning its gate has not delivered anything — the same two
 	// conditions handoff.Assess applies to the same rows of this document.
 	Met bool
+	// AcceptedBy names the person who accepted this deliverable, when it is one
+	// only a person could. Empty for everything delivery satisfies itself.
+	//
+	// WHY THIS EXISTS. A criterion reserved for a person is claimed by no work
+	// package — the plan validator refuses one that claims it — so deriving Met
+	// from claiming packages can never make it true, no matter who accepts it.
+	// The pilot recorded a real acceptance, the engine's own state turned
+	// `completed`, and this document went on reporting the deliverable
+	// outstanding: complete in one place and 6 of 7 in the other, with nothing
+	// to say which was wrong.
+	AcceptedBy string
+	// AcceptedAt is when they accepted it, as the record holds it.
+	AcceptedAt string
 }
 
 // resolveDeliverables decides each deliverable's state from the packages that
@@ -139,7 +152,10 @@ func (s *State) resolveDeliverables() {
 	for i := range s.Deliverables {
 		d := &s.Deliverables[i]
 		if len(d.SatisfiedBy) == 0 {
-			d.Met = false
+			// Nothing claimed it. That is either a deliverable a person owes an
+			// answer on, or one nobody addressed — and the acceptance record is
+			// the only thing that can tell those apart.
+			d.Met = d.AcceptedBy != ""
 			continue
 		}
 		met := true
@@ -477,6 +493,12 @@ func Render(s *State) ([]byte, error) {
 			fmt.Fprintf(&b, "  - deliverableId: %s\n", yamlScalar(d.ID))
 			fmt.Fprintf(&b, "    statement: %s\n", yamlScalar(d.Statement))
 			fmt.Fprintf(&b, "    met: %t\n", d.Met)
+			if d.AcceptedBy != "" {
+				fmt.Fprintf(&b, "    acceptedBy: %s\n", yamlScalar(d.AcceptedBy))
+				if d.AcceptedAt != "" {
+					fmt.Fprintf(&b, "    acceptedAt: %s\n", yamlScalar(d.AcceptedAt))
+				}
+			}
 			writeList(&b, "    ", "satisfiedBy", d.SatisfiedBy)
 		}
 	}
