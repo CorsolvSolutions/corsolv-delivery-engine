@@ -25,3 +25,14 @@ internal/api/genclient/client_gen.go -diff linguist-generated
 # host configuration can decide it.
 *.sh text eol=lf
 .githooks/* text eol=lf
+
+# The same rule, for the scripts this repository runs that carry no .sh
+# extension. A shebang is what breaks under CRLF, not a file name — the
+# repository's own pre-commit hook shells out to `scripts/precommit-format-staged-go`,
+# and on a Windows checkout that script was unrunnable, so the mandatory
+# quality gate silently did nothing on every such clone. `*.sh` above did not
+# cover it because the file has no extension.
+scripts/** text eol=lf
+contrib/** text eol=lf
+.github/workflows/scripts/** text eol=lf
+internal/bootstrap/packs/core/overlay/** text eol=lf

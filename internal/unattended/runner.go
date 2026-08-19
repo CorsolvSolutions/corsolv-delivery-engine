@@ -137,7 +137,7 @@ func (r *Runner) Run(ctx context.Context) (CompletionEvent, error) {
 	if err := WriteCompletion(r.Spec.StateDir, event); err != nil {
 		return event, err
 	}
-	r.publish("finished", nil)
+	r.publish(StageFinished, nil)
 	return event, nil
 }
 

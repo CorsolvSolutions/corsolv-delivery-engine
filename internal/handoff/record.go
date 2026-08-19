@@ -57,6 +57,69 @@ type Record struct {
 	// never rewrites the one before it, because what the interrupted run did
 	// is part of this project's history.
 	Runs []RunRef `json:"runs"`
+
+	// Acceptances are the answers people gave to the criteria reserved for
+	// them. Append-only for the same reason Runs is: an acceptance is an event
+	// that happened, and the record of who said yes and when is the only thing
+	// standing between a human boundary and a machine that walked through it.
+	Acceptances []Acceptance `json:"acceptances,omitempty"`
+}
+
+// Acceptance is one person's answer to one criterion only they could give.
+type Acceptance struct {
+	// CriterionID is the acceptance criterion answered. It must be one the
+	// intent declared with AcceptedByHuman.
+	CriterionID string `json:"criterionId"`
+	// By names the person. It is required: an unattributed acceptance is
+	// indistinguishable from the machine accepting on its own behalf, which is
+	// the exact thing this record exists to rule out.
+	By string `json:"by"`
+	// Note is what they said, if anything.
+	Note string `json:"note,omitempty"`
+	// At is when they said it.
+	At time.Time `json:"at"`
+}
+
+// Accept records a person's acceptance of a criterion reserved for them.
+//
+// It is idempotent and keeps the FIRST answer. A second call is a person
+// re-confirming, not a later authority overwriting the earlier one — and an
+// acceptance that could be rewritten is one that could be rewritten by whatever
+// runs next.
+func (r Record) Accept(criterionID, by, note string, now time.Time) (Record, error) {
+	var found *Criterion
+	for i := range r.Intent.Acceptance {
+		if r.Intent.Acceptance[i].ID == criterionID {
+			found = &r.Intent.Acceptance[i]
+			break
+		}
+	}
+	switch {
+	case found == nil:
+		return r, fmt.Errorf("%w: %s declares no acceptance criterion %q",
+			ErrRecordConflict, r.ProjectID, criterionID)
+	case !found.IsHuman():
+		return r, fmt.Errorf("%w: %s is delivery's to satisfy and prove — accepting it by hand would forge the evidence the completion gate reads",
+			ErrRecordConflict, criterionID)
+	case strings.TrimSpace(by) == "":
+		return r, fmt.Errorf("%w: accepting %s requires the name of the person accepting it",
+			ErrRecordConflict, criterionID)
+	}
+
+	for _, a := range r.Acceptances {
+		if a.CriterionID == criterionID {
+			return r, nil
+		}
+	}
+	out := r
+	out.Acceptances = append(append([]Acceptance(nil), r.Acceptances...), Acceptance{
+		CriterionID: criterionID,
+		By:          strings.TrimSpace(by),
+		Note:        strings.TrimSpace(note),
+		At:          now.UTC(),
+	})
+	out.UpdatedAt = now.UTC()
+	return out, nil
 }
 
 // RunRef identifies one execution attempt.

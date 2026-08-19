@@ -87,6 +87,13 @@ type Evidence struct {
 	AcceptanceMet         []string `json:"acceptanceMet"`
 	AcceptanceOutstanding []string `json:"acceptanceOutstanding,omitempty"`
 
+	// AwaitingHuman names the criteria only a person may accept and nobody has
+	// yet. They are held apart from AcceptanceOutstanding on purpose: one is
+	// work delivery has not finished, the other is an answer delivery is not
+	// entitled to give, and reporting the second as the first turns a boundary
+	// into a failure.
+	AwaitingHuman []string `json:"awaitingHuman,omitempty"`
+
 	// BlockingTasks are tasks the projection reports as blocked.
 	BlockingTasks []string `json:"blockingTasks,omitempty"`
 
@@ -154,7 +161,11 @@ var acceptedStatuses = map[string]bool{
 // The signature takes the projection path rather than a parsed document so that
 // a missing projection — the normal state before anything has run — is handled
 // here rather than by every caller.
-func Assess(plan DeliveryPlan, in Intent, projectionPath string) (Evidence, error) {
+func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acceptance) (Evidence, error) {
+	answered := map[string]bool{}
+	for _, a := range accepted {
+		answered[a.CriterionID] = true
+	}
 	ev := Evidence{}
 	for _, wp := range plan.Packages {
 		ev.RequiredPackages = append(ev.RequiredPackages, wp.ID)
@@ -168,9 +179,18 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string) (Evidence, erro
 	if !found {
 		ev.OutstandingPackages = ev.RequiredPackages
 		for _, c := range in.Acceptance {
-			ev.AcceptanceOutstanding = append(ev.AcceptanceOutstanding, c.ID)
+			switch {
+			case c.IsHuman() && answered[c.ID]:
+				ev.AcceptanceMet = append(ev.AcceptanceMet, c.ID)
+			case c.IsHuman():
+				ev.AwaitingHuman = append(ev.AwaitingHuman, c.ID)
+			default:
+				ev.AcceptanceOutstanding = append(ev.AcceptanceOutstanding, c.ID)
+			}
 		}
+		sort.Strings(ev.AcceptanceMet)
 		sort.Strings(ev.AcceptanceOutstanding)
+		sort.Strings(ev.AwaitingHuman)
 		ev.Reasons = []string{"no delivery projection has been published yet"}
 		return ev, nil
 	}
@@ -213,7 +233,20 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string) (Evidence, erro
 
 	// A criterion is met when every package that claimed it is complete. One
 	// package out of three finishing does not make the criterion true.
+	//
+	// A criterion reserved to a person is answered by a person or not at all.
+	// No package may claim one — the plan validator refuses that — so there is
+	// nothing here to count, and counting the packages that merged around it
+	// would be exactly the self-approval this separation exists to prevent.
 	for _, c := range in.Acceptance {
+		if c.IsHuman() {
+			if answered[c.ID] {
+				ev.AcceptanceMet = append(ev.AcceptanceMet, c.ID)
+			} else {
+				ev.AwaitingHuman = append(ev.AwaitingHuman, c.ID)
+			}
+			continue
+		}
 		claimed := 0
 		done := 0
 		for _, wp := range plan.Packages {
@@ -235,6 +268,7 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string) (Evidence, erro
 	}
 	sort.Strings(ev.AcceptanceMet)
 	sort.Strings(ev.AcceptanceOutstanding)
+	sort.Strings(ev.AwaitingHuman)
 
 	ev.MergedMainSha = proj.Project.LatestAcceptedMainSha
 
@@ -251,6 +285,10 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string) (Evidence, erro
 	if n := len(ev.AcceptanceOutstanding); n > 0 {
 		ev.Reasons = append(ev.Reasons,
 			"acceptance criteria not met: "+strings.Join(ev.AcceptanceOutstanding, ", "))
+	}
+	if n := len(ev.AwaitingHuman); n > 0 {
+		ev.Reasons = append(ev.Reasons,
+			"awaiting human acceptance: "+strings.Join(ev.AwaitingHuman, ", "))
 	}
 	if n := len(ev.BlockingTasks); n > 0 {
 		ev.Reasons = append(ev.Reasons, "blocking work remains: "+strings.Join(ev.BlockingTasks, ", "))

@@ -626,7 +626,7 @@ func TestADeliveryProjectionCannotClaimCompletionTheRunsGatesRefuse(t *testing.T
 			}
 
 			ev, err := handoff.Assess(fixturePlan(), fixtureIntent(),
-				filepath.Join(e.state, "PROJECT-STATE.yml"))
+				filepath.Join(e.state, "PROJECT-STATE.yml"), nil)
 			if err != nil {
 				t.Fatalf("assessing the projection the driver rendered: %v", err)
 			}

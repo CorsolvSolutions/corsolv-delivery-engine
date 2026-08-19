@@ -942,6 +942,28 @@ before finishing. ${why}" >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
 # STAGE publish
 # ===========================================================================
 
+# adopt_committed_work prints the commit an earlier attempt of this stage made,
+# when there is nothing left to commit because that attempt already made it.
+#
+# It refuses on either of the two things that would make adoption a lie: a tree
+# that still holds authorized changes, so the earlier attempt did not commit
+# everything; or a HEAD already contained in the authoritative branch, so there
+# is nothing unpublished and the empty commit means no work was produced.
+adopt_committed_work() {
+  local wt="$1"; shift
+  if ! git -C "$wt" diff --quiet HEAD -- "$@"; then
+    printf '%s\n' "adopt_committed_work: the tree still holds uncommitted authorized changes" >&2
+    return 1
+  fi
+  local head
+  head="$(git -C "$wt" rev-parse HEAD)" || return 1
+  if git -C "$wt" merge-base --is-ancestor "$head" "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null; then
+    printf '%s\n' "adopt_committed_work: HEAD ${head:0:9} is already on $DEFAULT_BRANCH, so nothing was produced to publish" >&2
+    return 1
+  fi
+  printf '%s\n' "$head"
+}
+
 stage_publish() {
   [ -n "$PACKAGE" ] || die 'publish needs -package'
   [ -n "$CITY" ] || die 'no city; city-up has not run'
@@ -1003,6 +1025,28 @@ stage_publish() {
   capture_final_bead_state "$bead" "$EVIDENCE" >/dev/null \
     || die "$PACKAGE: re-reading bead $bead after it closed did not observe a closed bead, so there is no final record to publish against"
 
+  # REALITY OVER MEMORY, for the branch as much as for the worker.
+  #
+  # A package routed before its base exists has no worktree of the controller's
+  # yet, and Gas City creates one of its own — on a branch of its own naming —
+  # so the agent it was asked to start has somewhere to work. When publish later
+  # reaches that package, ensure_package_worktree finds the directory already
+  # there and returns, and the branch the ledger remembers was never created.
+  # Pushing the remembered name pushed a ref that does not exist — `src refspec
+  # … does not match any` — over a worktree holding finished, gated work.
+  #
+  # So the branch is re-read from the worktree, exactly as worker liveness is
+  # re-derived rather than remembered, and the ledger is corrected to what is
+  # there, because every later step names this branch — the pull request most
+  # of all.
+  local onBranch
+  onBranch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -n "$onBranch" ] && [ "$onBranch" != "$branch" ]; then
+    say "$PACKAGE is on branch $onBranch, not the recorded $branch; publishing the branch that exists"
+    branch="$onBranch"
+    rt_set "branch.$PACKAGE" "$onBranch"
+  fi
+
   # THE BOUNDARY: what actually changed. bounded-project grants Write/Edit, so
   # the permission list buys scope clarity rather than containment. What
   # contains the worker is that only the controller publishes — and for that to
@@ -1051,12 +1095,26 @@ stage_publish() {
   fi
 
   local commit
-  commit="$(controller_commit "$wt" "feat($PACKAGE): $artifact
+  if commit="$(controller_commit "$wt" "feat($PACKAGE): $artifact
 
 Published by the controller. The worker produced and verified this change
-under bounded-project and is denied git by policy." "${pathList[@]}")" \
-    || die "committing $PACKAGE"
-  say "$PACKAGE committed ${commit:0:9}"
+under bounded-project and is denied git by policy." "${pathList[@]}")"; then
+    say "$PACKAGE committed ${commit:0:9}"
+  else
+    # THE UNRECOVERABLE STATE THIS EXISTS TO PREVENT. Commit and push are two
+    # steps and a push fails on its own — a refspec, a credential, a network.
+    # The retry then finds nothing left to commit, because the work is already
+    # on the branch, and a stage that read an empty commit as a failure spent
+    # all three attempts refusing to publish work it had committed itself. The
+    # package became permanently unpublishable, and nothing short of a person
+    # editing the branch by hand could undo it.
+    #
+    # An empty commit is benign only when the tree really is clean AND the
+    # branch really holds something the authoritative branch does not. Either
+    # half missing is the ordinary failure and still stops publication.
+    commit="$(adopt_committed_work "$wt" "${pathList[@]}")" || die "committing $PACKAGE"
+    say "$PACKAGE was already committed as ${commit:0:9} by an attempt that could not push; publishing that"
+  fi
 
   git -C "$wt" push -q -u origin "$branch" > "$EVIDENCE/push-$PACKAGE.txt" 2>&1 \
     || die_from "$EVIDENCE/push-$PACKAGE.txt" "pushing $branch: $(tail -2 "$EVIDENCE/push-$PACKAGE.txt")"

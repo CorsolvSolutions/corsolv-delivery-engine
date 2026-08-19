@@ -68,6 +68,8 @@ func run() int {
 		return cmdRun(ctx, os.Args[2:])
 	case "plan":
 		return cmdPlan(os.Args[2:])
+	case "accept":
+		return cmdAccept(os.Args[2:])
 	case "status":
 		return cmdStatus(os.Args[2:])
 	case "-h", "--help", "help":
@@ -96,6 +98,10 @@ func usage() {
   plan -project <id> [-from <file>] [-host <file>]
       Print the delivery's plan, or install one written by hand with -from.
       An installed plan faces the same validator an agent's would.
+
+  accept -project <id> -criterion <id> -by <person> [-note <text>] [-host <file>]
+      Record a person's acceptance of a criterion the intent reserved for one.
+      Refused for anything delivery is expected to satisfy and prove itself.
 
   status -project <id> [-host <file>]
       Print the canonical delivery state as JSON.
@@ -616,6 +622,69 @@ func recordPreRunBoundary(host handoff.HostProfile, projectID, runID string, sta
 
 // --- status -----------------------------------------------------------------
 
+// --- accept -----------------------------------------------------------------
+
+// cmdAccept records a person's answer to a criterion only a person may give.
+//
+// It is a separate command, and not a flag on anything a run invokes, because
+// the boundary is the point: nothing the engine schedules can reach this, and
+// what it writes says who answered and when. An acceptance the machine could
+// produce for itself would leave the same evidence as one a person gave, and
+// then the boundary is decoration.
+func cmdAccept(args []string) int {
+	fs := flag.NewFlagSet("accept", flag.ContinueOnError)
+	projectID := fs.String("project", "", "the project being accepted")
+	criterion := fs.String("criterion", "", "the acceptance criterion being answered")
+	by := fs.String("by", "", "the person accepting it")
+	note := fs.String("note", "", "what they said, if anything")
+	hostPath := fs.String("host", defaultHostPath(), "path to the delivery host profile")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	switch {
+	case *projectID == "":
+		return fail("accept needs -project")
+	case *criterion == "":
+		return fail("accept needs -criterion")
+	case *by == "":
+		return fail("accept needs -by — an unattributed acceptance is not one")
+	}
+	if err := handoff.SanitizeProjectID(*projectID); err != nil {
+		return refuse(err)
+	}
+	host, _, err := loadHost(*hostPath)
+	if err != nil {
+		return refuse(err)
+	}
+
+	record, found, err := handoff.LoadRecord(host.DeliveryRoot, *projectID)
+	if err != nil {
+		return refuse(err)
+	}
+	if !found {
+		return refuse(fmt.Errorf("no managed delivery has been started for %s", *projectID))
+	}
+
+	updated, err := record.Accept(*criterion, *by, *note, time.Now())
+	if err != nil {
+		return refuse(err)
+	}
+	if err := handoff.SaveRecord(host.DeliveryRoot, updated); err != nil {
+		return refuse(err)
+	}
+
+	fmt.Printf("ACCEPTED %s by %s\n", *criterion, *by)
+	status, err := observe(host, *projectID)
+	if err != nil {
+		return refuse(err)
+	}
+	printStatus(status)
+	if status.State == handoff.StateCompleted {
+		return exitOK
+	}
+	return exitHumanBoundary
+}
+
 func cmdStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	projectID := fs.String("project", "", "the project to report on")
@@ -675,7 +744,7 @@ func observe(host handoff.HostProfile, projectID string) (handoff.Status, error)
 		// package id and reads each package's completion gate; the run publisher's
 		// document has neither, so reading it scored a fully merged, fully gated
 		// delivery as entirely outstanding.
-		ev, err = handoff.Assess(plan, record.Intent, host.DeliveryProjectionPath(projectID))
+		ev, err = handoff.Assess(plan, record.Intent, host.DeliveryProjectionPath(projectID), record.Acceptances)
 		if err != nil {
 			return handoff.Status{}, err
 		}
@@ -714,8 +783,19 @@ func observeRun(stateDir string) (handoff.RunObservation, error) {
 
 	// A completion record belongs to the run it names. One left by a previous
 	// run must not answer a question about the run happening now.
+	//
+	// But a run's OWN last heartbeat is not a later run, and it is not work
+	// either: `finished` is published once, microseconds after the completion
+	// event, and it says the run stopped. Comparing timestamps alone treated it
+	// as progress that superseded the completion — so a delivery that had
+	// finished every package reported as `queued`, "no run is currently
+	// executing it", exit 0, over evidence whose only outstanding clause was a
+	// person's acceptance. The boundary the whole design exists to surface was
+	// the one thing the status did not say.
+	carriedOn := progress.Stage != unattended.StageFinished &&
+		progress.UpdatedAt.After(event.FinishedAt)
 	superseded := hasProgress && finished &&
-		(progress.RunID != event.RunID || progress.UpdatedAt.After(event.FinishedAt))
+		(progress.RunID != event.RunID || carriedOn)
 
 	if finished && !superseded {
 		obs.Finished = true

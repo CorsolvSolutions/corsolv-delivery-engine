@@ -65,7 +65,32 @@ type Repository struct {
 type Criterion struct {
 	ID        string `json:"id"`
 	Statement string `json:"statement"`
+
+	// AcceptedBy names who is entitled to say this criterion is met. Empty
+	// means AcceptedByDelivery.
+	//
+	// WHY THE CONTRACT NEEDS THIS WORD. Without it every criterion is delivery's
+	// to claim, the plan validator below demands that each one be claimed by a
+	// work package, and a project whose last criterion is "a person accepts
+	// this" has only one plan it can express: the one where an agent claims the
+	// acceptance. It then merges, and every rule downstream reads that merge as
+	// evidence — so the machine approves its own release, and the boundary the
+	// project stated is the one thing the contract made unstateable.
+	AcceptedBy string `json:"acceptedBy,omitempty"`
 }
+
+// Who may accept a criterion.
+const (
+	// AcceptedByDelivery is a criterion managed delivery is expected to satisfy
+	// and prove. It is the default, and the empty string means it.
+	AcceptedByDelivery = "delivery"
+	// AcceptedByHuman is a criterion only a person may satisfy. Delivery may
+	// prepare what that person reads and may never claim their answer.
+	AcceptedByHuman = "human"
+)
+
+// IsHuman reports whether only a person may accept this criterion.
+func (c Criterion) IsHuman() bool { return c.AcceptedBy == AcceptedByHuman }
 
 // Policy is the delivery authority the portal grants this run.
 //
@@ -221,6 +246,17 @@ func (in Intent) Validate() error {
 		if strings.TrimSpace(c.Statement) == "" {
 			add("acceptance[%d] (%s) has no statement", i, c.ID)
 		}
+		switch c.AcceptedBy {
+		case "", AcceptedByDelivery, AcceptedByHuman:
+		default:
+			add("acceptance[%d] (%s) has acceptedBy %q — it is %q or %q, and empty means %q",
+				i, c.ID, c.AcceptedBy, AcceptedByDelivery, AcceptedByHuman, AcceptedByDelivery)
+		}
+	}
+	// Delivery that may claim nothing has been asked to start a run whose only
+	// possible outcome is a boundary. Refusing here beats reaching it.
+	if len(in.Acceptance) > 0 && !anyDelivered(in.Acceptance) {
+		add("every acceptance criterion is reserved to a person — managed delivery has nothing it may satisfy")
 	}
 
 	problems = append(problems, in.Policy.problems()...)
@@ -229,6 +265,16 @@ func (in Intent) Validate() error {
 		return fmt.Errorf("%w: %s", ErrIntentInvalid, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// anyDelivered reports whether at least one criterion is delivery's to satisfy.
+func anyDelivered(cs []Criterion) bool {
+	for _, c := range cs {
+		if !c.IsHuman() {
+			return true
+		}
+	}
+	return false
 }
 
 // problems reports policy grants that cannot all be true at once.
