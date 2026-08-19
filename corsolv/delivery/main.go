@@ -783,8 +783,19 @@ func observeRun(stateDir string) (handoff.RunObservation, error) {
 
 	// A completion record belongs to the run it names. One left by a previous
 	// run must not answer a question about the run happening now.
+	//
+	// But a run's OWN last heartbeat is not a later run, and it is not work
+	// either: `finished` is published once, microseconds after the completion
+	// event, and it says the run stopped. Comparing timestamps alone treated it
+	// as progress that superseded the completion — so a delivery that had
+	// finished every package reported as `queued`, "no run is currently
+	// executing it", exit 0, over evidence whose only outstanding clause was a
+	// person's acceptance. The boundary the whole design exists to surface was
+	// the one thing the status did not say.
+	carriedOn := progress.Stage != unattended.StageFinished &&
+		progress.UpdatedAt.After(event.FinishedAt)
 	superseded := hasProgress && finished &&
-		(progress.RunID != event.RunID || progress.UpdatedAt.After(event.FinishedAt))
+		(progress.RunID != event.RunID || carriedOn)
 
 	if finished && !superseded {
 		obs.Finished = true

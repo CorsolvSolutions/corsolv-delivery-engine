@@ -12,6 +12,14 @@ const HeartbeatName = "heartbeat.json"
 // CompletionName is the terminal record a notification layer watches for.
 const CompletionName = "completion.json"
 
+// StageFinished is the stage a run publishes once, after its completion event.
+//
+// It is named because a consumer has to be able to tell it from work. The final
+// heartbeat is written microseconds AFTER the completion event it follows, so a
+// reader comparing timestamps alone sees progress newer than the completion and
+// concludes the run carried on — over the one stage that says it did not.
+const StageFinished = "finished"
+
 // Progress is what a run publishes about itself while it is still running.
 //
 // The fields are the ones a person actually asks when they look in on an
