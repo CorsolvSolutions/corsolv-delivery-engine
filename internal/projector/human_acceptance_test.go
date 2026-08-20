@@ -29,9 +29,15 @@ func TestAPersonsAcceptanceMeetsADeliverableNoPackageCouldClaim(t *testing.T) {
 		t.Fatal("a recorded human acceptance must meet the deliverable; nothing else ever can")
 	}
 	out := string(data)
-	for _, want := range []string{"acceptedBy: \"Jon Pratten\"", "met: true"} {
+	// WHO and WHEN, beside the verdict. A reader who can see only that something
+	// was accepted cannot tell a signature from an assumption.
+	for _, want := range []string{
+		"acceptedBy: \"Jon Pratten\"",
+		"acceptedAt: \"2026-08-19T16:28:31Z\"",
+		"met: true",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("the projection must carry %q so a reader can see WHO accepted it:\n%s", want, out)
+			t.Errorf("the projection must carry %q so a reader can see WHO accepted it and WHEN:\n%s", want, out)
 		}
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -69,7 +70,7 @@ func run() int {
 	case "plan":
 		return cmdPlan(os.Args[2:])
 	case "accept":
-		return cmdAccept(os.Args[2:])
+		return cmdAccept(ctx, os.Args[2:])
 	case "status":
 		return cmdStatus(os.Args[2:])
 	case "-h", "--help", "help":
@@ -654,7 +655,7 @@ func recordPreRunBoundary(host handoff.HostProfile, projectID, runID string, sta
 // what it writes says who answered and when. An acceptance the machine could
 // produce for itself would leave the same evidence as one a person gave, and
 // then the boundary is decoration.
-func cmdAccept(args []string) int {
+func cmdAccept(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("accept", flag.ContinueOnError)
 	projectID := fs.String("project", "", "the project being accepted")
 	criterion := fs.String("criterion", "", "the acceptance criterion being answered")
@@ -697,6 +698,17 @@ func cmdAccept(args []string) int {
 	}
 
 	fmt.Printf("ACCEPTED %s by %s\n", *criterion, *by)
+
+	// The answer has to reach the document as well as the record. Refreshing
+	// BEFORE observing is deliberate: the assessment reads the projection for
+	// what the packages did, so deriving the status first would report it from
+	// the document this acceptance has just made stale.
+	if err := refreshProjection(ctx, host, updated); err != nil {
+		return refuse(fmt.Errorf(
+			"%s is accepted and the record says so, but the published projection could not be "+
+				"refreshed, so the portal will keep reporting it outstanding: %w", *criterion, err))
+	}
+
 	status, err := observe(host, *projectID)
 	if err != nil {
 		return refuse(err)
@@ -706,6 +718,82 @@ func cmdAccept(args []string) int {
 		return exitOK
 	}
 	return exitHumanBoundary
+}
+
+// projectionStages are the run stages that render the delivery projection and
+// install it in the project's repository, in the order they must run.
+//
+// They are the run's OWN stages, named here rather than reimplemented. A second
+// renderer would be a second answer to "what did this delivery do", and the
+// whole point of this refresh is that there is only one.
+var projectionStages = []string{handoff.StageProject, handoff.StagePublishProjection}
+
+// refreshProjection re-renders and republishes the delivery projection from
+// canonical state, without starting a run.
+//
+// WHY THIS EXISTS. The projection is produced by two stages of a run, and a
+// criterion reserved to a person is answered after that run has finished — so
+// the document went on reporting the deliverable outstanding while the engine's
+// own state said complete. One project, two answers.
+//
+// It re-runs those two stages and nothing else. The stages are evidence-band
+// and idempotent by construction: they read the run's durable ledger, the
+// record and the forge, and write one document. No worker is started, no bead
+// is routed, no merged package is reopened. The run identity comes from the
+// record, so nothing here mints a run id, and the queue and journal are never
+// opened — this is not a run, it is the same run's last two stages asked again
+// over state that has since changed.
+//
+// The argv is the argv the compiler already produces for those stages, so the
+// refresh cannot drift from what the run does.
+func refreshProjection(ctx context.Context, host handoff.HostProfile, record handoff.Record) error {
+	plan, planned, err := handoff.LoadPlan(host.DeliveryRoot, record.Intent)
+	if err != nil {
+		return err
+	}
+	run, ran := record.LatestRun()
+	if !planned || !ran {
+		// Nothing has ever rendered a projection for this delivery, so there is
+		// nothing to bring up to date. Not an error: a delivery can be accepted
+		// before it has run.
+		return nil
+	}
+
+	_, work, err := handoff.Compile(record.Intent, plan, host, run.RunID)
+	if err != nil {
+		return err
+	}
+
+	for _, stage := range projectionStages {
+		task, found := taskByID(work, stage)
+		if !found {
+			return fmt.Errorf("the compiled run has no %q stage to refresh the projection with", stage)
+		}
+		cmd := exec.CommandContext(ctx, task.Argv[0], task.Argv[1:]...) //nolint:gosec // argv the compiler built
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		// A stage states its outcome only when a run is supervising it, and no
+		// run is. Clearing the contract's variables keeps this refresh from
+		// writing a stage result into the evidence of a run that has already
+		// finished — which would make a finished run appear to be moving.
+		cmd.Env = append(os.Environ(),
+			"GC_UNATTENDED_RESULT_PATH=",
+			"GC_UNATTENDED_STATE_DIR=")
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("re-running the %s stage: %w", stage, err)
+		}
+	}
+	return nil
+}
+
+// taskByID finds a compiled task by its stage id.
+func taskByID(work unattended.Plan, id string) (unattended.Task, bool) {
+	for _, t := range work.Tasks {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return unattended.Task{}, false
 }
 
 func cmdStatus(args []string) int {
