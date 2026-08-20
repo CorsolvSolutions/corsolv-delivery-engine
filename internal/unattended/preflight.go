@@ -142,6 +142,7 @@ func Preflight(ctx context.Context, spec Spec, plan *Plan) *Report {
 	r.Checks = append(r.Checks, CommandChecks(ctx, spec.Commands)...)
 	r.Checks = append(r.Checks, CredentialChecks(ctx, spec.Credentials)...)
 	r.Checks = append(r.Checks, stateChecks(spec)...)
+	r.Checks = append(r.Checks, DeclaredBoundaryChecks(spec.Boundaries)...)
 
 	switch plan {
 	case nil:
