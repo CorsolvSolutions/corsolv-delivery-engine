@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -245,5 +246,37 @@ func TestExecutableScriptsInThisCheckoutHaveNoCarriageReturns(t *testing.T) {
 			"The pre-commit hook shells out to one of these, so this is a checkout whose quality gate does nothing. "+
 			"Confirm .gitattributes pins them to LF, then `git add --renormalize .`.",
 			len(offenders), strings.Join(offenders, ", "))
+	}
+}
+
+// The same question as the line endings above, asked of the permission bit.
+//
+// The engine EXECUTES this script: every compiled task's argv begins with it,
+// and `refreshProjection` runs it directly outside a run. A checkout that
+// receives it non-executable cannot start a stage at all — the failure is one
+// line of stderr, at the first thing a delivery does:
+//
+//	./corsolv/delivery/driver.sh: Permission denied
+//
+// It survived this long because the delivery host runs the driver from a
+// Windows checkout mounted through DrvFs, where every file reports as
+// executable whatever git recorded. A Linux-native clone gets what git actually
+// recorded, and git recorded 100644.
+//
+// Skipped on Windows, where the mode bits are synthetic and this asks nothing.
+func TestTheDriverIsExecutableInThisCheckout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes are synthetic on Windows; the driver runs on the POSIX delivery host")
+	}
+	path := filepath.Join(repoRoot(t), "corsolv", "delivery", "driver.sh")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("%s is checked out %04o, so nothing can execute it.\n"+
+			"A fresh clone gets the mode git recorded, so fix the RECORD rather than this checkout: "+
+			"`git update-index --chmod=+x corsolv/delivery/driver.sh`.",
+			path, info.Mode().Perm())
 	}
 }
