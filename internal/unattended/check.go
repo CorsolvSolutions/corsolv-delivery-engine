@@ -63,6 +63,33 @@ func notReached(id string, c Category, title, why string) Check {
 	return Check{ID: id, Category: c, Title: title, Outcome: OutcomeNotReached, Detail: why}
 }
 
+// DeclaredBoundaryChecks publishes the boundaries the spec stated outright.
+//
+// They are reported as executed checks with a human-boundary outcome, not as
+// unrun ones: the limit is known, so it has been examined, and OutcomeNotReached
+// would make a fact the run is certain of read as an unexamined risk — turning
+// every run that declares one NOT-READY.
+func DeclaredBoundaryChecks(boundaries []KnownBoundary) Checks {
+	out := make(Checks, 0, len(boundaries))
+	for _, b := range boundaries {
+		title := b.Title
+		if strings.TrimSpace(title) == "" {
+			title = b.ID
+		}
+		out = append(out, Check{
+			ID:       b.ID,
+			Category: CategoryProject,
+			Title:    title,
+			Outcome:  OutcomeHumanBoundary,
+			Expected: "a person's answer",
+			Observed: "not answered",
+			Detail:   b.Detail,
+			Boundary: b.Action,
+		})
+	}
+	return out
+}
+
 // Checks is an ordered set of executed checks.
 type Checks []Check
 

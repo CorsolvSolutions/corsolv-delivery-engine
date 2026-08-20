@@ -57,6 +57,34 @@ type Spec struct {
 	// this run publishes nothing, and the report says so rather than pretending
 	// publication happened.
 	PublishPath string `toml:"publishPath,omitempty" json:"publishPath,omitempty"`
+
+	// Boundaries are the human limits this run already knows about before any
+	// probe runs.
+	//
+	// Every other boundary in a report is DISCOVERED — a missing credential, a
+	// merge permission the account does not have — because a probe can ask the
+	// world about it. Some cannot be asked: whether a person will accept a
+	// release is not a fact about this machine, and the only authority on it is
+	// the configuration that stated the limit. Declaring one here puts it in the
+	// same report, under the same outcome, as the ones a probe found, so a limit
+	// no probe can see is not silently missing from the answer to "may this run
+	// start".
+	Boundaries []KnownBoundary `toml:"boundary,omitempty" json:"boundaries,omitempty"`
+}
+
+// KnownBoundary is a limit only a person can lift, stated by the run's
+// configuration rather than found by a probe.
+type KnownBoundary struct {
+	// ID is the check id this boundary is published under. Tasks name it in
+	// RequiresChecks to be held behind it.
+	ID string `toml:"id" json:"id"`
+	// Title is the question the check answers, in the report's voice.
+	Title string `toml:"title,omitempty" json:"title,omitempty"`
+	// Detail says why the limit exists, for the person reading the report.
+	Detail string `toml:"detail,omitempty" json:"detail,omitempty"`
+	// Action names what only a person can do about it. A boundary nobody can
+	// act on is indistinguishable from a vague failure, so it is required.
+	Action string `toml:"action" json:"action"`
 }
 
 // ToolRequirement is an executable the run cannot proceed without.
@@ -292,6 +320,22 @@ func (s Spec) Validate() error {
 	}
 	if s.GitHub != nil && !strings.Contains(s.GitHub.Repo, "/") {
 		problems = append(problems, fmt.Sprintf("github.repo %q is not owner/name", s.GitHub.Repo))
+	}
+	seenBoundary := map[string]bool{}
+	for i, b := range s.Boundaries {
+		switch {
+		case strings.TrimSpace(b.ID) == "":
+			problems = append(problems, fmt.Sprintf("boundary[%d] has no id", i))
+		case seenBoundary[b.ID]:
+			// The report reduces boundaries to a map keyed by id, so a duplicate
+			// would quietly replace one human action with another.
+			problems = append(problems, fmt.Sprintf("boundary[%d] id %q is duplicated", i, b.ID))
+		default:
+			seenBoundary[b.ID] = true
+		}
+		if strings.TrimSpace(b.Action) == "" {
+			problems = append(problems, fmt.Sprintf("boundary[%d] (%s) names no action only a person can take", i, b.ID))
+		}
 	}
 	for i, r := range s.Classification {
 		if strings.TrimSpace(r.Pattern) == "" {

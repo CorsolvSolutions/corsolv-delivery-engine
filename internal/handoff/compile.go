@@ -266,6 +266,7 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 			NeedMerge:        in.Policy.NeedMerge,
 			MergeHumanAction: in.Policy.MergeHumanAction,
 		},
+		Boundaries: acceptanceBoundaries(in),
 	}
 
 	// Risk classification — the packet's half of mandatory-gate selection.
@@ -426,6 +427,35 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		return spec, work, fmt.Errorf("compiling the delivery run: %w", err)
 	}
 	return spec, work, nil
+}
+
+// acceptanceBoundaryPrefix namespaces the check id a reserved criterion is
+// published under, so it can never collide with a probe's check.
+const acceptanceBoundaryPrefix = "acceptance."
+
+// acceptanceBoundaries declares every criterion the intent reserved to a
+// person as a boundary the run knows about before it starts.
+//
+// No work package may claim one — the plan validator refuses that — so without
+// this declaration a reserved criterion would be invisible everywhere the run
+// is inspected before its first projection: absent from the plan because it is
+// not delivery's to do, and absent from the preflight report because no probe
+// can ask a person whether they will accept. Declaring it makes the omission
+// from the plan legible as a stated boundary rather than as a gap.
+func acceptanceBoundaries(in Intent) []unattended.KnownBoundary {
+	var out []unattended.KnownBoundary
+	for _, c := range in.Acceptance {
+		if !c.IsHuman() {
+			continue
+		}
+		out = append(out, unattended.KnownBoundary{
+			ID:     acceptanceBoundaryPrefix + c.ID,
+			Title:  "acceptance criterion " + c.ID + " is a person's to answer",
+			Detail: c.Statement,
+			Action: "a person accepts " + c.ID + " — delivery may prepare what they read and may never claim their answer",
+		})
+	}
+	return out
 }
 
 // The bounds a compiled delivery stage runs under.

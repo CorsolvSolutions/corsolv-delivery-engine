@@ -227,13 +227,7 @@ func deliveryReadiness(report *unattended.Report) unattended.Readiness {
 // be — and a person asking "could this start tonight" must not have to wait for
 // a planning agent to answer.
 func preflightDelivery(ctx context.Context, in handoff.Intent, host handoff.HostProfile) (*unattended.Report, error) {
-	placeholder := handoff.DeliveryPlan{
-		SchemaVersion: handoff.PlanSchemaVersion,
-		ProjectID:     in.ProjectID,
-		PlannedBy:     "preflight",
-		Packages:      preflightPackages(in),
-	}
-	spec, _, err := handoff.Compile(in, placeholder, host, "preflight")
+	spec, _, err := handoff.Compile(in, preflightPlan(in), host, "preflight")
 	if err != nil {
 		return nil, err
 	}
@@ -243,11 +237,37 @@ func preflightDelivery(ctx context.Context, in handoff.Intent, host handoff.Host
 	return unattended.Preflight(ctx, spec, nil), nil
 }
 
+// preflightPlan is the synthetic plan preflight compiles with.
+//
+// It never runs, and it is not a proposal: the real work is written by a
+// planning agent as the first thing a run does. Its only job is to be a plan
+// the compiler will accept, so that the checks which do not depend on what the
+// work turns out to be — ownership, tools, forge, durable state — can be asked
+// before anyone waits on a planner.
+func preflightPlan(in handoff.Intent) handoff.DeliveryPlan {
+	return handoff.DeliveryPlan{
+		SchemaVersion: handoff.PlanSchemaVersion,
+		ProjectID:     in.ProjectID,
+		PlannedBy:     "preflight",
+		Packages:      preflightPackages(in),
+	}
+}
+
 // preflightPackages is a minimal plan shaped only to satisfy the compiler.
 //
-// It never runs. One package per acceptance criterion is the smallest shape
-// that passes plan validation, and using the criteria rather than an invented
-// package keeps the preflight spec's phase list honest.
+// One package per criterion DELIVERY OWNS is the smallest shape that passes
+// plan validation, and using the criteria rather than an invented package keeps
+// the preflight spec's phase list honest.
+//
+// A criterion the intent reserved to a person is deliberately absent. The plan
+// validator refuses any package that claims one — a package may prepare what a
+// reviewer reads and may never claim their acceptance — so a placeholder that
+// claimed every criterion refused every intent with a human boundary at the
+// front door, before the planner that would have written a lawful plan was ever
+// asked. Nothing is lost by leaving it out: the validator does not demand
+// coverage of a reserved criterion, because that answer comes from outside any
+// plan, and Compile declares it as a known human boundary so preflight still
+// reports it. Ownership is read here and never rewritten.
 func preflightPackages(in handoff.Intent) []handoff.WorkPackage {
 	phase := "preflight"
 	if len(in.Lifecycle) > 0 {
@@ -255,6 +275,9 @@ func preflightPackages(in handoff.Intent) []handoff.WorkPackage {
 	}
 	out := make([]handoff.WorkPackage, 0, len(in.Acceptance))
 	for _, c := range in.Acceptance {
+		if c.IsHuman() {
+			continue
+		}
 		out = append(out, handoff.WorkPackage{
 			ID:              "wp-" + c.ID,
 			Title:           "placeholder for " + c.ID,
