@@ -77,6 +77,36 @@ type Criterion struct {
 	// evidence — so the machine approves its own release, and the boundary the
 	// project stated is the one thing the contract made unstateable.
 	AcceptedBy string `json:"acceptedBy,omitempty"`
+
+	// MustCover is the authoritative acceptance detail: the behaviors this
+	// criterion requires, in the words of whoever wants the work, stated so a
+	// machine can check a plan against them. Empty means the statement stands
+	// alone, exactly as every criterion did before this existed.
+	//
+	// Each entry is one required behavior. Alternatives the author considers
+	// the same thing are separated by `|` — "decimal|number" says those two
+	// words mean one requirement here, because whether they do is the author's
+	// call and nobody else's.
+	//
+	// THE DEFECT THIS EXISTS FOR. A pilot's brief required a per-column
+	// inferred type drawn from text / integer / decimal / boolean / date /
+	// mixed. What reached the engine was the sentence "the required overall and
+	// per-column data-quality measures", and the planner wrote itself a
+	// vocabulary without `mixed` in it. Every gate downstream was derived from
+	// that plan and every one of them passed, because each was asking whether
+	// the plan had been carried out — and it had. The project reported 8 of 8
+	// over a product missing a required behavior.
+	//
+	// The coverage rule that should have caught it only asked whether SOME
+	// package named this criterion's id. Naming a criterion is not delivering
+	// it, and there was nothing here for a plan to be compared against.
+	//
+	// This does NOT make Go judge prose; the statement above stays prose for
+	// exactly that reason. It lets the author say which words are load-bearing,
+	// and `DeliveryPlan.Validate` then refuses a plan whose covering work does
+	// not carry them. A planner may still split, reorder and reword the work —
+	// it may not quietly drop a requirement.
+	MustCover []string `json:"mustCover,omitempty"`
 }
 
 // Who may accept a criterion.

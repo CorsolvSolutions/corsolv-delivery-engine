@@ -337,10 +337,211 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		add("no work package addresses acceptance criteria %s — this plan cannot reach completion", strings.Join(uncovered, ", "))
 	}
 
+	// FIDELITY. Naming a criterion is not delivering it.
+	//
+	// The rule above is satisfied by a package that writes an id in a list, and
+	// that is all it ever checked. A pilot's planner claimed a criterion
+	// requiring six type names, wrote itself a contract with five different
+	// ones, and every gate after it — the worker's, the controller's re-run of
+	// the worker's, required CI — asked whether the PLAN had been carried out.
+	// It had. The project completed with a required behavior missing.
+	//
+	// So where the author declared what the criterion actually requires, the
+	// work claiming it has to carry those behaviors, and has to declare how
+	// they are verified. A planner may split the criterion across packages,
+	// reorder them and choose its own words for everything else: the check is
+	// over what the covering packages say TOGETHER.
+	for _, c := range in.Acceptance {
+		if c.IsHuman() || len(c.MustCover) == 0 {
+			continue
+		}
+		covering := coveringPackages(p.Packages, c.ID)
+		if len(covering) == 0 {
+			continue // already reported as uncovered above
+		}
+
+		// Verifiable, not merely mentioned. A criterion carrying required
+		// behavior is one completion will be decided on, and work with no
+		// declared gate has nothing that can demonstrate it.
+		var gated bool
+		for _, wp := range covering {
+			if len(wp.Gates) > 0 {
+				gated = true
+				break
+			}
+		}
+		if !gated {
+			add("%s requires behavior the plan must prove, and no work package claiming it declares a gate — "+
+				"a criterion nothing verifies cannot be evidence of anything", c.ID)
+		}
+
+		missing := missingBehaviours(coveringText(covering), c.MustCover)
+		if len(missing) > 0 {
+			add("%s requires %s, which no work package claiming it plans to deliver — a planner may split "+
+				"or reword the work and may not drop what it must achieve",
+				c.ID, strings.Join(quoteAll(missing), ", "))
+		}
+	}
+
 	if len(problems) > 0 {
 		return fmt.Errorf("%w: %s", ErrPlanInvalid, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// coveringPackages are the work packages that claim a criterion.
+func coveringPackages(pkgs []WorkPackage, criterion string) []WorkPackage {
+	var out []WorkPackage
+	for _, wp := range pkgs {
+		if containsPath(wp.Satisfies, criterion) {
+			out = append(out, wp)
+		}
+	}
+	return out
+}
+
+// coveringText is everything the packages claiming a criterion say they will
+// do, lower-cased, as one document.
+//
+// The objective is where a package states its work, and it is what the worker
+// is given; the title, artifact and gates are read too because a behavior can
+// legitimately live in the name of the thing that proves it. Nothing else is
+// consulted — an authorized path is a containment fact, not a promise.
+func coveringText(pkgs []WorkPackage) string {
+	var b strings.Builder
+	for _, wp := range pkgs {
+		b.WriteString(wp.Title)
+		b.WriteByte('\n')
+		b.WriteString(wp.Objective)
+		b.WriteByte('\n')
+		b.WriteString(wp.Artifact)
+		b.WriteByte('\n')
+		b.WriteString(strings.Join(wp.Gates, "\n"))
+		b.WriteByte('\n')
+	}
+	return strings.ToLower(b.String())
+}
+
+// missingBehaviours reports which required behaviors the covering work does
+// not say it will deliver, in the order the author wrote them.
+//
+// A behavior may be written as alternatives separated by `|`, and any one of
+// them satisfies it: "decimal|number" says those two words mean one requirement
+// here, because whether they do is the author's call and nobody else's. Nothing
+// here decides whether two different sentences mean the same thing — that
+// judgement is exactly what this design keeps out of Go, and an author who
+// wants latitude says so by writing the alternatives down.
+//
+// Two rules make the match mean something.
+//
+// WHOLE WORDS. "date" is not delivered by "candidate". A match has to start and
+// end on a word boundary, or a requirement is satisfied by any word that
+// happens to contain it.
+//
+// ONE OCCURRENCE ANSWERS ONE REQUIREMENT. This is what the pilot needed and did
+// not have. A plan listing "text, integer, decimal, boolean or date" and then
+// "report the columns containing mixed inferred types" contains the word
+// `mixed` — inside the OTHER requirement. Letting both requirements feed on the
+// same occurrence would accept the exact plan that shipped a product with no
+// mixed type in it. So a matched span is spent, and the longest requirements
+// are matched first, which keeps a broad phrase from being consumed a word at a
+// time by the narrow ones and makes the result independent of how the author
+// happened to order them.
+func missingBehaviours(said string, required []string) []string {
+	order := make([]int, len(required))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return longestAlternative(required[order[a]]) > longestAlternative(required[order[b]])
+	})
+
+	spent := make([]bool, len(said))
+	unmet := make([]bool, len(required))
+	for _, idx := range order {
+		if !claimOccurrence(said, spent, required[idx]) {
+			unmet[idx] = true
+		}
+	}
+
+	var missing []string
+	for i, gone := range unmet {
+		if gone {
+			missing = append(missing, required[i])
+		}
+	}
+	return missing
+}
+
+// longestAlternative is the length of the longest spelling a behavior accepts.
+func longestAlternative(required string) int {
+	longest := 0
+	for _, alt := range strings.Split(required, "|") {
+		if n := len(strings.TrimSpace(alt)); n > longest {
+			longest = n
+		}
+	}
+	return longest
+}
+
+// claimOccurrence spends the first unspent whole-word occurrence of any of a
+// behaviour's spellings, and reports whether it found one.
+func claimOccurrence(said string, spent []bool, required string) bool {
+	for _, alt := range strings.Split(required, "|") {
+		alt = strings.ToLower(strings.TrimSpace(alt))
+		if alt == "" {
+			continue
+		}
+		for at := 0; ; {
+			found := strings.Index(said[at:], alt)
+			if found < 0 {
+				break
+			}
+			start := at + found
+			end := start + len(alt)
+			at = start + 1
+			if !wholeWord(said, start, end) || spanIsSpent(spent, start, end) {
+				continue
+			}
+			for i := start; i < end; i++ {
+				spent[i] = true
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// wholeWord reports whether a span stands on its own rather than inside a
+// longer word.
+func wholeWord(said string, start, end int) bool {
+	return !isWordByte(said, start-1) && !isWordByte(said, end)
+}
+
+func isWordByte(said string, at int) bool {
+	if at < 0 || at >= len(said) {
+		return false
+	}
+	c := said[at]
+	return c == '_' || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9')
+}
+
+func spanIsSpent(spent []bool, start, end int) bool {
+	for i := start; i < end; i++ {
+		if spent[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// quoteAll renders required behaviors for a refusal a planner can act on.
+func quoteAll(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		out = append(out, fmt.Sprintf("%q", s))
+	}
+	return out
 }
 
 // Package returns the named package.
