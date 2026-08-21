@@ -56,6 +56,21 @@ type HostProfile struct {
 	// later command fails on a missing packs.lock. Declared here, exposed by
 	// name, for the same reason as the two above.
 	ProviderCommand string
+	// ProjectToolPath is where the PROJECT's own toolchain lives on this host:
+	// the directories prepended to PATH when the controller runs a project's own
+	// commands — its declared gates, and the dependency install that precedes
+	// them. Empty means the run's inherited PATH is used unchanged.
+	//
+	// This is the engine's own doctrine applied to the last thing still relying
+	// on PATH. A run detached into its own process group inherits no interactive
+	// shell's PATH, and on a host where the engine runs under WSL beside a
+	// Windows install the inherited one resolves `npm` to the WINDOWS npm — which
+	// then operates on a Linux worktree through a \\wsl.localhost\... UNC path —
+	// while `node` does not resolve at all. The controller's re-run of a
+	// package's declared gates is the evidence publication rests on, so it must
+	// be run by the toolchain the project is actually built with, and which one
+	// that is is a fact about this machine.
+	ProjectToolPath []string
 	// WindowsMountPrefix maps a Windows drive to its mount point on this host,
 	// e.g. "/mnt". Empty means paths are used as given.
 	WindowsMountPrefix string
@@ -269,6 +284,23 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 		Boundaries: acceptanceBoundaries(in),
 	}
 
+	// A declared toolchain directory that is not there is the same class of fact
+	// as a declared binary that is not there, and preflight is where both are
+	// caught — before a run starts rather than by the stage that needed it. It
+	// is never created: a toolchain preflight conjured into existence would be
+	// an empty directory, which is a worse answer than saying it is absent.
+	for _, dir := range host.ProjectToolPath {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		spec.Paths = append(spec.Paths, unattended.PathRequirement{
+			Path:    dir,
+			Kind:    unattended.PathDir,
+			Purpose: "the project's own toolchain, which the controller runs a package's declared gates with",
+		})
+	}
+
 	// Risk classification — the packet's half of mandatory-gate selection.
 	//
 	// This packet authors no code and compiles nothing. Every line of code a
@@ -342,6 +374,12 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	project = append(project, "-provider", host.Provider)
 	if cli := strings.TrimSpace(host.ProviderCommand); cli != "" {
 		project = append(project, "-provider-bin", cli)
+	}
+	// The project's own toolchain, declared for the same reason and carried by
+	// the same route. The driver prepends these to PATH for a project's own
+	// commands only; the engine's binaries stay exactly as declared above.
+	if dirs := host.projectToolPath(); dirs != "" {
+		project = append(project, "-project-path", dirs)
 	}
 
 	work.Tasks = append(work.Tasks,
@@ -551,6 +589,23 @@ func (h HostProfile) providerCLI() string {
 		return h.ProviderCommand
 	}
 	return h.Provider
+}
+
+// projectToolPath is the declared project toolchain as one PATH fragment, or
+// empty when the host declared none.
+//
+// Unlike the four above there is no default, and there must not be: a guess at
+// where a project's toolchain lives is exactly the guess that put the Windows
+// npm in front of a Linux worktree. A host that declares nothing gets the run's
+// inherited PATH, which is what it had before this existed.
+func (h HostProfile) projectToolPath() string {
+	dirs := make([]string, 0, len(h.ProjectToolPath))
+	for _, dir := range h.ProjectToolPath {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			dirs = append(dirs, dir)
+		}
+	}
+	return strings.Join(dirs, ":")
 }
 
 // orderPackages returns the packages in dependency order.

@@ -673,3 +673,84 @@ func TestTheCompiledRunClassifiesItsRiskAsSomethingItCanCover(t *testing.T) {
 		}
 	}
 }
+
+// The fourth time this host's own doctrine — "a detached run has no PATH" — was
+// found unapplied, and the first time it was found for the PROJECT's toolchain
+// rather than the engine's.
+//
+// The engine's own binaries are declared and exposed: gh, gc, bd and the
+// provider all reached the driver only after a pilot failed on each in turn.
+// The commands a project declares as its gates were left to PATH. In the exact
+// environment a detached run inherits on this host, `npm` resolves to
+// `/mnt/c/Program Files/nodejs/npm` — the WINDOWS npm, operating on a Linux
+// worktree through a `\wsl.localhost\...` UNC path — and `node` does not
+// resolve at all. So the controller's re-run of a package's declared gates,
+// which is the evidence publication rests on, was executed by a foreign
+// toolchain: it reported removing 130 packages from a tree it had just been
+// given, and any gate spelled `node ...` could only ever have failed.
+//
+// Where a project's toolchain lives on this machine is a machine-specific fact,
+// so it is declared here like every other one, and it must reach every stage.
+func TestTheProjectToolchainReachesTheDriver(t *testing.T) {
+	host := testHost(t)
+	host.ProjectToolPath = []string{"/home/operator/.local/bin", "/usr/local/bin"}
+
+	_, work, err := Compile(planIntent(), validPlan(), host, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range work.Tasks {
+		if !containsPath(task.Argv, "-project-path") {
+			t.Errorf("task %q was not told where the project's toolchain is: %v", task.ID, task.Argv)
+			continue
+		}
+		if got := argValue(task.Argv, "-project-path"); got != "/home/operator/.local/bin:/usr/local/bin" {
+			t.Errorf("task %q received %q, not the declared directories in order", task.ID, got)
+		}
+	}
+
+	// A host that says nothing says nothing: the driver's own PATH applies, and
+	// a project whose toolchain really is on it is unaffected.
+	bare := host
+	bare.ProjectToolPath = nil
+	_, work, err = Compile(planIntent(), validPlan(), bare, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range work.Tasks {
+		if containsPath(task.Argv, "-project-path") {
+			t.Errorf("task %q invented a project toolchain the host did not declare: %v", task.ID, task.Argv)
+		}
+	}
+}
+
+// A declared toolchain directory that is not there is the same class of fact as
+// a declared binary that is not there, and preflight is where both are caught —
+// before a run starts, rather than by the stage that needed it.
+func TestPreflightRequiresEachDeclaredProjectToolDirectory(t *testing.T) {
+	host := testHost(t)
+	host.ProjectToolPath = []string{"/home/operator/.local/bin"}
+
+	spec, _, err := Compile(planIntent(), validPlan(), host, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, p := range spec.Paths {
+		if p.Path == "/home/operator/.local/bin" {
+			found = true
+			if p.Kind != unattended.PathDir {
+				t.Errorf("a project toolchain directory must be required as a directory, got %v", p.Kind)
+			}
+			if p.Create {
+				t.Error("preflight must not CREATE a toolchain directory; an absent one is a fact to report")
+			}
+			if p.Purpose == "" {
+				t.Error("the requirement must say what the run needs it for")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the compiled spec does not require the declared toolchain directory: %+v", spec.Paths)
+	}
+}

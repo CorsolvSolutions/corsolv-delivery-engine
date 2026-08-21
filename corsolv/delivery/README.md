@@ -53,6 +53,7 @@ githubCommand      = "/mnt/c/Program Files/GitHub CLI/gh.exe"
 gascityCommand     = "/home/you/.local/bin/gc"
 beadsCommand       = "/home/you/.local/bin/bd"
 provider           = "claude"
+projectToolPath    = ["/home/you/.local/bin"]
 windowsMountPrefix = "/mnt"
 plannerCommand     = "claude"
 plannerArgs        = ["-p", "--permission-mode", "plan"]
@@ -73,6 +74,18 @@ than discovered by the stage that needed it.
 lookup from a script it shells out to, and will not build a city without it. So
 the driver exposes the declared binaries — and only those — through a directory
 the run owns, and puts that on PATH for its children.
+
+`projectToolPath` is the same fact about the **project's** toolchain rather than
+the engine's, and it was the last thing still trusting PATH. The controller
+re-runs a package's declared gates before it publishes, and that re-run is the
+evidence publication rests on — so which `npm`, which `node`, which `go` it uses
+is not a detail. In the environment a detached run actually inherits on this
+host, `npm` resolves to `/mnt/c/Program Files/nodejs/npm` — the Windows npm,
+reaching a Linux worktree through a `\\wsl.localhost\…` UNC path — and `node`
+does not resolve at all. These directories are prepended to PATH for a project's
+own commands only; the engine's own binaries stay exactly as declared above. A
+host that declares none is unchanged, and preflight reports a declared directory
+that is not there rather than creating one.
 
 Planning is normally an agent's job. `delivery plan -from` exists for when a
 person already knows the answer, or when the agent runtime is unavailable —
