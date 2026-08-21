@@ -45,12 +45,50 @@ func PlanPrompt(in Intent) string {
 	b.WriteString("\nOBJECTIVE\n  ")
 	b.WriteString(strings.ReplaceAll(in.Objective, "\n", "\n  "))
 	b.WriteString("\n\nACCEPTANCE CRITERIA\n")
+	var anyMustCover bool
 	for _, c := range in.Acceptance {
 		if c.IsHuman() {
+			// A person's criterion carries no required behaviors into this
+			// prompt even when it declares some. The validator skips them for
+			// exactly this criterion, and showing them here would ask for work
+			// the very next words forbid the planner to claim.
 			fmt.Fprintf(&b, "  %s: %s [ACCEPTED BY A PERSON - do not claim it]\n", c.ID, c.Statement)
 			continue
 		}
 		fmt.Fprintf(&b, "  %s: %s\n", c.ID, c.Statement)
+
+		// WHAT THE VALIDATOR WILL ACTUALLY MEASURE THE PLAN AGAINST.
+		//
+		// `MustCover` is the author saying which words are load-bearing, and
+		// `DeliveryPlan.Validate` refuses a plan whose covering work does not
+		// carry them. Stating the criterion's prose and withholding the list
+		// meant the agent was rejected against a rubric it had never seen, with
+		// two planning attempts in total — so the first project to declare
+		// required behaviors would have spent them learning the rule.
+		//
+		// The alternatives are printed verbatim, separator included: "a|b" says
+		// those spellings are one requirement, and a planner shown only the
+		// first would not know the second is equally acceptable.
+		if len(c.MustCover) > 0 {
+			anyMustCover = true
+			fmt.Fprintf(&b, "      MUST COVER: %s\n", strings.Join(c.MustCover, " | "))
+		}
+	}
+	if anyMustCover {
+		b.WriteString(`
+REQUIRED BEHAVIOR
+
+  A criterion with a MUST COVER line states behaviors the plan is measured
+  against, not suggestions. For each one, the packages that claim that
+  criterion must TOGETHER name every listed behavior in their title,
+  objective, artifact or gates, and at least one of them must declare a gate
+  that proves it. A behavior written as "a|b" is satisfied by either spelling;
+  write whichever you mean.
+
+  You may split the criterion across packages, reorder them and choose your own
+  words for everything else. You may not drop a behavior: a plan missing one is
+  rejected and names exactly which.
+`)
 	}
 
 	b.WriteString(`
