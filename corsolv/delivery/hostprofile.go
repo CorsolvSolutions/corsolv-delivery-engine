@@ -27,6 +27,12 @@ type hostFile struct {
 	Provider           string `toml:"provider"`
 	WindowsMountPrefix string `toml:"windowsMountPrefix"`
 
+	// ProjectToolPath is where the project's own toolchain lives on this host.
+	// Declared for the same reason every other binary here is: a detached run
+	// inherits no interactive shell's PATH, and on this machine the one it does
+	// inherit resolves `npm` to a Windows install and `node` to nothing at all.
+	ProjectToolPath []string `toml:"projectToolPath"`
+
 	// PlannerCommand and PlannerArgs are the agent that turns a brief into
 	// work packages.
 	PlannerCommand string   `toml:"plannerCommand"`
@@ -73,6 +79,7 @@ func loadHost(path string) (handoff.HostProfile, handoff.Planner, error) {
 		BeadsCommand:       f.BeadsCommand,
 		ProviderCommand:    f.ProviderCommand,
 		Provider:           f.Provider,
+		ProjectToolPath:    f.ProjectToolPath,
 		WindowsMountPrefix: f.WindowsMountPrefix,
 	}
 	if err := host.Validate(); err != nil {

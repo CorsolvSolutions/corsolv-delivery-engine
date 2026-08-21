@@ -135,6 +135,7 @@ GASCITY=''
 BEADS=''
 PROVIDER=''
 PROVIDER_BIN=''
+PROJECT_PATH=''
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -147,6 +148,7 @@ while [ $# -gt 0 ]; do
     -bd)      BEADS="${2:-}"; shift 2 ;;
     -provider)     PROVIDER="${2:-}"; shift 2 ;;
     -provider-bin) PROVIDER_BIN="${2:-}"; shift 2 ;;
+    -project-path) PROJECT_PATH="${2:-}"; shift 2 ;;
     *) printf 'driver: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -231,6 +233,33 @@ expose_tool bd "$BEADS"
 expose_tool "$PROVIDER" "$PROVIDER_BIN"
 PATH="$TOOLBIN:$PATH"
 export PATH
+
+# run_project_command runs one of the PROJECT's own commands — a declared gate,
+# or the dependency install that precedes it — under the toolchain this host
+# declared for it, with nothing on its stdin.
+#
+# THE TWO DEFECTS THIS EXISTS FOR, both found by a pilot rather than by review,
+# and both in the one place the controller's own verification happens.
+#
+# THE TOOLCHAIN. Everything the ENGINE runs is declared and exposed above; the
+# commands a PROJECT declares were left to PATH. In the environment a detached
+# run actually inherits on this host, `npm` resolves to `/mnt/c/.../nodejs/npm`
+# — the Windows npm, reaching a Linux worktree through a `\\wsl.localhost\...`
+# UNC path — and `node` does not resolve at all. So the controller re-ran a
+# package's gates with a foreign toolchain: it reported REMOVING 130 packages
+# from a tree it had just installed, and any gate spelled `node ...` could only
+# ever have failed. Which toolchain a project is built with is a fact about the
+# machine, so it is declared in the host profile and arrives as -project-path.
+#
+# THE STDIN. A gate that reads stdin used to consume the loop that was feeding
+# it the gates, so the loop ended after the first one and the controller
+# verified exactly one of every package's declared gates while reporting it had
+# run them all. Closing stdin is what makes a gate's own appetite irrelevant;
+# reading the list into an array first (below) is what makes it structural.
+run_project_command() {
+  local wt="$1"; shift
+  ( cd "$wt" && PATH="${PROJECT_PATH:+$PROJECT_PATH:}$PATH" "$@" ) < /dev/null
+}
 
 say() { printf 'driver[%s] %s\n' "$STAGE" "$1" >&2; }
 
@@ -725,7 +754,30 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
     rt_set "branch.$id" "$branch"
   done
 
+  # Pass 4: route, and only what has somewhere to work.
+  #
+  # THE DEFECT THIS EXISTS FOR. Routing every package here routed the ones whose
+  # upstreams had not merged — packages that deliberately have no worktree yet.
+  # A routed bead is Gas City's to act on, so when the upstream merged and the
+  # bead opened, Gas City cut a worktree OF ITS OWN, on a branch of its own
+  # naming, and woke a worker in it. The controller's own preparation — this
+  # package's gate grant, and its dependency install — is done when the
+  # controller cuts the tree, and the tree already existed, so none of it ever
+  # reached that worker. It was left deny-by-default with an instruction to
+  # verify itself, could run neither `npm` nor `node`, and closed `blocked`
+  # having written two of its four files and proved nothing. Which is the right
+  # answer to an impossible instruction, and a lost package.
+  #
+  # `recover_worker` has stated the rule all along — a package with no worktree
+  # is waiting, not orphaned, and routing it "would put a worker somewhere that
+  # does not exist". Dispatch is where that rule was not applied.
+  # `ensure_package_worktree` routes each of these the moment it cuts and
+  # prepares its tree, so nothing is left unrouted, only routed later.
   for id in $(packages); do
+    if [ -n "$(pkg_deps "$id")" ]; then
+      say "$id has no base yet; it is routed when its upstreams merge and its tree is cut"
+      continue
+    fi
     route_bead "$id" "$(rt_get "bead.$id")"
   done
 
@@ -744,8 +796,8 @@ prepare_worktree() {
   local wt="$1" id="$2"
   install_package_gates "$wt" "$id"
   if [ -f "$wt/package.json" ]; then
-    ( cd "$wt" && npm ci --silent ) > "$EVIDENCE/prepare-$id.txt" 2>&1 \
-      || ( cd "$wt" && npm install --silent ) >> "$EVIDENCE/prepare-$id.txt" 2>&1 \
+    run_project_command "$wt" npm ci --silent > "$EVIDENCE/prepare-$id.txt" 2>&1 \
+      || run_project_command "$wt" npm install --silent >> "$EVIDENCE/prepare-$id.txt" 2>&1 \
       || say "dependency install for $id reported a problem; see prepare-$id.txt"
   fi
 }
@@ -805,7 +857,18 @@ ensure_package_worktree() {
   branch="$(rt_get "branch.$id")"
   bead="$(rt_get "bead.$id")"
   [ -n "$wt" ] && [ -n "$branch" ] || die "no worktree recorded for $id; dispatch has not run"
-  [ -d "$wt" ] && return 0
+
+  # A tree that is already there is not necessarily a tree this controller cut.
+  # Gas City cuts one for a routed bead it is asked to act on, and a run started
+  # before routing waited for the base could arrive here with exactly that. The
+  # preparation is what a worker cannot do for itself and is idempotent, so it
+  # is applied to whatever tree is in hand rather than only to one this stage
+  # created — otherwise the grant reaches every package except the ones that
+  # lost the race for their own directory.
+  if [ -d "$wt" ]; then
+    prepare_worktree "$wt" "$id"
+    return 0
+  fi
 
   git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH"
   mergedBase="$(git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
@@ -1199,15 +1262,28 @@ run_project_gates() {
   # else would judge the work against a different standard than the one the
   # worker was given and permitted, which is how "the worker verified it" and
   # "the controller verified it" come to mean two different things.
+  # The gates are read into an array BEFORE any of them runs. Read one at a
+  # time from a here-string, the first gate that touched stdin drained the list
+  # feeding the loop — a real `npm install` does — and the loop ended after it.
+  # Every package in the pilot that found this was published on the strength of
+  # exactly one of its declared gates, while the run's own account said it had
+  # re-run them all. A list that is already in hand cannot be consumed by what
+  # it is a list of.
   local gate n=0
+  local -a gateList=()
   while IFS= read -r gate; do
     [ -n "$gate" ] || continue
+    gateList+=("$gate")
+  done <<< "$(pkg_gates "$id")"
+
+  for gate in ${gateList+"${gateList[@]}"}; do
     n=$((n + 1))
     # shellcheck disable=SC2086 # a validated gate is a bare command, by contract
-    ( cd "$wt" && $gate ) > "$EVIDENCE/gate-$n-$id.txt" 2>&1 \
+    run_project_command "$wt" $gate > "$EVIDENCE/gate-$n-$id.txt" 2>&1 \
       || { say "$id failed its declared gate '$gate'; see gate-$n-$id.txt"; ok=1; }
-  done <<< "$(pkg_gates "$id")"
+  done
   if [ "$n" -gt 0 ]; then
+    say "$id: the controller re-ran all $n declared gate(s)"
     return $ok
   fi
 
@@ -1215,12 +1291,12 @@ run_project_gates() {
     local script
     for script in typecheck test; do
       if jq -e --arg s "$script" '.scripts[$s] // empty' < "$wt/package.json" >/dev/null 2>&1; then
-        ( cd "$wt" && npm run "$script" --silent ) > "$EVIDENCE/gate-$script-$id.txt" 2>&1 \
+        run_project_command "$wt" npm run "$script" --silent > "$EVIDENCE/gate-$script-$id.txt" 2>&1 \
           || { say "$id failed npm run $script; see gate-$script-$id.txt"; ok=1; }
       fi
     done
   elif [ -f "$wt/go.mod" ]; then
-    ( cd "$wt" && go build ./... && go test ./... ) > "$EVIDENCE/gate-go-$id.txt" 2>&1 \
+    run_project_command "$wt" sh -c 'go build ./... && go test ./...' > "$EVIDENCE/gate-go-$id.txt" 2>&1 \
       || { say "$id failed the Go gates; see gate-go-$id.txt"; ok=1; }
   else
     say "$id has no recognized manifest; the required CI run is its gate"

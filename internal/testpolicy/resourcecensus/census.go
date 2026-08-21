@@ -203,8 +203,24 @@ var bootstrapPolicy = Ledger{
 			// The untagged Debt baseline is untouched again: the file is
 			// integration-tagged, and the observeRun regressions added beside it
 			// read two JSON documents from a temp dir and spawn nothing at all.
-			BaselineCalls:   631,
-			BaselineFiles:   179,
+			// 631/179 -> 633/180: how the controller runs a PROJECT's own
+			// commands (corsolv/delivery/driver_project_toolchain_test.go). One
+			// integration-tagged file with two subprocess call sites: git,
+			// cutting the worktree Gas City would have cut for a bead it was
+			// asked to act on, and bash, running the driver's await stage over
+			// it. Both spawn because the three defects the file pins are about
+			// which PROCESS ran and where — a worker woken in a tree the
+			// controller never prepared, a gate loop ended by a gate that read
+			// its stdin, and a project command resolved to a foreign operating
+			// system's npm. None of the three is observable without really
+			// running the driver and really having two toolchains to choose
+			// between.
+			//
+			// The untagged Debt baseline is untouched again: the file is
+			// integration-tagged, and the compile regressions added beside it
+			// (internal/handoff) assert on a compiled argv and spawn nothing.
+			BaselineCalls:   633,
+			BaselineFiles:   180,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
