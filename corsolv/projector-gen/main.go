@@ -74,6 +74,25 @@ type factsFile struct {
 		// support is still the projector's to derive.
 		AcceptedBy string `json:"acceptedBy"`
 		AcceptedAt string `json:"acceptedAt"`
+		// Invalidated is the durable record's finding that this deliverable,
+		// once evidenced, was not actually delivered. RemediatedBy names the
+		// packages an authorized remediation added to repair it.
+		//
+		// Facts again, and for a sharper reason than the rest: the task rows
+		// below say the packages merged and their gates passed, which is
+		// exactly what they did — and exactly what the finding disproves. A
+		// verdict derived from the rows alone can only conclude the thing that
+		// was proved false, so the finding has to reach the projector. Whether
+		// it makes the deliverable unmet is still the projector's to decide.
+		Invalidated *struct {
+			Seq           int    `json:"seq"`
+			By            string `json:"by"`
+			Reason        string `json:"reason"`
+			Evidence      string `json:"evidence"`
+			At            string `json:"at"`
+			PreviousState string `json:"previousState"`
+		} `json:"invalidated"`
+		RemediatedBy []string `json:"remediatedBy"`
 	} `json:"deliverables"`
 }
 
@@ -137,13 +156,25 @@ func main() {
 	state.Project.LatestAcceptedMainSha = facts.Project.LatestAcceptedMainSha
 
 	for _, fd := range facts.Deliverables {
-		state.Deliverables = append(state.Deliverables, projector.Deliverable{
-			ID:          fd.ID,
-			Statement:   fd.Statement,
-			SatisfiedBy: fd.SatisfiedBy,
-			AcceptedBy:  fd.AcceptedBy,
-			AcceptedAt:  fd.AcceptedAt,
-		})
+		d := projector.Deliverable{
+			ID:           fd.ID,
+			Statement:    fd.Statement,
+			SatisfiedBy:  fd.SatisfiedBy,
+			AcceptedBy:   fd.AcceptedBy,
+			AcceptedAt:   fd.AcceptedAt,
+			RemediatedBy: fd.RemediatedBy,
+		}
+		if fd.Invalidated != nil {
+			d.Invalidated = &projector.DeliverableInvalidation{
+				Seq:           fd.Invalidated.Seq,
+				By:            fd.Invalidated.By,
+				Reason:        fd.Invalidated.Reason,
+				Evidence:      fd.Invalidated.Evidence,
+				At:            fd.Invalidated.At,
+				PreviousState: fd.Invalidated.PreviousState,
+			}
+		}
+		state.Deliverables = append(state.Deliverables, d)
 	}
 
 	byBead := map[string]string{}

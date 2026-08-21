@@ -71,6 +71,10 @@ func run() int {
 		return cmdPlan(os.Args[2:])
 	case "accept":
 		return cmdAccept(ctx, os.Args[2:])
+	case "invalidate":
+		return cmdInvalidate(ctx, os.Args[2:])
+	case "remediate":
+		return cmdRemediate(ctx, os.Args[2:])
 	case "status":
 		return cmdStatus(os.Args[2:])
 	case "-h", "--help", "help":
@@ -103,6 +107,16 @@ func usage() {
   accept -project <id> -criterion <id> -by <person> [-note <text>] [-host <file>]
       Record a person's acceptance of a criterion the intent reserved for one.
       Refused for anything delivery is expected to satisfy and prove itself.
+
+  invalidate -project <id> -criterion <id> -by <actor> -reason <text> -evidence <ref> [-host <file>]
+      Record that a delivery-owned criterion reported met was not actually
+      satisfied. Append-only: nothing earlier is deleted, and the criterion
+      stops counting as met until authorized corrective work repairs it.
+
+  remediate -project <id> [-from <file> -by <actor>] [-host <file>]
+      Print the corrective work this project has had authorized, or authorize
+      more with -from. Additive: the original plan is never replaced, and a
+      remedial package may claim only the criteria it repairs.
 
   status -project <id> [-host <file>]
       Print the canonical delivery state as JSON.
@@ -581,13 +595,26 @@ func cmdPlan(args []string) int {
 			return refuse(merr)
 		}
 		fmt.Println(string(data))
+		// THE PLAN IS WHAT WAS PLANNED. Corrective work authorized after a
+		// criterion was disproved lives in its own documents and is deliberately
+		// not folded in here — this output is the historical record the merged
+		// work was measured against. But a reader who saw only this would
+		// undercount the delivery, so its existence is named.
+		if n := len(existing.Remediations); n > 0 {
+			fmt.Fprintf(os.Stderr,
+				"%s also has %d authorized remediation(s) adding %d work package(s); "+
+					"see `delivery remediate -project %s`\n",
+				*projectID, n, len(existing.AllPackages())-len(existing.Packages), *projectID)
+		}
 		return exitOK
 	}
 
 	if hasPlan {
 		return refuse(fmt.Errorf(
 			"delivery for %q already has a plan of %d work package(s) — a delivery part-way through has "+
-				"merged work against the plan it started with, so it is not replaced",
+				"merged work against the plan it started with, so it is not replaced. "+
+				"To repair a criterion later evidence disproved, record the finding with "+
+				"`delivery invalidate` and authorize additive work with `delivery remediate`",
 			*projectID, len(existing.Packages)))
 	}
 
@@ -855,7 +882,8 @@ func observe(host handoff.HostProfile, projectID string) (handoff.Status, error)
 		// package id and reads each package's completion gate; the run publisher's
 		// document has neither, so reading it scored a fully merged, fully gated
 		// delivery as entirely outstanding.
-		ev, err = handoff.Assess(plan, record.Intent, host.DeliveryProjectionPath(projectID), record.Acceptances)
+		ev, err = handoff.Assess(plan, record.Intent, host.DeliveryProjectionPath(projectID),
+			record.Acceptances, record.Invalidations)
 		if err != nil {
 			return handoff.Status{}, err
 		}

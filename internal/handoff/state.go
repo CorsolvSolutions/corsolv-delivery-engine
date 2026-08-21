@@ -55,6 +55,23 @@ type Status struct {
 	PackagesTotal    int `json:"packagesTotal"`
 	PackagesComplete int `json:"packagesComplete"`
 
+	// Criteria counts what the project agreed to deliver, rather than the work
+	// delivery did to get there.
+	//
+	// WHY BOTH COUNTERS EXIST. They are different questions, and until a
+	// criterion could be disproved they always agreed, so one of them looked
+	// redundant. It is not. A criterion withdrawn on later evidence leaves every
+	// package that claimed it exactly as it was — merged, gate met, genuinely
+	// finished — because that is what happened and reopening finished work would
+	// be rewriting it. So the package counter reads 3 of 3 while the project is
+	// not delivered, and reporting that as progress would say a project with a
+	// disproved deliverable is 100% done.
+	//
+	// The criterion counter is the one that answers "how much of what was asked
+	// for is delivered", and it is the one that drops.
+	CriteriaTotal int `json:"criteriaTotal"`
+	CriteriaMet   int `json:"criteriaMet"`
+
 	// Boundaries are the human actions delivery already knows it cannot take.
 	Boundaries []string `json:"boundaries,omitempty"`
 
@@ -94,6 +111,16 @@ type Evidence struct {
 	// into a failure.
 	AwaitingHuman []string `json:"awaitingHuman,omitempty"`
 
+	// Invalidated are the criteria whose earlier met result has been withdrawn
+	// on later evidence, and which no authorized remediation has yet repaired.
+	//
+	// They are carried in full rather than as a list of ids because this is the
+	// one reason a criterion can be outstanding that the packages cannot
+	// explain. Every other entry in AcceptanceOutstanding is answered by looking
+	// at the work; this one is answered only by the finding, so the finding
+	// travels with the assessment to whoever reads it.
+	Invalidated []InvalidatedCriterion `json:"invalidated,omitempty"`
+
 	// BlockingTasks are tasks the projection reports as blocked.
 	BlockingTasks []string `json:"blockingTasks,omitempty"`
 
@@ -103,6 +130,27 @@ type Evidence struct {
 
 	// Reasons says, in order, what is still missing. Empty exactly when Met.
 	Reasons []string `json:"reasons,omitempty"`
+}
+
+// InvalidatedCriterion is a standing finding as the assessment reports it: what
+// was withdrawn, who withdrew it, why, against what, and what has been
+// authorized to repair it.
+type InvalidatedCriterion struct {
+	CriterionID string `json:"criterionId"`
+	// Invalidation is the finding's sequence in the record, which is what a
+	// remediation names when it answers this.
+	Invalidation int       `json:"invalidation"`
+	By           string    `json:"by"`
+	Reason       string    `json:"reason"`
+	Evidence     string    `json:"evidence"`
+	At           time.Time `json:"at"`
+	// PreviousState is what the assessment said before this finding withdrew it.
+	PreviousState string `json:"previousState"`
+	// RemedialPackages are the packages an authorized remediation added to
+	// repair this criterion. Empty means no remediation has been authorized
+	// yet — the criterion is disproved and nothing is being done about it, which
+	// is a materially different state from disproved and under repair.
+	RemedialPackages []string `json:"remedialPackages,omitempty"`
 }
 
 // projection is the slice of the published PROJECT-STATE.yml this assessment
@@ -161,13 +209,27 @@ var acceptedStatuses = map[string]bool{
 // The signature takes the projection path rather than a parsed document so that
 // a missing projection — the normal state before anything has run — is handled
 // here rather than by every caller.
-func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acceptance) (Evidence, error) {
+//
+// `invalidations` are the record's findings that a criterion reported met was
+// not actually satisfied. They are a parameter for the same reason `accepted`
+// is: both are durable record facts, and this function's whole discipline is
+// that it derives a verdict from facts it is handed rather than reading a
+// stored one.
+func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acceptance, invalidations []Invalidation) (Evidence, error) {
 	answered := map[string]bool{}
 	for _, a := range accepted {
 		answered[a.CriterionID] = true
 	}
+	// The latest finding against each criterion. Earlier ones are history: a
+	// criterion can be disproved, repaired and disproved again, and only the
+	// last finding can still be standing.
+	latest := map[string]Invalidation{}
+	for _, inv := range invalidations {
+		latest[inv.CriterionID] = inv
+	}
 	ev := Evidence{}
-	for _, wp := range plan.Packages {
+	all := plan.AllPackages()
+	for _, wp := range all {
 		ev.RequiredPackages = append(ev.RequiredPackages, wp.ID)
 	}
 	sort.Strings(ev.RequiredPackages)
@@ -206,7 +268,7 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 	}
 
 	complete := map[string]bool{}
-	for _, wp := range plan.Packages {
+	for _, wp := range all {
 		o, seen := byTask[wp.ID]
 		switch {
 		case !seen:
@@ -249,7 +311,7 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 		}
 		claimed := 0
 		done := 0
-		for _, wp := range plan.Packages {
+		for _, wp := range all {
 			for _, s := range wp.Satisfies {
 				if s != c.ID {
 					continue
@@ -260,7 +322,39 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 				}
 			}
 		}
-		if claimed > 0 && claimed == done {
+		delivered := claimed > 0 && claimed == done
+
+		// AND THE FINDING, IF THERE IS ONE.
+		//
+		// The arithmetic above asks whether the plan was carried out. That is
+		// exactly the question a disproved criterion has already answered yes
+		// to and been wrong about — the pilot's packages all merged with met
+		// gates over a product missing a required behavior. So a standing
+		// finding outranks the count until work authorized specifically to
+		// answer THAT finding has itself completed.
+		//
+		// Authorized specifically for it, not merely present: a remediation
+		// answering the first disproof of a criterion must not silently clear a
+		// second one raised after it, which is why the finding's sequence is
+		// what a remediation names.
+		if inv, found := latest[c.ID]; found {
+			repaired := repairedBy(plan.Remediations, c.ID, inv.Seq)
+			if len(repaired) == 0 || !delivered {
+				delivered = false
+				ev.Invalidated = append(ev.Invalidated, InvalidatedCriterion{
+					CriterionID:      c.ID,
+					Invalidation:     inv.Seq,
+					By:               inv.By,
+					Reason:           inv.Reason,
+					Evidence:         inv.Evidence,
+					At:               inv.At,
+					PreviousState:    inv.PreviousState,
+					RemedialPackages: repaired,
+				})
+			}
+		}
+
+		if delivered {
 			ev.AcceptanceMet = append(ev.AcceptanceMet, c.ID)
 		} else {
 			ev.AcceptanceOutstanding = append(ev.AcceptanceOutstanding, c.ID)
@@ -269,6 +363,9 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 	sort.Strings(ev.AcceptanceMet)
 	sort.Strings(ev.AcceptanceOutstanding)
 	sort.Strings(ev.AwaitingHuman)
+	sort.Slice(ev.Invalidated, func(i, j int) bool {
+		return ev.Invalidated[i].CriterionID < ev.Invalidated[j].CriterionID
+	})
 
 	ev.MergedMainSha = proj.Project.LatestAcceptedMainSha
 
@@ -286,6 +383,23 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 		ev.Reasons = append(ev.Reasons,
 			"acceptance criteria not met: "+strings.Join(ev.AcceptanceOutstanding, ", "))
 	}
+	// Named separately, and in the criterion's own terms. A disproved criterion
+	// appears in the line above as an id among ids, which reads as work that has
+	// not finished — and this one is the opposite: work that finished, was
+	// believed, and was wrong. A reader who cannot tell those apart from the
+	// status cannot act on either.
+	for _, inv := range ev.Invalidated {
+		reason := fmt.Sprintf("%s was %s and is no longer: %s (evidence: %s; invalidation %d recorded by %s at %s)",
+			inv.CriterionID, inv.PreviousState, inv.Reason, inv.Evidence,
+			inv.Invalidation, inv.By, inv.At.UTC().Format(time.RFC3339))
+		switch {
+		case len(inv.RemedialPackages) == 0:
+			reason += " — no remediation has been authorized for it"
+		default:
+			reason += " — remediation authorized: " + strings.Join(inv.RemedialPackages, ", ")
+		}
+		ev.Reasons = append(ev.Reasons, reason)
+	}
 	if n := len(ev.AwaitingHuman); n > 0 {
 		ev.Reasons = append(ev.Reasons,
 			"awaiting human acceptance: "+strings.Join(ev.AwaitingHuman, ", "))
@@ -302,6 +416,26 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 
 	ev.Met = len(ev.Reasons) == 0
 	return ev, nil
+}
+
+// repairedBy names the packages an authorized remediation added to repair one
+// specific finding against one criterion.
+//
+// The finding's sequence is matched, not merely the criterion. A remediation
+// that answered an earlier disproof of the same criterion is history: letting
+// it clear a later finding would mean a criterion could be disproved a second
+// time and go on reporting met, on the strength of work that predates the
+// evidence against it.
+func repairedBy(remediations []Remediation, criterionID string, seq int) []string {
+	var out []string
+	for _, rm := range remediations {
+		if !rm.RepairsInvalidation(criterionID, seq) {
+			continue
+		}
+		out = append(out, rm.PackagesFor(criterionID)...)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RunObservation is what the caller learned about the run from the authorities
@@ -360,9 +494,14 @@ func Derive(
 		ObservedAt: now.UTC(),
 	}
 	if planFound {
-		st.PackagesTotal = len(plan.Packages)
+		st.PackagesTotal = len(plan.AllPackages())
 		st.PackagesComplete = len(ev.CompletePackages)
 	}
+	// Criteria are counted from the assessment rather than from the plan,
+	// because the assessment is the only thing that knows about a criterion a
+	// person answers — no package claims one, so a plan cannot count it.
+	st.CriteriaMet = len(ev.AcceptanceMet)
+	st.CriteriaTotal = len(ev.AcceptanceMet) + len(ev.AcceptanceOutstanding) + len(ev.AwaitingHuman)
 
 	switch {
 	case !admitted:

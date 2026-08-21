@@ -432,3 +432,55 @@ scaffold worker raised through a bead close reason were correct and are visible
 in the shipped `package.json`: the `@types/node` it added, and the test script
 it corrected because the plan's spelling cannot pass on the Node its own CI
 pins. It was right twice and had to spend a close reason to say so.
+
+## Criterion reconciliation, 2026-08-21
+
+The completed profiler pilot exposed a governance gap rather than a bug in any
+one component. A delivery-owned criterion could be reported met, the project
+could reach `completed` on the strength of it, and later evidence could prove
+the criterion was never satisfied — with no supported way for the engine to say
+so.
+
+Both operations that look like they should express it refused, and both
+refusals were correct:
+
+```
+$ delivery accept -project reconciliation-probe -criterion ac-3 -by "Jon Pratten"
+REFUSED
+handoff: delivery record conflicts with this request: ac-3 is delivery's to
+satisfy and prove — accepting it by hand would forge the evidence the
+completion gate reads
+
+$ delivery plan -project reconciliation-probe -from replacement.json
+REFUSED
+delivery for "reconciliation-probe" already has a plan of 3 work package(s) —
+a delivery part-way through has merged work against the plan it started with,
+so it is not replaced
+```
+
+What was left was hand-editing durable state, rewriting history, or leaving a
+false completion standing. `delivery invalidate` and `delivery remediate` close
+it, append-only; both refusals above are kept and are now regression-tested.
+The mechanism is documented in this directory's README.
+
+### Still unfixed, and deliberately so
+
+Four findings were confirmed during this packet and deliberately NOT folded
+into it, because each is a separate defect with a separate reproduction:
+
+1. **A blocked worker outcome reaches publication and reports the wrong cause.**
+   The publication path treats the block as its own failure rather than
+   surfacing the worker's stated reason, so the run's evidence names the
+   symptom instead of what a person would have to do.
+
+2. **The Portal's localhost process can hang.** It needs its own investigation
+   in the Portal repository rather than a change here.
+
+3. **A scripts-package test hangs when run from `/mnt/d`.** Host-specific: the
+   authoritative gate runs on a Linux-native ext4 checkout, where it does not
+   reproduce. It is a test-host property, not an engine defect, and papering
+   over it in the test would hide a real portability question.
+
+4. **The profiler pilot has no committed pure-decimal sample fixture.** The
+   pilot is frozen as a reference success case, so nothing here touches it; the
+   gap is recorded against the pilot rather than fixed in passing.

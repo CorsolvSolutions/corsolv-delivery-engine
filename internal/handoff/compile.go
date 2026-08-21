@@ -444,8 +444,13 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	}
 
 	publishProjectionNeeds := []string{StageProject}
-	projectNeeds := make([]string, 0, len(plan.Packages))
-	for _, wp := range plan.Packages {
+	// Every package the delivery now has, including the corrective work any
+	// remediation added. The projection is what the completion assessment reads
+	// back, so a remedial package missing from these dependencies would let the
+	// document be rendered before the work that repairs the criterion had run.
+	all := plan.AllPackages()
+	projectNeeds := make([]string, 0, len(all))
+	for _, wp := range all {
 		projectNeeds = append(projectNeeds, StagePublish+"-"+wp.ID)
 	}
 
@@ -614,17 +619,18 @@ func (h HostProfile) projectToolPath() string {
 // sort with a deterministic tiebreak: two runs of the same plan must compile to
 // the same task list, or a resumed run would not match its own journal.
 func orderPackages(plan DeliveryPlan) []WorkPackage {
-	remaining := make(map[string]WorkPackage, len(plan.Packages))
+	packages := plan.AllPackages()
+	remaining := make(map[string]WorkPackage, len(packages))
 	var ids []string
-	for _, wp := range plan.Packages {
+	for _, wp := range packages {
 		remaining[wp.ID] = wp
 		ids = append(ids, wp.ID)
 	}
 	sortStrings(ids)
 
 	done := map[string]bool{}
-	out := make([]WorkPackage, 0, len(plan.Packages))
-	for len(out) < len(plan.Packages) {
+	out := make([]WorkPackage, 0, len(packages))
+	for len(out) < len(packages) {
 		progressed := false
 		for _, id := range ids {
 			if done[id] {

@@ -63,6 +63,17 @@ type Record struct {
 	// that happened, and the record of who said yes and when is the only thing
 	// standing between a human boundary and a machine that walked through it.
 	Acceptances []Acceptance `json:"acceptances,omitempty"`
+
+	// Invalidations are the findings that a criterion reported met was not
+	// actually satisfied. Append-only, and for a stronger reason than the two
+	// above: this is the list that makes a finished project unfinished, so an
+	// entry that could be edited or dropped would let the un-completion be
+	// quietly undone by whatever runs next.
+	//
+	// Absent on every project that has never had one, which is every project
+	// that existed before this field did — a record written without it reads
+	// back identically.
+	Invalidations []Invalidation `json:"invalidations,omitempty"`
 }
 
 // Acceptance is one person's answer to one criterion only they could give.
@@ -382,8 +393,29 @@ func SaveIntent(deliveryRoot string, in Intent) error {
 }
 
 // SavePlan writes a validated delivery plan atomically.
+//
+// It refuses to change one that is already there. The plan is what this
+// delivery's merged work was measured against, and the evidence that judged it
+// is only meaningful beside the document that asked for it — so an edited plan
+// would silently re-date every completion gate that has already passed.
+// Corrective work is ADDED, through a remediation, and never written here;
+// rewriting the same bytes is allowed because that is not a change.
 func SavePlan(deliveryRoot string, p DeliveryPlan) error {
 	path := PlanPath(deliveryRoot, p.ProjectID)
+	if existing, err := os.ReadFile(path); err == nil { //nolint:gosec // a path this process composed
+		fresh, merr := json.MarshalIndent(p, "", "  ")
+		if merr != nil {
+			return fmt.Errorf("encoding delivery plan: %w", merr)
+		}
+		if string(existing) != string(append(fresh, '\n')) {
+			return fmt.Errorf("%w: %q already has a plan, and a plan is not rewritten — the merged work of "+
+				"this delivery was measured against it. Authorize corrective work as a remediation instead",
+				ErrRecordConflict, p.ProjectID)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking for an existing delivery plan %q: %w", path, err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating plan directory: %w", err)
 	}
@@ -401,13 +433,26 @@ func SavePlan(deliveryRoot string, p DeliveryPlan) error {
 	return nil
 }
 
-// LoadPlan reads a delivery's plan and re-validates it against the intent.
+// LoadPlan reads a delivery's plan, joins any remediations to it, and
+// re-validates the whole thing against the intent.
 //
 // Re-validating on read is not paranoia about the disk. The plan is executed by
 // a later process than the one that wrote it, possibly after an interruption
 // and a restart, and the intent it must agree with is read from a separate
 // file. Checking the pair at the moment of use is the only place that
 // disagreement can actually be caught.
+//
+// THE REMEDIATIONS ARE JOINED HERE, ONCE. Every caller that asks for "the plan"
+// gets the original packages plus whatever corrective work has since been
+// authorized — because that union is what the delivery is now being measured
+// against, and a caller that had to remember to ask for the second half would
+// eventually forget. The two halves stay separate in the returned value
+// (`Packages` is still exactly what was planned first), so nothing has to trust
+// a merge to tell them apart.
+//
+// A plan file that is absent is absence. Remediations without one would be
+// corrective work against a plan that does not exist, which is why they are
+// read only after the plan is found.
 func LoadPlan(deliveryRoot string, in Intent) (DeliveryPlan, bool, error) {
 	path := PlanPath(deliveryRoot, in.ProjectID)
 	data, err := os.ReadFile(path) //nolint:gosec // a path this process composed
@@ -417,7 +462,12 @@ func LoadPlan(deliveryRoot string, in Intent) (DeliveryPlan, bool, error) {
 	if err != nil {
 		return DeliveryPlan{}, false, fmt.Errorf("reading delivery plan %q: %w", path, err)
 	}
-	p, err := DecodePlan(data, in)
+
+	remediations, err := LoadRemediations(deliveryRoot, in.ProjectID)
+	if err != nil {
+		return DeliveryPlan{}, false, err
+	}
+	p, err := DecodePlanWithRemediations(data, in, remediations)
 	if err != nil {
 		return DeliveryPlan{}, false, fmt.Errorf("%s: %w", path, err)
 	}

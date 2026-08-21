@@ -203,10 +203,34 @@ case "$DEADLINE" in
 esac
 
 INTENT="$STATE/intent.json"
-PLAN="$STATE/plan.json"
+BASE_PLAN="$STATE/plan.json"
+RECORD="$STATE/delivery.json"
 RUNTIME="$STATE/runtime.json"
 EVIDENCE="$STATE/evidence"
 mkdir -p "$EVIDENCE"
+
+# THE PLAN THIS RUN EXECUTES IS THE PLAN PLUS ITS REMEDIATIONS.
+#
+# A criterion that was reported met can later be disproved, and the corrective
+# work that repairs it is authorized as a separate, append-only document rather
+# than by rewriting the plan — because plan.json is what this delivery's already
+# merged work was measured against, and editing it would silently re-date every
+# completion gate that has already passed.
+#
+# So the plan is composed here, at the one place every stage reads it from. The
+# original packages come first and the remedial ones follow in the order they
+# were authorized, which is the order the Go layer joins them in too. The
+# composition is mechanical — a concatenation of validated documents, forming no
+# verdict — and it is rebuilt on every invocation rather than cached, so a
+# remediation authorized between two stages cannot leave one of them reading a
+# plan the other does not have.
+#
+# A delivery with no remediations composes to exactly its plan, which is every
+# delivery that ran before this existed.
+#
+# It is composed further down, once `die` exists to report a failure to compose
+# it; only the path is named here, beside the documents it is derived from.
+PLAN="$EVIDENCE/effective-plan.json"
 
 # Not every dependency can be told where to look.
 #
@@ -314,6 +338,39 @@ not_finished() {
 }
 
 [ -f "$INTENT" ] || die "no delivery intent at $INTENT"
+[ -f "$BASE_PLAN" ] || die "no delivery plan at $BASE_PLAN"
+
+# compose_plan builds the effective plan: the packages the plan was written with,
+# then the corrective work each authorized remediation added, in sequence order.
+#
+# jq -s slurps the documents into one array, so the base's own fields — schema
+# version, project id, provenance — are kept exactly as written and only
+# `packages` grows. Nothing is deduplicated or reordered here: the Go layer
+# validated the union before any remediation was allowed to exist, and a shell
+# script quietly resolving a conflict it found would be forming a verdict.
+compose_plan() {
+  local rems=() f
+  for f in "$STATE"/remediation-[0-9][0-9][0-9].json; do
+    [ -f "$f" ] && rems+=("$f")
+  done
+  if [ "${#rems[@]}" -eq 0 ]; then
+    cp -f "$BASE_PLAN" "$PLAN" || die "composing the effective plan from $BASE_PLAN"
+    return 0
+  fi
+  local tmp; tmp="$(mktemp "$PLAN.XXXXXX")"
+  if jq -s '. as $all | $all[0] | .packages = ($all[0].packages + [$all[1:][].packages[]])' \
+       "$BASE_PLAN" "${rems[@]}" > "$tmp" 2> "$EVIDENCE/compose-plan.txt"; then
+    mv -f "$tmp" "$PLAN"
+    return 0
+  fi
+  rm -f "$tmp"
+  # A plan that could not be composed is not a plan this run may fall back from.
+  # Executing the base alone would silently drop authorized corrective work and
+  # go on reporting the criterion it repairs as outstanding with nothing saying
+  # why — the exact failure this mechanism exists to make impossible.
+  die "composing the effective plan from $BASE_PLAN and ${#rems[@]} remediation(s); see $EVIDENCE/compose-plan.txt"
+}
+compose_plan
 [ -f "$PLAN" ] || die "no delivery plan at $PLAN"
 
 jqi() { jq -r "$1" < "$INTENT"; }
@@ -686,13 +743,33 @@ stage_dispatch() {
   # the work is still being done. This is the stage a resumed run re-enters, so
   # it is where reality is re-derived: every package that is still open with no
   # worker holding it gets one, through the routing that put it there first.
-  if [ -n "$(rt_get dispatched)" ]; then
-    say 'work was already dispatched; re-deriving which of it still needs a worker'
-    local pkg
-    for pkg in $(packages); do
+  #
+  # DISPATCH IS PER PACKAGE, NOT ALL-OR-NOTHING. It used to short-circuit on a
+  # single `dispatched` flag, which was right while a plan could never grow.
+  # A remediation adds corrective work to a delivery that has already
+  # dispatched, and the flag sent this stage straight past it: the remedial
+  # package got no work bead, and its publication died an hour later on "no work
+  # bead for wp-3-fix" — in a stage that had done nothing wrong.
+  #
+  # So the question is asked of each package: one with a bead is re-derived, one
+  # without is created. The flag stays, because it still records that routing
+  # happened once, and `wire_dep` and the scope stamps are still applied exactly
+  # once per package — the three passes below run over $fresh, which is the
+  # packages that have nothing yet.
+  local pkg fresh=''
+  for pkg in $(packages); do
+    if [ -n "$(rt_get "bead.$pkg")" ]; then
       recover_worker "$pkg"
-    done
+    else
+      fresh="$fresh $pkg"
+    fi
+  done
+  if [ -n "$(rt_get dispatched)" ] && [ -z "${fresh// /}" ]; then
+    say 'work was already dispatched; re-derived which of it still needs a worker'
     return 0
+  fi
+  if [ -n "$(rt_get dispatched)" ]; then
+    say "dispatching corrective work added since:${fresh}"
   fi
 
   local base; base="$(rt_get baseSha)"
@@ -701,7 +778,7 @@ stage_dispatch() {
   # Pass 1: create every work bead and its controller merge bead, and stamp the
   # scope each one authorizes. Publication is adjudicated against these stamps,
   # so they exist before any worker starts.
-  for id in $(packages); do
+  for id in $fresh; do
     objective="$(pkg_field "$id" objective)"
     artifact="$(pkg_field "$id" artifact)"
     paths="$(pkg_paths_csv "$id")"
@@ -726,7 +803,7 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
   # merely closed, so the edge runs from the upstream's MERGE bead. That is what
   # makes a dependent package wait for repository state rather than for a
   # sibling worker's filesystem.
-  for id in $(packages); do
+  for id in $fresh; do
     bead="$(rt_get "bead.$id")"
     mergeBead="$(rt_get "merge.$id")"
     wire_dep "$bead" "$mergeBead" "$id's work before its publication"
@@ -739,7 +816,7 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
   # Pass 3: worktrees and routing. A package with upstreams gets no worktree
   # yet — its base does not exist until those upstreams merge — and the publish
   # stage cuts it then.
-  for id in $(packages); do
+  for id in $fresh; do
     bead="$(rt_get "bead.$id")"
     branch="$(branch_for "$id")"
     wt="$CITY/.gc/worktrees/$RIG_NAME/worker-$id"
@@ -773,7 +850,13 @@ $(worker_lifecycle)")" || die "creating the work bead for $id"
   # does not exist". Dispatch is where that rule was not applied.
   # `ensure_package_worktree` routes each of these the moment it cuts and
   # prepares its tree, so nothing is left unrouted, only routed later.
-  for id in $(packages); do
+  #
+  # And only what this dispatch CREATED. A package that already had a bead was
+  # re-derived by `recover_worker` above, which asks whether its work is still
+  # open before it routes anything; routing it here as well would sling a closed
+  # bead — finished work handed back to a worker because a later dispatch added
+  # a package somewhere else in the plan.
+  for id in $fresh; do
     if [ -n "$(pkg_deps "$id")" ]; then
       say "$id has no base yet; it is routed when its upstreams merge and its tree is cut"
       continue
@@ -1472,19 +1555,55 @@ deliverable_facts() {
   # So the durable record joins the intent and the plan here. It is read as
   # FACTS like the other two — who accepted, and when — and forms no verdict;
   # whether that makes the deliverable met stays the projector's to decide.
-  local record="$STATE/delivery.json"
+  # AND THE FINDINGS. A criterion can be reported met, the project can complete
+  # on the strength of it, and later evidence can prove it was never satisfied.
+  # The task rows this document carries cannot say so — they say the packages
+  # merged and their gates passed, which is exactly what happened and exactly
+  # what the finding disproves — so the record's finding travels here too.
+  #
+  # `satisfiedBy` stays what the ORIGINAL plan claimed; the corrective work is
+  # carried separately as `remediatedBy`, from the remediation documents. Both
+  # are facts, and which of them makes a deliverable met is the projector's to
+  # derive under the same two conditions it applies to everything else.
+  #
+  # The LATEST finding against a criterion is carried, answered or not, with the
+  # packages authorized to answer it beside it — so a reader of this document
+  # can see the sequence (met, disproved, repaired) rather than a bare verdict.
+  # Earlier findings against the same criterion stay in the record, which is the
+  # place a full history belongs; this document reports the state now.
+  local record="$RECORD"
   [ -f "$record" ] || record='/dev/null'
-  jq -c --slurpfile plan "$PLAN" --slurpfile record "$record" '
+  local rems=() f
+  for f in "$STATE"/remediation-[0-9][0-9][0-9].json; do
+    [ -f "$f" ] && rems+=("$f")
+  done
+  local remsJson='[]'
+  if [ "${#rems[@]}" -gt 0 ]; then
+    remsJson="$(jq -s '.' "${rems[@]}")" || die 'reading the authorized remediations'
+  fi
+
+  # The BASE plan, not the effective one: `satisfiedBy` is what the original
+  # plan claimed, and a remedial package appearing in both lists would be
+  # counted as an original claimant of the criterion it exists to repair.
+  jq -c --slurpfile plan "$BASE_PLAN" --slurpfile record "$record" --argjson rems "$remsJson" '
     [ .acceptance[]
       | . as $c
       | ($record[0].acceptances // [] | map(select(.criterionId == $c.id)) | first) as $a
+      | ([ $record[0].invalidations // [] | .[] | select(.criterionId == $c.id) ] | last) as $inv
+      | ([ $rems[]
+           | select(any(.repairs[]?; .criterionId == $c.id and ($inv != null and .invalidation == $inv.seq)))
+           | .packages[]
+           | select(any(.satisfies[]?; . == $c.id))
+           | .id ]) as $repaired
       | { id: $c.id,
           statement: $c.statement,
           acceptedBy: ($a.by // ""),
           acceptedAt: ($a.at // ""),
           satisfiedBy: [ $plan[0].packages[]
                          | select(any(.satisfies[]?; . == $c.id))
-                         | .id ] }
+                         | .id ],
+          remediatedBy: $repaired,
+          invalidated: $inv }
     ]' < "$INTENT"
 }
 

@@ -232,7 +232,7 @@ func TestAKnownHumanBoundaryPermitsManagedDeliveryToStart(t *testing.T) {
 // ground, and nothing about its existence may score acceptance.
 func TestThePreflightPlaceholderIsNeverEvidenceOfAcceptance(t *testing.T) {
 	in := mixedIntent()
-	ev, err := handoff.Assess(preflightPlan(in), in, filepath.Join(t.TempDir(), "PROJECT-STATE.yml"), nil)
+	ev, err := handoff.Assess(preflightPlan(in), in, filepath.Join(t.TempDir(), "PROJECT-STATE.yml"), nil, nil)
 	if err != nil {
 		t.Fatalf("Assess: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestMachineWorkCompletesAndDeliveryStopsForThePerson(t *testing.T) {
 	projection := writeDeliveryProjection(t, in.ProjectID, "abc123",
 		[3]string{"wp-d1", "merged", "met"})
 
-	ev, err := handoff.Assess(plan, in, projection, nil)
+	ev, err := handoff.Assess(plan, in, projection, nil, nil)
 	if err != nil {
 		t.Fatalf("Assess: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestMachineWorkCompletesAndDeliveryStopsForThePerson(t *testing.T) {
 		t.Fatalf("Accept: %v", err)
 	}
 
-	ev, err = handoff.Assess(plan, in, projection, rec.Acceptances)
+	ev, err = handoff.Assess(plan, in, projection, rec.Acceptances, nil)
 	if err != nil {
 		t.Fatalf("Assess after acceptance: %v", err)
 	}
