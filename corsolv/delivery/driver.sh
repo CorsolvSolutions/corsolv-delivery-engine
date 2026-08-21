@@ -1070,18 +1070,54 @@ send_back_to_worker() {
   local id="$1" bead="$2" prNum="$3"
   local why; why="$(tail -3 "$EVIDENCE/ci-$id.err" 2>/dev/null | tr '\n' ' ')"
 
-  gcx bd update "$bead" --append-notes "Required CI failed on PR #$prNum for this package's head. \
+  return_to_worker "$id" "$bead" \
+    "Required CI failed on PR #$prNum for this package's head. \
 The work is not accepted and this package is open again. Read the failing run on the pull request, \
 fix the cause inside this package's authorized paths, and verify with this package's declared gates \
-before finishing. ${why}" >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
-    || say "$id: the CI verdict could not be appended to bead $bead; it is reopened without it"
+before finishing. ${why}" \
+    "failed required CI on PR #$prNum" \
+    "did not pass required CI on its exact head"
+}
+
+# return_to_worker reopens a package's work bead with a verdict written on it,
+# and reports the stage unfinished so the run re-offers it.
+#
+# THE DEAD END THIS GENERALIZES. `send_back_to_worker` was written for one
+# verdict — a red required check — because that is the one the first pilot hit.
+# The dead end it describes was never specific to CI:
+#
+#   the run reports FAILED, which is the one thing it is not — a worker wrote
+#   code that does not pass its gate, the ordinary condition of writing code;
+#   the work bead is closed, so a resumed dispatch leaves it alone, since
+#   closed work is finished work; and every route back to a worker is shut, so
+#   the only remaining move is a person editing the project's source by hand.
+#
+# A package that fails the project's OWN gates reaches exactly that state, and
+# reached it in this project: the controller re-ran the declared gates, refused
+# to publish unproven work — correctly — and then `die`d, closing the run with a
+# closed bead and no worker to send the verdict to. The refusal was right and
+# the ending was the dead end.
+#
+# So the verdict goes where a worker can act on it. The reason is appended to
+# the work bead — a worker reads its bead and nothing else, so a failure not
+# written there is a failure it cannot see — the bead is reopened, and the stage
+# says CONTINUE. The re-offered stage finds an open bead, routes a worker
+# through the same recovery an interrupted run uses, waits for it to close, and
+# tries again. It is bounded by the run's own resume budget, so a package that
+# never converges is HELD for a person, which is the correct end for work that
+# repeatedly cannot pass its gate.
+return_to_worker() {
+  local id="$1" bead="$2" note="$3" ledger="$4" unfinished="$5"
+
+  gcx bd update "$bead" --append-notes "$note" >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
+    || say "$id: the verdict could not be appended to bead $bead; it is reopened without it"
 
   gcx bd update "$bead" -s open >> "$EVIDENCE/sendback-$id.txt" 2>&1 \
     || die_from "$EVIDENCE/sendback-$id.txt" \
-      "$id did not pass required CI and its work bead $bead could not be reopened, so no worker can be sent back to it"
+      "$id $unfinished and its work bead $bead could not be reopened, so no worker can be sent back to it"
 
-  sa_ledger_note "$id failed required CI on PR #$prNum; reopened bead $bead for a worker"
-  not_finished "$id did not pass required CI on its exact head; its work bead $bead is open again for a worker to fix"
+  sa_ledger_note "$id $ledger; reopened bead $bead for a worker"
+  not_finished "$id $unfinished; its work bead $bead is open again for a worker to fix"
 }
 
 # ===========================================================================
@@ -1220,7 +1256,24 @@ stage_publish() {
   [ -f "$wt/$artifact" ] || die "$PACKAGE did not produce its required artifact $artifact"
   say "$PACKAGE produced $artifact within its authorized scope"
 
-  run_project_gates "$wt" "$PACKAGE" || die "$PACKAGE failed the project's own gates"
+  # A package that fails its own declared gates is not published — and is not a
+  # failed RUN either. Nothing about the platform went wrong and nothing was
+  # proved impossible; the worker wrote code that does not pass the gate it is
+  # judged by. `die` here closed the run with a closed bead and no route back,
+  # which is the dead end return_to_worker exists to end. The refusal stands;
+  # the verdict now reaches somebody who can act on it.
+  if ! run_project_gates "$wt" "$PACKAGE"; then
+    local gateWhy
+    gateWhy="$(tail -3 "$(ls -t "$EVIDENCE"/gate-*-"$PACKAGE".txt 2>/dev/null | head -1)" 2>/dev/null | tr '\n' ' ')"
+    return_to_worker "$PACKAGE" "$bead" \
+      "This package failed the project's own gates when the controller re-ran them, so the work is not \
+accepted and this package is open again. The controller runs exactly the gates this package declared, so \
+what failed for it fails for you. Fix the cause inside this package's authorized paths and verify with \
+those same gates before finishing. ${gateWhy}" \
+      "failed the project's own gates" \
+      "failed the project's own gates"
+    return 1
+  fi
 
   local -a pathList=()
   IFS=',' read -r -a pathList <<< "$paths"
