@@ -271,3 +271,83 @@ func TestMarshalPlanRoundTrips(t *testing.T) {
 		t.Fatalf("got %d packages", len(back.Packages))
 	}
 }
+
+// THE DEFECT THIS EXISTS FOR.
+//
+// `Criterion.MustCover` made a criterion's required behaviors load-bearing:
+// `DeliveryPlan.Validate` refuses a plan whose covering work does not carry
+// them, and refuses one that declares no gate to prove them. Both refusals are
+// right. Neither was ever stated to the planner.
+//
+// So the agent was handed the criterion's prose, wrote a plan against it, and
+// was rejected against a rubric it had not been shown — with two attempts in
+// total, one of them already spent. That is the exact failure the prompt test
+// beside this one was written to prevent: a rule the validator enforces and the
+// prompt never states is a rule the agent is failed for breaking without being
+// told.
+//
+// The first pilot to declare required behaviors would have discovered this by
+// burning its planning attempts on it.
+func TestPlanPromptCarriesTheBehaviorsTheValidatorDemands(t *testing.T) {
+	in := planIntent()
+	in.Acceptance[0].MustCover = []string{"integer", "decimal|number", "mixed"}
+	prompt := PlanPrompt(in)
+
+	// The behaviors themselves, in the author's own words — including the
+	// alternatives, because "decimal|number" says those two spellings are one
+	// requirement and a planner shown only "decimal" would not know it may
+	// write "number".
+	for _, want := range []string{"integer", "decimal|number", "mixed"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt must carry required behavior %q; the validator refuses a plan that drops it", want)
+		}
+	}
+
+	// Attached to the criterion that requires them. A list of behaviors the
+	// planner cannot tie to a criterion cannot be planned against.
+	idx := strings.Index(prompt, in.Acceptance[0].ID)
+	behavior := strings.Index(prompt, "decimal|number")
+	if idx < 0 || behavior < 0 || behavior < idx {
+		t.Fatalf("required behaviors must appear with their own criterion, got prompt:\n%s", prompt)
+	}
+	if other := strings.Index(prompt, in.Acceptance[1].ID); other >= 0 && behavior > other {
+		t.Errorf("required behaviors for %s appeared after %s, so they read as that criterion's",
+			in.Acceptance[0].ID, in.Acceptance[1].ID)
+	}
+
+	// And the rule itself, stated as a rule, because carrying the words without
+	// saying what is done with them invites a planner to treat them as prose.
+	for _, want := range []string{"MUST COVER", "gate"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt must state the coverage rule (%q)", want)
+		}
+	}
+}
+
+// A criterion that declares no required behavior must read exactly as it always
+// did. Every project written before this field existed is that project, and a
+// prompt that grew an empty "MUST COVER" section for each of them would spend
+// the agent's attention on nothing.
+func TestPlanPromptIsUnchangedForCriteriaWithNoRequiredBehavior(t *testing.T) {
+	prompt := PlanPrompt(planIntent())
+	if strings.Contains(prompt, "MUST COVER") {
+		t.Errorf("a criterion with no required behavior must not produce a MUST COVER line:\n%s", prompt)
+	}
+}
+
+// A criterion reserved to a person is not delivery's to cover, and the validator
+// skips its required behaviors entirely. Showing them to the planner would ask
+// for work on a criterion the very next line forbids it to claim.
+func TestPlanPromptDoesNotDemandBehaviorsForAPersonsCriterion(t *testing.T) {
+	in := planIntent()
+	in.Acceptance[1].AcceptedBy = AcceptedByHuman
+	in.Acceptance[1].MustCover = []string{"a signed release note"}
+	prompt := PlanPrompt(in)
+
+	if strings.Contains(prompt, "a signed release note") {
+		t.Errorf("a person's criterion must not carry required behaviors into the plan prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "ACCEPTED BY A PERSON") {
+		t.Error("the prompt must still mark the criterion as a person's")
+	}
+}
