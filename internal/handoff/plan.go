@@ -71,6 +71,47 @@ type DeliveryPlan struct {
 	PlannedBy string        `json:"plannedBy"`
 	PlannedAt time.Time     `json:"plannedAt"`
 	Packages  []WorkPackage `json:"packages"`
+
+	// Remediations are the additive plan revisions authorized after a criterion
+	// this plan claimed to satisfy was later disproved.
+	//
+	// NOT SERIALIZED, deliberately. Each remediation is its own document on
+	// disk, and this field is filled by LoadPlan from those files. A remediation
+	// that could travel inside plan.json would be a remediation that could be
+	// installed by writing the plan — which is the history rewrite the whole
+	// mechanism exists to prevent, arriving through the front door.
+	Remediations []Remediation `json:"-"`
+}
+
+// AllPackages is every package this delivery must complete: what was planned
+// first, then each remediation's corrective work in the order it was
+// authorized.
+//
+// The generations are flattened here and nowhere else. Callers that ask "what
+// work does this delivery have" want the union — the assessment, the compiler
+// and the driver all do — while `Packages` on its own stays exactly what was
+// planned before anything was disproved, so the two questions never collapse
+// into one answer.
+func (p DeliveryPlan) AllPackages() []WorkPackage {
+	out := append([]WorkPackage(nil), p.Packages...)
+	for _, rm := range p.Remediations {
+		out = append(out, rm.Packages...)
+	}
+	return out
+}
+
+// generations groups this plan's packages by the revision that introduced them:
+// index 0 is the original plan, and each remediation is its own generation.
+//
+// The grouping is load-bearing for exactly one rule — writer isolation — and
+// pointless for every other, which is why it is computed here rather than
+// carried on WorkPackage.
+func (p DeliveryPlan) generations() [][]WorkPackage {
+	gens := [][]WorkPackage{p.Packages}
+	for _, rm := range p.Remediations {
+		gens = append(gens, rm.Packages)
+	}
+	return gens
 }
 
 // ErrPlanInvalid is returned for a plan this engine will not execute.
@@ -156,16 +197,36 @@ func ValidateGate(gate string) error {
 // DecodePlan parses a delivery plan and validates it against the intent it was
 // planned for.
 func DecodePlan(data []byte, in Intent) (DeliveryPlan, error) {
+	return DecodePlanWithRemediations(data, in, nil)
+}
+
+// DecodePlanWithRemediations parses a delivery plan, joins the corrective work
+// authorized since, and validates every generation together.
+//
+// Together rather than one at a time: a remediation can be impeccable on its
+// own and still collide with the plan it is added to — a duplicated package id,
+// a dependency cycle across the join, two live packages authorized over one
+// path. Those questions only exist for the union, so the union is what is
+// checked.
+func DecodePlanWithRemediations(data []byte, in Intent, remediations []Remediation) (DeliveryPlan, error) {
 	var p DeliveryPlan
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return p, fmt.Errorf("%w: %w", ErrPlanInvalid, err)
 	}
+	p.Remediations = remediations
 	if err := p.Validate(in); err != nil {
 		return p, err
 	}
 	return p, nil
+}
+
+// pathClaim records which package authorized a path, and which generation of
+// the plan that package belongs to.
+type pathClaim struct {
+	label string
+	gen   int
 }
 
 // Validate refuses a plan that cannot be executed against this intent.
@@ -176,6 +237,11 @@ func DecodePlan(data []byte, in Intent) (DeliveryPlan, error) {
 // from a plan that quietly drifted from what they asked for. Containment
 // (traversal, protected paths, disjoint authorization) protects everything
 // else from a plan that a language model wrote.
+//
+// It validates every GENERATION at once: the original packages, and the
+// corrective work each remediation added afterwards. A remediation can be
+// impeccable on its own and still be impossible beside the plan it is added to,
+// and the union is the only place that shows.
 func (p DeliveryPlan) Validate(in Intent) error {
 	if p.SchemaVersion != PlanSchemaVersion {
 		return fmt.Errorf("%w: schemaVersion %d, this engine speaks %d", ErrPlanInvalid, p.SchemaVersion, PlanSchemaVersion)
@@ -210,100 +276,122 @@ func (p DeliveryPlan) Validate(in Intent) error {
 	ids := map[string]bool{}
 	// owner maps an authorized path to the package that claimed it, so an
 	// overlap names both sides rather than just saying "overlap".
-	owner := map[string]string{}
+	//
+	// WHY THE GENERATION IS PART OF THE CLAIM, AND ONLY HERE. Writer isolation
+	// exists because two workers writing one path is a collision — a statement
+	// about work that can be in flight at the same time. A remediation is
+	// authorized against a finding raised after the work it repairs had already
+	// merged, so its packages cannot be running beside that work, and repairing
+	// a file is the ordinary shape of a repair. Enforcing disjointness across
+	// generations would leave corrective work able to touch only files the
+	// delivery had never produced, which is not corrective work.
+	//
+	// So a path may be claimed by at most one package per generation, and a
+	// later generation's claim supersedes an earlier one. Within any set of
+	// packages that could run together, the rule is exactly what it always was.
+	owner := map[string]pathClaim{}
 	satisfied := map[string]bool{}
 
-	for i, wp := range p.Packages {
-		label := fmt.Sprintf("packages[%d]", i)
-		switch {
-		case !IDPattern.MatchString(wp.ID):
-			add("%s.id %q is not a valid identifier", label, wp.ID)
-		case ids[wp.ID]:
-			add("%s.id %q is duplicated", label, wp.ID)
-		default:
-			ids[wp.ID] = true
-			label = wp.ID
-		}
-
-		if strings.TrimSpace(wp.Title) == "" {
-			add("%s has no title", label)
-		}
-		if strings.TrimSpace(wp.Objective) == "" {
-			add("%s has no objective — a worker cannot be given an empty instruction", label)
-		}
-		if !phases[wp.Phase] {
-			add("%s.phase %q is not one of the lifecycle phases the intent declared", label, wp.Phase)
-		}
-
-		if len(wp.Gates) > MaxGatesPerPackage {
-			add("%s declares %d gates; at most %d may be granted", label, len(wp.Gates), MaxGatesPerPackage)
-		}
-		seenGate := map[string]bool{}
-		for _, gate := range wp.Gates {
-			if err := ValidateGate(gate); err != nil {
-				add("%s gate %v", label, err)
-				continue
+	for gen, packages := range p.generations() {
+		for i, wp := range packages {
+			label := planPackageLabel(gen, i)
+			if IDPattern.MatchString(wp.ID) && !ids[wp.ID] {
+				label = wp.ID
 			}
-			if seenGate[gate] {
-				add("%s declares gate %q twice", label, gate)
-			}
-			seenGate[gate] = true
-		}
-
-		if len(wp.AuthorizedPaths) == 0 {
-			add("%s authorizes no paths — a package that may change nothing cannot produce anything", label)
-		}
-		clean := make([]string, 0, len(wp.AuthorizedPaths))
-		for _, raw := range wp.AuthorizedPaths {
-			c, err := repoRelative(raw)
-			if err != nil {
-				add("%s authorized path %q is not usable: %v", label, raw, err)
-				continue
-			}
-			if prefix, protected := isProtected(c); protected {
-				add("%s authorizes %q, which is under the protected path %q — a run may not change what judges it", label, c, prefix)
-				continue
-			}
-			if other, taken := owner[c]; taken {
-				add("%s and %s both authorize %q — two workers writing one path is a collision, not a plan", label, other, c)
-				continue
-			}
-			owner[c] = label
-			clean = append(clean, c)
-		}
-
-		artifact, err := repoRelative(wp.Artifact)
-		switch {
-		case strings.TrimSpace(wp.Artifact) == "":
-			add("%s names no required artifact — nothing would prove the package produced its result", label)
-		case err != nil:
-			add("%s artifact %q is not usable: %v", label, wp.Artifact, err)
-		default:
-			if !containsPath(clean, artifact) {
-				add("%s must authorize its own artifact %q", label, artifact)
-			}
-		}
-
-		if len(wp.Satisfies) == 0 {
-			add("%s satisfies no acceptance criterion — work nobody asked for is not delivery", label)
-		}
-		for _, c := range wp.Satisfies {
 			switch {
-			case !criteria[c]:
-				add("%s satisfies %q, which the intent does not declare as an acceptance criterion", label, c)
-			case human[c]:
-				// THE DEFECT THIS REFUSAL EXISTS FOR. The package merges, the
-				// merge is read as evidence, and a criterion reserved for a
-				// person is scored met without one ever looking at it. A package
-				// may produce the record a reviewer signs; it may not sign it.
-				add("%s satisfies %q, which only a person may accept — a work package may prepare what a reviewer reads and may never claim their acceptance", label, c)
+			case !IDPattern.MatchString(wp.ID):
+				add("%s.id %q is not a valid identifier", label, wp.ID)
+			case ids[wp.ID]:
+				// Across every generation. A remedial package reusing a merged
+				// package's id would give the run two tasks with one name, and
+				// the journal that decides what a resumed run may skip is keyed
+				// by exactly that name.
+				add("%s.id %q is duplicated", label, wp.ID)
 			default:
-				satisfied[c] = true
+				ids[wp.ID] = true
+			}
+
+			if strings.TrimSpace(wp.Title) == "" {
+				add("%s has no title", label)
+			}
+			if strings.TrimSpace(wp.Objective) == "" {
+				add("%s has no objective — a worker cannot be given an empty instruction", label)
+			}
+			if !phases[wp.Phase] {
+				add("%s.phase %q is not one of the lifecycle phases the intent declared", label, wp.Phase)
+			}
+
+			if len(wp.Gates) > MaxGatesPerPackage {
+				add("%s declares %d gates; at most %d may be granted", label, len(wp.Gates), MaxGatesPerPackage)
+			}
+			seenGate := map[string]bool{}
+			for _, gate := range wp.Gates {
+				if err := ValidateGate(gate); err != nil {
+					add("%s gate %v", label, err)
+					continue
+				}
+				if seenGate[gate] {
+					add("%s declares gate %q twice", label, gate)
+				}
+				seenGate[gate] = true
+			}
+
+			if len(wp.AuthorizedPaths) == 0 {
+				add("%s authorizes no paths — a package that may change nothing cannot produce anything", label)
+			}
+			clean := make([]string, 0, len(wp.AuthorizedPaths))
+			for _, raw := range wp.AuthorizedPaths {
+				c, err := repoRelative(raw)
+				if err != nil {
+					add("%s authorized path %q is not usable: %v", label, raw, err)
+					continue
+				}
+				if prefix, protected := isProtected(c); protected {
+					add("%s authorizes %q, which is under the protected path %q — a run may not change what judges it", label, c, prefix)
+					continue
+				}
+				if claim, taken := owner[c]; taken && claim.gen == gen {
+					add("%s and %s both authorize %q — two workers writing one path is a collision, not a plan", label, claim.label, c)
+					continue
+				}
+				owner[c] = pathClaim{label: label, gen: gen}
+				clean = append(clean, c)
+			}
+
+			artifact, err := repoRelative(wp.Artifact)
+			switch {
+			case strings.TrimSpace(wp.Artifact) == "":
+				add("%s names no required artifact — nothing would prove the package produced its result", label)
+			case err != nil:
+				add("%s artifact %q is not usable: %v", label, wp.Artifact, err)
+			default:
+				if !containsPath(clean, artifact) {
+					add("%s must authorize its own artifact %q", label, artifact)
+				}
+			}
+
+			if len(wp.Satisfies) == 0 {
+				add("%s satisfies no acceptance criterion — work nobody asked for is not delivery", label)
+			}
+			for _, c := range wp.Satisfies {
+				switch {
+				case !criteria[c]:
+					add("%s satisfies %q, which the intent does not declare as an acceptance criterion", label, c)
+				case human[c]:
+					// THE DEFECT THIS REFUSAL EXISTS FOR. The package merges, the
+					// merge is read as evidence, and a criterion reserved for a
+					// person is scored met without one ever looking at it. A package
+					// may produce the record a reviewer signs; it may not sign it.
+					add("%s satisfies %q, which only a person may accept — a work package may prepare what a reviewer reads and may never claim their acceptance", label, c)
+				default:
+					satisfied[c] = true
+				}
 			}
 		}
 	}
 
-	for _, wp := range p.Packages {
+	all := p.AllPackages()
+	for _, wp := range all {
 		for _, dep := range wp.DependsOn {
 			if dep == wp.ID {
 				add("%s depends on itself", wp.ID)
@@ -314,7 +402,7 @@ func (p DeliveryPlan) Validate(in Intent) error {
 			}
 		}
 	}
-	if cycle := findCycle(p.Packages); cycle != "" {
+	if cycle := findCycle(all); cycle != "" {
 		add("work package dependencies contain a cycle: %s", cycle)
 	}
 
@@ -355,7 +443,7 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		if c.IsHuman() || len(c.MustCover) == 0 {
 			continue
 		}
-		covering := coveringPackages(p.Packages, c.ID)
+		covering := coveringPackages(all, c.ID)
 		if len(covering) == 0 {
 			continue // already reported as uncovered above
 		}
@@ -383,10 +471,31 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		}
 	}
 
+	// And each remediation on its own terms: the scope it was authorized for,
+	// and fidelity over its OWN packages rather than over the union above.
+	//
+	// Checked here as well as at authorization because the remediation files
+	// are the durable half of this mechanism and nothing else re-reads them. A
+	// plan loaded from disk is checked by the same rule that let it be written.
+	for _, rm := range p.Remediations {
+		if err := rm.Validate(in); err != nil {
+			add("remediation %d: %v", rm.Seq, err)
+		}
+	}
+
 	if len(problems) > 0 {
 		return fmt.Errorf("%w: %s", ErrPlanInvalid, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// planPackageLabel names a package's position for a refusal a planner can act
+// on, before its id has been proved usable.
+func planPackageLabel(gen, i int) string {
+	if gen == 0 {
+		return fmt.Sprintf("packages[%d]", i)
+	}
+	return fmt.Sprintf("remediation %d packages[%d]", gen, i)
 }
 
 // coveringPackages are the work packages that claim a criterion.

@@ -219,8 +219,38 @@ var bootstrapPolicy = Ledger{
 			// The untagged Debt baseline is untouched again: the file is
 			// integration-tagged, and the compile regressions added beside it
 			// (internal/handoff) assert on a compiled argv and spawn nothing.
-			BaselineCalls:   633,
-			BaselineFiles:   180,
+			//
+			// 633/180 -> 636/182: reconciling a criterion later evidence
+			// disproves. Two integration-tagged files with three subprocess call
+			// sites between them.
+			//
+			// corsolv/delivery/driver_remediation_test.go runs the driver (one
+			// site) because the contract it pins holds between two programs in
+			// two languages: corrective work is an append-only document beside
+			// the plan, and the Go layer's LoadPlan and the Bash driver's
+			// composition have to arrive at the same list of packages. A test
+			// that simulated either half would prove nothing about the pair,
+			// which is the same reason the driver-parity file spawns.
+			//
+			// corsolv/delivery/reconciliation_smoke_test.go builds the delivery
+			// binary (one site) and runs it (one site), because what it proves
+			// is the command surface rather than the functions behind it: the
+			// subcommand dispatch, the flag parsing, the exit codes a
+			// supervising script reads, and the JSON a portal parses. Calling
+			// the command functions directly — which the untagged lifecycle test
+			// beside it does — exercises none of those four, and each has been
+			// wrong before.
+			//
+			// Raised for the reason every entry above was: this is the audit
+			// baseline whose invariant is that real test source stays VISIBLE,
+			// so new process-owning test source belongs in the count rather than
+			// hidden from it. The untagged Debt baseline is untouched — both
+			// files are integration-tagged, and the reconciliation regressions
+			// added beside them (internal/handoff, internal/projector, and the
+			// untagged half of corsolv/delivery) read and write documents in a
+			// temp dir and spawn nothing.
+			BaselineCalls:   636,
+			BaselineFiles:   182,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

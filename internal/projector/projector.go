@@ -139,6 +139,50 @@ type Deliverable struct {
 	AcceptedBy string
 	// AcceptedAt is when they accepted it, as the record holds it.
 	AcceptedAt string
+
+	// Invalidated says a delivery-owned deliverable that WAS evidenced has since
+	// been disproved, in the words of the durable record's finding.
+	//
+	// WHY THE DOCUMENT HAS TO CARRY THIS. Met is derived here from the task
+	// rows, and a disproved deliverable's rows are the honest picture of what
+	// happened: the packages merged, and their gates passed. Reading those rows
+	// alone can only ever conclude "met" — which is the exact conclusion the
+	// evidence disproved. The finding is a fact the rows cannot contain, so it
+	// travels as a fact like the acceptance record does, and the verdict it
+	// supports stays this projector's to derive.
+	//
+	// Empty for every deliverable nobody has disputed, which is every
+	// deliverable in every project that has never had one.
+	Invalidated *DeliverableInvalidation
+	// RemediatedBy names the work packages an authorized remediation added to
+	// repair this deliverable, in the order the plan gives them.
+	//
+	// Held apart from SatisfiedBy on purpose. The original claimants delivered
+	// what was disproved; these are what is meant to repair it. Folding them
+	// into one list would make a repaired deliverable indistinguishable from one
+	// that was simply planned across more packages.
+	RemediatedBy []string
+}
+
+// DeliverableInvalidation is the durable record's finding against a
+// deliverable, carried into the document a portal reads.
+//
+// Every field is the record's own words. Nothing here is derived, summarized or
+// judged: a portal showing "previously complete — reopened on new evidence"
+// needs to be able to show WHOSE evidence and WHY, and a projection that
+// carried only a boolean would send a reader back to a file they cannot see.
+type DeliverableInvalidation struct {
+	// Seq is the finding's sequence in the delivery record.
+	Seq int
+	By  string
+	// Reason is why the earlier conclusion was wrong.
+	Reason string
+	// Evidence is what proves it.
+	Evidence string
+	// At is when the finding was recorded, as the record holds it.
+	At string
+	// PreviousState is what the assessment said before the finding withdrew it.
+	PreviousState string
 }
 
 // resolveDeliverables decides each deliverable's state from the packages that
@@ -151,7 +195,7 @@ type Deliverable struct {
 func (s *State) resolveDeliverables() {
 	for i := range s.Deliverables {
 		d := &s.Deliverables[i]
-		if len(d.SatisfiedBy) == 0 {
+		if len(d.SatisfiedBy) == 0 && len(d.RemediatedBy) == 0 {
 			// Nothing claimed it. That is either a deliverable a person owes an
 			// answer on, or one nobody addressed — and the acceptance record is
 			// the only thing that can tell those apart.
@@ -159,12 +203,23 @@ func (s *State) resolveDeliverables() {
 			continue
 		}
 		met := true
-		for _, pkg := range d.SatisfiedBy {
+		for _, pkg := range append(append([]string(nil), d.SatisfiedBy...), d.RemediatedBy...) {
 			t, ok := s.Tasks[pkg]
 			if !ok || !isTerminalStatus(t.Status) || t.CompletionGateStatus != GateMet {
 				met = false
 				break
 			}
+		}
+		// A DISPROVED DELIVERABLE IS NOT MET BECAUSE ITS PACKAGES MERGED.
+		//
+		// That is what they did before it was disproved. The rows above say the
+		// plan was carried out; the finding says the plan was wrong. So while a
+		// finding stands, met requires work authorized to answer THAT finding —
+		// and requires it to have completed on the same two conditions as
+		// anything else. No remedial package means nothing is repairing it,
+		// which is not the same as repaired.
+		if d.Invalidated != nil && len(d.RemediatedBy) == 0 {
+			met = false
 		}
 		d.Met = met
 	}
@@ -456,7 +511,7 @@ func Render(s *State) ([]byte, error) {
 		fmt.Fprintf(&b, "    ownerType: %s\n", yamlScalar(t.OwnerType))
 		fmt.Fprintf(&b, "    branch: %s\n", yamlOpt(t.Branch))
 		fmt.Fprintf(&b, "    pullRequest: %s\n", yamlOptInt(t.PullRequest))
-		writeList(&b, "    ", "dependencies", t.Dependencies)
+		writeList(&b, "dependencies", t.Dependencies)
 		fmt.Fprintf(&b, "    parallelGroup: %s\n", yamlOpt(t.ParallelGroup))
 		fmt.Fprintf(&b, "    criticalPath: %t\n", t.CriticalPath)
 		fmt.Fprintf(&b, "    actualStart: %s\n", yamlOptTime(t.ActualStart))
@@ -464,7 +519,7 @@ func Render(s *State) ([]byte, error) {
 		fmt.Fprintf(&b, "    implementationSha: %s\n", yamlOpt(t.ImplementationSha))
 		fmt.Fprintf(&b, "    completionGate: %s\n", yamlOpt(t.CompletionGate))
 		fmt.Fprintf(&b, "    completionGateStatus: %s\n", yamlScalar(string(t.CompletionGateStatus)))
-		writeList(&b, "    ", "evidence", t.Evidence)
+		writeList(&b, "evidence", t.Evidence)
 		fmt.Fprintf(&b, "    blocker: %s\n", yamlOpt(t.Blocker))
 		fmt.Fprintf(&b, "    nextPhysicalAction: %s\n", yamlOpt(t.NextPhysicalAction))
 		fmt.Fprintf(&b, "    lastReviewed: %s\n", yamlOptTime(t.LastReviewed))
@@ -499,7 +554,21 @@ func Render(s *State) ([]byte, error) {
 					fmt.Fprintf(&b, "    acceptedAt: %s\n", yamlScalar(d.AcceptedAt))
 				}
 			}
-			writeList(&b, "    ", "satisfiedBy", d.SatisfiedBy)
+			writeList(&b, "satisfiedBy", d.SatisfiedBy)
+			// Additive, and emitted only when there is a finding. A consumer
+			// that does not know these keys reads the document exactly as it
+			// did before; one that does can say "previously complete — reopened
+			// on new evidence" and show whose evidence it was.
+			if d.Invalidated != nil {
+				fmt.Fprintf(&b, "    invalidated:\n")
+				fmt.Fprintf(&b, "      seq: %d\n", d.Invalidated.Seq)
+				fmt.Fprintf(&b, "      by: %s\n", yamlScalar(d.Invalidated.By))
+				fmt.Fprintf(&b, "      reason: %s\n", yamlScalar(d.Invalidated.Reason))
+				fmt.Fprintf(&b, "      evidence: %s\n", yamlScalar(d.Invalidated.Evidence))
+				fmt.Fprintf(&b, "      at: %s\n", yamlOpt(d.Invalidated.At))
+				fmt.Fprintf(&b, "      previousState: %s\n", yamlScalar(d.Invalidated.PreviousState))
+				writeList(&b, "remediatedBy", d.RemediatedBy)
+			}
 		}
 	}
 
@@ -531,7 +600,13 @@ func Render(s *State) ([]byte, error) {
 
 // writeList emits a sorted YAML sequence, or an explicit empty list. Sorting is
 // part of the determinism contract.
-func writeList(b *strings.Builder, indent, key string, vals []string) {
+// listIndent is where a deliverable or task field sits in the document. The
+// helper below takes no indent parameter because every list this producer emits
+// is a field of one of those two, at exactly this depth.
+const listIndent = "    "
+
+func writeList(b *strings.Builder, key string, vals []string) {
+	const indent = listIndent
 	if len(vals) == 0 {
 		fmt.Fprintf(b, "%s%s: []\n", indent, key)
 		return

@@ -233,3 +233,86 @@ A run that finishes cleanly over a projection showing unproven work reports
 **blocked**, and says which clause failed. That is the case the whole design
 exists for: an agent can close its own bead, so closing beads must not be what
 decides delivery is done.
+
+## When the evidence turns out to be wrong
+
+Evidence proves what it proves at the moment it is read. A met completion gate
+proves the plan was carried out; it does not prove the plan was right. So a
+delivery-owned criterion can be scored met, the project can reach **completed**
+on the strength of it, and later evidence — a person opening the product, a bug
+report, a second look at the brief — can establish that the criterion was never
+satisfied at all.
+
+Two operations express that, and both are append-only.
+
+```
+delivery invalidate -project <id> -criterion <id> \
+    -by <actor> -reason <text> -evidence <ref>
+```
+
+records that the earlier result is withdrawn. All three of actor, reason and
+evidence are required: this is the one operation that makes a finished project
+unfinished, and a finding with no author is an invisible mutation rather than a
+governed act. It refuses an unknown criterion, a criterion only a person may
+accept, a criterion that is not currently met, and a criterion whose earlier
+finding is still standing — that last one deterministically, naming the finding
+that already stands.
+
+```
+delivery remediate -project <id> -from <file> -by <actor>
+```
+
+authorizes the corrective work. The document names the finding it repairs and
+the work packages that repair it; the engine assigns the sequence, the timestamp
+and the author.
+
+**Nothing is deleted, and nothing is replaced.** `plan.json` is never rewritten
+— `SavePlan` refuses to change one that exists. Each remediation is its own
+`remediation-NNN.json` beside it, and the two are read together. Old
+acceptances, package records, run history and published projections all stay
+exactly as they were, so the record reads:
+
+```
+at time A, ac-3 was met on the strength of wp-3 merging with its gate met
+at time B, evidence Y proved that conclusion false
+at time C, wp-3-fix merged with its gate met, and ac-3 is met again
+```
+
+Everything that governs ordinary work governs remedial work: validated ids,
+declared phases, allowlisted gates, a required artifact, containment away from
+the paths that judge the run, writer isolation, required CI on the exact head
+and a governed merge. Two rules are **added**:
+
+- **Scope.** A remedial package may claim only the criteria its remediation
+  repairs, so a repair cannot widen into delivery nobody authorized.
+- **Fidelity, over the remedial packages alone.** Where the criterion declares
+  the behaviors it requires (`mustCover`), this remediation's own packages must
+  carry all of them and at least one must declare a gate. The original plan
+  carried them too, which is exactly why its coverage cannot be inherited: that
+  work was disproved, so its claim to have covered the criterion is the thing
+  under dispute.
+
+Writer isolation is scoped per generation. A path may be claimed by at most one
+package in any set that could run together, and a later generation's claim
+supersedes an earlier one — because repairing a file is the ordinary shape of a
+repair, and a remediation is authorized against a finding raised after the work
+it repairs had already merged.
+
+### What changes, and what does not
+
+After an invalidation the criterion stops counting as met, `criteriaMet` drops
+below `criteriaTotal`, the project leaves **completed**, and the status says why
+in the finding's own words. Unrelated criteria stay met, and no merged package
+is reopened — `packagesComplete` is unchanged, because those packages really did
+merge and reopening finished work would be rewriting it. The two counters answer
+different questions, which is why both are reported: packages measure the work
+delivery did, criteria measure how much of what was asked for is delivered.
+
+The projection is refreshed through the run's own `project` and
+`publish-projection` stages — the same refresh an acceptance uses — so the
+portal sees the change immediately. No run is started, no worker spawned, no
+package reopened, and no run id minted.
+
+When the remedial work merges with its gate met, the criterion is met again and
+the project returns to **completed**, with the finding and the remediation still
+on the record and still in the published document.

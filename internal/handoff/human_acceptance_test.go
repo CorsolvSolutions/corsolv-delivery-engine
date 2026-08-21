@@ -92,7 +92,7 @@ func TestAssessNeverMeetsAHumanCriterionFromMergedWork(t *testing.T) {
 	path := writeProjection(t, in.ProjectID, "abc123",
 		[3]string{"wp-add", "merged", "met"}, [3]string{"wp-multiply", "merged", "met"})
 
-	ev, err := Assess(validPlan(), in, path, nil)
+	ev, err := Assess(validPlan(), in, path, nil, nil)
 	if err != nil {
 		t.Fatalf("Assess: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAssessMeetsAHumanCriterionOnlyOnceAPersonRecordedIt(t *testing.T) {
 		At:          time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
 	}}
 
-	ev, err := Assess(validPlan(), in, path, accepted)
+	ev, err := Assess(validPlan(), in, path, accepted, nil)
 	if err != nil {
 		t.Fatalf("Assess: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestDeriveReportsAnUnansweredHumanCriterionAsBlocked(t *testing.T) {
 	in := humanIntent()
 	path := writeProjection(t, in.ProjectID, "abc123",
 		[3]string{"wp-add", "merged", "met"}, [3]string{"wp-multiply", "merged", "met"})
-	ev, err := Assess(validPlan(), in, path, nil)
+	ev, err := Assess(validPlan(), in, path, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
