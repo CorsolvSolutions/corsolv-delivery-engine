@@ -249,3 +249,72 @@ func beadStatus(t *testing.T, e *recoveryEnv, id string) string {
 	}
 	return strings.TrimSpace(string(data))
 }
+
+// THE SAME DEAD END, ON THE GATE PATH.
+//
+// `send_back_to_worker` was written for a red required check, and the dead end
+// its comment describes was never specific to CI: the run reports FAILED, the
+// work bead is closed so a resumed dispatch leaves it alone, and every route
+// back to a worker is shut — so the only remaining move is a person editing the
+// project's source by hand.
+//
+// A package that fails the project's OWN gates reached exactly that state. The
+// controller re-ran the declared gates, refused to publish unproven work —
+// correctly — and then died, ending the run with a closed bead and nobody to
+// tell. The refusal was right; the ending was the dead end.
+//
+// Found by the JSON Configuration Drift Auditor pilot: `wp-acceptance-matrix`
+// failed its own gates, the run ended `failed`, and no resume could reach the
+// worker that could have fixed it.
+func TestAFailedProjectGateReopensTheWorkForAWorker(t *testing.T) {
+	s := newSendbackEnv(t)
+	// The package's own declared gates fail. Everything else about the fixture
+	// is unchanged, so what this test moves is the gate verdict alone.
+	writeStub(t, filepath.Join(s.binDir, "npm"), "#!/usr/bin/env bash\necho 'the suite failed' >&2\nexit 1\n")
+
+	code, out := s.runPublish()
+
+	if code == 0 {
+		t.Fatalf("a package that failed its own gates must not report a successful publication:\n%s", out)
+	}
+	if got := beadStatus(t, s.recoveryEnv, beadOne); got != "open" {
+		t.Errorf("the work bead must be reopened so a worker can be sent back to it, got %q\n%s", got, out)
+	}
+	calls := s.gcCalls()
+	if len(callsContaining(calls, "--append-notes")) == 0 {
+		t.Errorf("the gate verdict must be written onto the work bead — a worker reads its bead and nothing else.\ncalls: %v\n%s", calls, out)
+	}
+	if !strings.Contains(out, "gate") {
+		t.Errorf("the driver must say a gate is what failed, got:\n%s", out)
+	}
+
+	// AND IT NEVER REACHED THE FORGE. Work that cannot pass the gate it is
+	// judged by must not become a branch, a pull request or a CI run — the
+	// containment this refusal exists for is upstream of publication.
+	if _, err := os.Stat(s.ghLog); err == nil {
+		body, rerr := os.ReadFile(s.ghLog)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if strings.Contains(string(body), "pr create") {
+			t.Errorf("a package that failed its own gates opened a pull request:\n%s", body)
+		}
+	}
+}
+
+// THE FLOOR, ON THE GATE PATH. A worker sent back for a failed gate that
+// returns the same tree is not sent back again: it stops for a person, exactly
+// as one sent back for a red check does. Without this, a package that cannot
+// pass its gate would be re-offered until its resume budget ran out, telling
+// nobody anything new each time.
+func TestAPackageSentBackForAGateThatChangesNothingStopsForAPerson(t *testing.T) {
+	s := newSendbackEnv(t)
+	writeStub(t, filepath.Join(s.binDir, "npm"), "#!/usr/bin/env bash\nexit 1\n")
+
+	if code, out := s.runPublish(); code == 0 {
+		t.Fatalf("the first attempt must not succeed:\n%s", out)
+	}
+	if got := beadStatus(t, s.recoveryEnv, beadOne); got != "open" {
+		t.Fatalf("the first attempt must reopen the bead, got %q", got)
+	}
+}
