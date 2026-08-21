@@ -265,6 +265,11 @@ func preflightPlan(in handoff.Intent) handoff.DeliveryPlan {
 		ProjectID:     in.ProjectID,
 		PlannedBy:     "preflight",
 		Packages:      preflightPackages(in),
+		// It says what it is. A placeholder promises no behavior, so it is not
+		// measured against the behaviors the criteria require — otherwise a
+		// project that stated its requirements was refused before its planner
+		// was ever asked for a plan.
+		Provisional: true,
 	}
 }
 

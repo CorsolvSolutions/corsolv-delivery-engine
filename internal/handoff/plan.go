@@ -81,6 +81,32 @@ type DeliveryPlan struct {
 	// installed by writing the plan — which is the history rewrite the whole
 	// mechanism exists to prevent, arriving through the front door.
 	Remediations []Remediation `json:"-"`
+
+	// Provisional marks a plan that is a SHAPE rather than a proposal.
+	//
+	// Preflight compiles one: a placeholder package per delivery-owned
+	// criterion, no gates, an objective saying it will never run — so that the
+	// questions which do not depend on what the work turns out to be
+	// (ownership, tools, the forge, durable state) can be asked before anyone
+	// waits on a planner.
+	//
+	// THE DEFECT THIS EXISTS FOR. Fidelity measures a plan against what its
+	// criteria require, and a placeholder carries none of those behaviors
+	// because it promises nothing. So the moment a project declared required
+	// behaviors, preflight refused it at the front door — listing behaviors
+	// nobody had yet been given a chance to deliver, before the planner that
+	// would have written a lawful plan was ever asked.
+	//
+	// This is the second time that trap has been sprung; `preflightPackages`
+	// carries the note from the first, when a placeholder claiming a person's
+	// criterion refused every intent with a human boundary. Same shape,
+	// different rule.
+	//
+	// NOT SERIALIZED, for a sharper reason than Remediations: a plan file that
+	// could declare itself provisional would be a plan file that could opt out
+	// of the fidelity rule. This is only ever this process's word about a plan
+	// it built itself, and every plan read from disk faces the rule.
+	Provisional bool `json:"-"`
 }
 
 // AllPackages is every package this delivery must complete: what was planned
@@ -440,7 +466,12 @@ func (p DeliveryPlan) Validate(in Intent) error {
 	// reorder them and choose its own words for everything else: the check is
 	// over what the covering packages say TOGETHER.
 	for _, c := range in.Acceptance {
-		if c.IsHuman() || len(c.MustCover) == 0 {
+		// A provisional plan is exempt from this clause and from no other. It
+		// is a shape the compiler will accept, not a promise to deliver
+		// anything, and measuring a placeholder against what the work must
+		// achieve refused every project that stated its requirements before its
+		// planner had been asked for a plan. See DeliveryPlan.Provisional.
+		if p.Provisional || c.IsHuman() || len(c.MustCover) == 0 {
 			continue
 		}
 		covering := coveringPackages(all, c.ID)
