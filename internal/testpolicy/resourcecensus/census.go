@@ -249,7 +249,22 @@ var bootstrapPolicy = Ledger{
 			// added beside them (internal/handoff, internal/projector, and the
 			// untagged half of corsolv/delivery) read and write documents in a
 			// temp dir and spawn nothing.
-			BaselineCalls:   636,
+			// 636/182 -> 635/182: banking an improvement rather than adding
+			// anything. Basing corrective work on the branch as it stands now
+			// needed the recovery fixture to own a real origin — a rig IS a
+			// clone, and a fixture whose rig has no origin cannot tell a
+			// current base from a stale one. Building one meant every git
+			// command in that fixture going through a single checked helper
+			// instead of two open-coded exec.Command sites, so the file spawns
+			// through one site where it used to spawn through two.
+			//
+			// The file count is unchanged: no test source appeared or left,
+			// and the new regression coverage (the remedial-base tests in
+			// corsolv/delivery/driver_remediation_test.go) reuses that fixture
+			// rather than spawning for itself. Lowered rather than left,
+			// because a baseline that only ever ratchets down stops being one
+			// the moment an improvement is allowed to hide inside it.
+			BaselineCalls:   635,
 			BaselineFiles:   182,
 			ReportedCalls:   495,
 			ReportedFiles:   135,

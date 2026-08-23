@@ -149,16 +149,17 @@ exit 0
 `
 
 type recoveryEnv struct {
-	t        *testing.T
-	root     string
-	project  string
-	state    string
-	city     string
-	rigPath  string
-	binDir   string
-	gcLog    string
-	beadsDir string
-	sessions string
+	t          *testing.T
+	root       string
+	project    string
+	state      string
+	city       string
+	rigPath    string
+	originPath string
+	binDir     string
+	gcLog      string
+	beadsDir   string
+	sessions   string
 }
 
 // newRecoveryEnv lays out a delivery that has already been dispatched: the two
@@ -177,16 +178,17 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 	}
 
 	e := &recoveryEnv{
-		t:        t,
-		root:     root,
-		project:  intent.ProjectID,
-		state:    filepath.Join(root, intent.ProjectID),
-		city:     filepath.Join(root, "city"),
-		rigPath:  filepath.Join(root, "rig"),
-		binDir:   filepath.Join(root, "bin"),
-		gcLog:    filepath.Join(root, "gc-calls.log"),
-		beadsDir: filepath.Join(root, "beads"),
-		sessions: filepath.Join(root, "sessions.json"),
+		t:          t,
+		root:       root,
+		project:    intent.ProjectID,
+		state:      filepath.Join(root, intent.ProjectID),
+		city:       filepath.Join(root, "city"),
+		rigPath:    filepath.Join(root, "rig"),
+		originPath: filepath.Join(root, "origin.git"),
+		binDir:     filepath.Join(root, "bin"),
+		gcLog:      filepath.Join(root, "gc-calls.log"),
+		beadsDir:   filepath.Join(root, "beads"),
+		sessions:   filepath.Join(root, "sessions.json"),
 	}
 
 	for _, dir := range []string{e.city, e.binDir, e.beadsDir} {
@@ -204,11 +206,34 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 	return e
 }
 
+// git runs one git command in the fixture and fails the test if it errors.
+func (e *recoveryEnv) git(dir string, args ...string) string {
+	e.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = e.scrubbedEnv(nil)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		e.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // initRig creates the working rig as a real repository with one commit, so the
 // driver's own worktree provisioning runs for real. It is created here, in this
 // test's temp directory, and nothing outside it is ever touched.
+//
+// It is a CLONE of an origin, because that is what a rig is: the controller
+// clones the project's repository, and the base a package is cut from is read
+// from `refs/remotes/origin/<default>` rather than from the rig's own branch. A
+// fixture without an origin cannot tell a base that is current from one that is
+// stale, which is the entire question these tests exist to ask.
 func (e *recoveryEnv) initRig() string {
 	e.t.Helper()
+	if err := os.MkdirAll(e.originPath, 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	e.git(e.originPath, "init", "-q", "--bare", "-b", "main")
+
 	if err := os.MkdirAll(e.rigPath, 0o755); err != nil {
 		e.t.Fatal(err)
 	}
@@ -219,22 +244,30 @@ func (e *recoveryEnv) initRig() string {
 		{"init", "-q", "-b", "main"},
 		{"config", "user.name", "Fixture"},
 		{"config", "user.email", "fixture@example.com"},
+		{"remote", "add", "origin", e.originPath},
 		{"add", "-A"},
 		{"commit", "-q", "-m", "fixture"},
+		{"push", "-q", "-u", "origin", "main"},
 	} {
-		cmd := exec.Command("git", append([]string{"-C", e.rigPath}, args...)...)
-		cmd.Env = e.scrubbedEnv(nil)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			e.t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+		e.git(e.rigPath, args...)
 	}
-	head := exec.Command("git", "-C", e.rigPath, "rev-parse", "HEAD")
-	head.Env = e.scrubbedEnv(nil)
-	out, err := head.Output()
-	if err != nil {
-		e.t.Fatalf("rev-parse: %v", err)
+	return e.git(e.rigPath, "rev-parse", "HEAD")
+}
+
+// advanceMergedMain puts a new commit on the authoritative default branch, the
+// way this delivery's own packages do when they merge. Everything a later
+// package must build on arrives this way — through repository state, never from
+// another worker's files — so this is what makes the run's recorded `baseSha`
+// history rather than news.
+func (e *recoveryEnv) advanceMergedMain(name, body string) string {
+	e.t.Helper()
+	if err := os.WriteFile(filepath.Join(e.rigPath, name), []byte(body), 0o644); err != nil {
+		e.t.Fatal(err)
 	}
-	return strings.TrimSpace(string(out))
+	e.git(e.rigPath, "add", "-A")
+	e.git(e.rigPath, "commit", "-q", "-m", "merge "+name)
+	e.git(e.rigPath, "push", "-q", "origin", "main")
+	return e.git(e.rigPath, "rev-parse", "HEAD")
 }
 
 // poolWorkerPrompt is the prompt template a declared worker carries. The driver
@@ -520,11 +553,15 @@ func TestResumeDoesNotRouteABeadALiveWorkerHolds(t *testing.T) {
 // DEFECT A, case 1: closed work is finished work.
 func TestResumeDoesNotRouteAClosedBead(t *testing.T) {
 	e := newRecoveryEnv(t)
+	// wp-two has no bead in this fixture, so this dispatch has real work to do
+	// and cuts a tree for it — which needs the rig it would cut from.
+	base := e.initRig()
 	wt := e.makeWorktree("wp-one")
 	e.seedRuntime(map[string]string{
 		"dispatched":  "2026-08-14T16:43:00Z",
 		"bead.wp-one": beadOne,
 		"wt.wp-one":   wt,
+		"baseSha":     base,
 	})
 	e.setBead(beadOne, "closed")
 	// No session at all — the worker finished and went away, which is exactly
