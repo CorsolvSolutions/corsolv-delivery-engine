@@ -301,12 +301,10 @@ func TestVerificationOnlyRemediationChecksMergedEvidenceAndPublishesNothing(t *t
 		t.Errorf("the verified tree does not carry the evidence: %v", err)
 	}
 	// Detached, deliberately: there is nothing to put on a branch, and a branch
-	// would be a thing a later step could try to push. `symbolic-ref` failing IS
-	// the assertion here, so it is asked without the fatal wrapper.
-	sym := exec.Command("git", "-C", wt, "symbolic-ref", "--quiet", "--short", "HEAD")
-	sym.Env = e.scrubbedEnv(nil)
-	if branch, err := sym.Output(); err == nil {
-		t.Errorf("the verification cut a branch %q — it has nothing to put on one", strings.TrimSpace(string(branch)))
+	// would be a thing a later step could try to push. Git answers the literal
+	// string "HEAD" for a detached head, which is the assertion.
+	if branch := e.git(wt, "rev-parse", "--abbrev-ref", "HEAD"); branch != "HEAD" {
+		t.Errorf("the verification cut branch %q — it has nothing to put on one", branch)
 	}
 
 	// And the declared gate really ran.
