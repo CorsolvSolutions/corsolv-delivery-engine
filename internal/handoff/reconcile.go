@@ -151,6 +151,32 @@ type Remediation struct {
 	AuthorizedAt time.Time `json:"authorizedAt"`
 
 	Packages []WorkPackage `json:"packages"`
+
+	// Supersedes names corrective work an EARLIER remediation authorized that
+	// this one replaces.
+	//
+	// WHY CORRECTIVE WORK NEEDS THIS AND THE ORIGINAL PLAN DOES NOT. A plan is
+	// written before anything is known to be wrong. A remediation is written
+	// about something that IS wrong, from a diagnosis that can itself turn out to
+	// be mistaken — and scorm-course-studio's was. Two remedial packages were
+	// authorized to produce evidence that, it emerged, had already been merged,
+	// so no worker could ever produce a diff and publication refused for the
+	// right reason every time. A criterion is met only when EVERY package
+	// claiming it completes, so one mis-shaped authorization held five criteria
+	// hostage with no route back.
+	//
+	// Superseding is how a delivery changes its mind without pretending it never
+	// held the earlier one. The superseded package stays in its own remediation
+	// document exactly as authorized — nothing is rewritten and the sequence
+	// stays readable — but it is no longer work this delivery waits for: not
+	// compiled into the run, not required for completion, and not counted among
+	// the packages repairing its criterion.
+	//
+	// It reaches BACKWARDS only, and only into corrective work. A remediation may
+	// not supersede the original plan, whose work merged and is the history
+	// everything since was measured against; nor its own packages, which would be
+	// an authorization arguing with itself.
+	Supersedes []string `json:"supersedes,omitempty"`
 }
 
 // remediationFilePattern matches a remediation document in a project's delivery

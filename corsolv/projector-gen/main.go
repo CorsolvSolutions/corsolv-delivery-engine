@@ -57,6 +57,11 @@ type factsFile struct {
 		// GateLabel keys this task to its rows in the run's control ledger. The
 		// gate verdict is DERIVED from those rows, never asserted here.
 		GateLabel string `json:"gateLabel"`
+		// GateKind says WHICH gate this task is held to: the promoted route's
+		// three controls, or a verification's. It is a statement about what the
+		// package is, not about how it did — an empty value is the ordinary
+		// mutation package every delivery before verification existed had.
+		GateKind string `json:"gateKind"`
 	} `json:"tasks"`
 
 	// Deliverables are what the PROJECT agreed to produce, and which packages
@@ -117,6 +122,30 @@ var completionGateControls = []string{
 	"required CI passed",
 	"independent assurance passed",
 	"merged through repository governance",
+}
+
+// gateKindVerification marks a task that checked evidence already on the
+// authoritative branch instead of changing the repository.
+const gateKindVerification = "verification"
+
+// verificationGateControls are the control identities that constitute a
+// VERIFICATION's completion gate.
+//
+// A verification package has no pull request and no merge of its own, so the
+// three controls above are not merely absent from its ledger — they could never
+// be there. What it does have is stronger in the one way that matters here: the
+// commit it checked was already merged through the very governance those
+// controls describe, and the checking was run against that exact tree.
+//
+// So the gate asks the three questions that are actually answerable about it:
+// that the commit it names is really on the authoritative branch, that the
+// evidence the criterion needs is really present there, and that the declared
+// gates really passed when run against it. All three must PASS, for the same
+// reason all three must above — a partial answer is not an acceptance.
+var verificationGateControls = []string{
+	"verified commit is on the authoritative branch",
+	"required evidence present at the verified commit",
+	"declared verification gates passed at the verified commit",
 }
 
 func main() {
@@ -200,7 +229,7 @@ func main() {
 			ev = append(ev, "bead="+ft.BeadID)
 		}
 
-		gate, gateStatus := deriveCompletionGate(string(controls), ft.GateLabel)
+		gate, gateStatus := deriveCompletionGate(string(controls), ft.GateLabel, ft.GateKind)
 
 		state.Tasks[ft.TaskID] = &projector.Task{
 			TaskID: ft.TaskID, Title: ft.Title, Phase: ft.Phase,
@@ -302,12 +331,25 @@ func readTerminalRecord(evidenceDir, beadID string) (time.Time, bool) {
 // failed gets not-met, which is the whole point: the consumer reserves 100% for
 // a met gate, and manufacturing one from a merge would score acceptance that
 // nothing verified.
-func deriveCompletionGate(ledger, label string) (string, projector.CompletionGateStatus) {
+//
+// The controls it looks for depend on what the task IS. A package that changed
+// the repository is gated on the three controls of the promoted route; a package
+// that verified evidence already on the branch has no pull request and no merge,
+// and is gated on what it actually did. Scoring a verification against controls
+// it structurally cannot have would report every honest verification as not-met;
+// scoring it against the mutation controls anyway, by pretending a merge
+// happened, would be the false completion in the other direction. Each kind is
+// held to its own evidence.
+func deriveCompletionGate(ledger, label, kind string) (string, projector.CompletionGateStatus) {
 	if strings.TrimSpace(label) == "" {
 		return "", projector.GateNotMet
 	}
+	controls := completionGateControls
+	if kind == gateKindVerification {
+		controls = verificationGateControls
+	}
 	passed := 0
-	for _, want := range completionGateControls {
+	for _, want := range controls {
 		for _, line := range strings.Split(ledger, "\n") {
 			cols := strings.Split(line, "\t")
 			if len(cols) < 2 {
@@ -320,9 +362,9 @@ func deriveCompletionGate(ledger, label string) (string, projector.CompletionGat
 			}
 		}
 	}
-	gate := strings.Join(completionGateControls, " + ")
+	gate := strings.Join(controls, " + ")
 	switch {
-	case passed == len(completionGateControls):
+	case passed == len(controls):
 		return gate, projector.GateMet
 	case passed > 0:
 		return gate, projector.GatePartiallyMet

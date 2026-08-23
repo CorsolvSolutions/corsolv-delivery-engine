@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -54,7 +55,60 @@ type WorkPackage struct {
 	DependsOn []string `json:"dependsOn,omitempty"`
 	// Satisfies names the acceptance criteria this package contributes to.
 	Satisfies []string `json:"satisfies"`
+	// Verifies, when set, makes this package a VERIFICATION rather than a
+	// MUTATION. See Verification.
+	Verifies *Verification `json:"verifies,omitempty"`
 }
+
+// Verification turns a package from work-to-be-done into evidence-to-be-checked.
+//
+// WHY THIS EXISTS. A criterion reported met can later be disproved — by an
+// audit, by a contract that grew a requirement, by evidence nobody had gathered.
+// Usually the repair is work: someone changes the product, and the ordinary
+// remediation lifecycle carries it (worker → branch → PR → CI → merge).
+//
+// But sometimes the evidence the criterion now needs is ALREADY on the
+// authoritative branch. Nothing is missing from the product; what was missing
+// was the checking. Asked to repair such a criterion, the ordinary lifecycle
+// cannot: a worker handed a tree that already contains the evidence produces no
+// diff, and publication correctly refuses — "nothing was produced". The only way
+// through would be to manufacture a change nobody needs, open a pull request
+// that repairs nothing, and merge it so the shape fits. That is a lie told to a
+// state machine, and it is exactly the false completion this engine's controls
+// exist to prevent.
+//
+// So a verification package states what it is: the commit whose evidence is
+// being checked, and the gates that check it. The run cuts a clean tree at that
+// exact commit, grants those gates, runs them, and requires the artifact to be
+// really there. It creates no bead, no worker, no branch, no pull request and no
+// merge, because it changes nothing — and it reconciles the criterion only if
+// the checking passes.
+//
+// It is auditable as verification rather than mutation at every layer: the run
+// task is `verify-<id>` rather than `await`/`publish`, the projected status is
+// `verified` rather than `merged`, and the completion gate is derived from
+// controls that name what was actually done — gates run against a named merged
+// commit — instead of from a pull request that never existed.
+type Verification struct {
+	// MergedSha is the authoritative merged commit whose evidence is verified.
+	//
+	// Named, not inferred. "Whatever main happens to be" would make the record
+	// of what was verified drift the moment anything else merged, and the whole
+	// value of this package is that a later reader can go and look at the exact
+	// tree the gates ran against.
+	MergedSha string `json:"mergedSha"`
+}
+
+// IsVerification reports whether this package checks existing evidence rather
+// than producing new work.
+func (wp WorkPackage) IsVerification() bool {
+	return wp.Verifies != nil
+}
+
+// ShaPattern matches a full git commit sha. Abbreviations are refused: what a
+// verification package records is where a later reader must go to look, and an
+// abbreviation is a prefix that a busy repository can grow to share.
+var ShaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // DeliveryPlan is the initial plan for a project: the business brief turned
 // into bounded work packages.
@@ -119,9 +173,31 @@ type DeliveryPlan struct {
 // planned before anything was disproved, so the two questions never collapse
 // into one answer.
 func (p DeliveryPlan) AllPackages() []WorkPackage {
+	gone := p.Superseded()
 	out := append([]WorkPackage(nil), p.Packages...)
 	for _, rm := range p.Remediations {
-		out = append(out, rm.Packages...)
+		for _, wp := range rm.Packages {
+			if gone[wp.ID] {
+				continue
+			}
+			out = append(out, wp)
+		}
+	}
+	return out
+}
+
+// Superseded is every corrective package a later remediation has replaced.
+//
+// They stay in their own remediation documents — the record of what was once
+// authorized is not rewritten — but they are not work this delivery is waiting
+// for, so every question about what must run, what must complete, and what is
+// repairing a criterion is asked without them.
+func (p DeliveryPlan) Superseded() map[string]bool {
+	out := map[string]bool{}
+	for _, rm := range p.Remediations {
+		for _, id := range rm.Supersedes {
+			out[id] = true
+		}
 	}
 	return out
 }
@@ -133,9 +209,20 @@ func (p DeliveryPlan) AllPackages() []WorkPackage {
 // pointless for every other, which is why it is computed here rather than
 // carried on WorkPackage.
 func (p DeliveryPlan) generations() [][]WorkPackage {
+	gone := p.Superseded()
 	gens := [][]WorkPackage{p.Packages}
 	for _, rm := range p.Remediations {
-		gens = append(gens, rm.Packages)
+		live := make([]WorkPackage, 0, len(rm.Packages))
+		for _, wp := range rm.Packages {
+			if gone[wp.ID] {
+				// Superseded work claims nothing, so it collides with nothing —
+				// and holding a replacement to the writer isolation of the
+				// package it replaces would make replacing one impossible.
+				continue
+			}
+			live = append(live, wp)
+		}
+		gens = append(gens, live)
 	}
 	return gens
 }
@@ -362,7 +449,36 @@ func (p DeliveryPlan) Validate(in Intent) error {
 				seenGate[gate] = true
 			}
 
-			if len(wp.AuthorizedPaths) == 0 {
+			// A VERIFICATION PACKAGE IS HELD TO THE OPPOSITE RULES, AND HELD TO
+			// THEM JUST AS HARD.
+			//
+			// A mutation package must be able to change something, or it cannot
+			// produce its result. A verification package must be able to change
+			// NOTHING, or it is not a verification: the moment it may write, the
+			// evidence it reports on could be evidence it wrote itself, and the
+			// criterion it reconciles would rest on a check marking its own work.
+			//
+			// So the containment boundary is not relaxed here, it is inverted. The
+			// artifact must still be named, because something has to be there for
+			// the check to be about — but it is named as evidence that must ALREADY
+			// exist at the verified commit, not as a file to be produced.
+			if wp.IsVerification() {
+				if len(wp.AuthorizedPaths) != 0 {
+					add("%s verifies existing evidence and authorizes %d path(s) — a package that may write cannot be the check on what was written", label, len(wp.AuthorizedPaths))
+				}
+				if !ShaPattern.MatchString(wp.Verifies.MergedSha) {
+					add("%s.verifies.mergedSha %q is not a full commit sha — a verification names the exact tree it ran against, so a later reader can go and look at it", label, wp.Verifies.MergedSha)
+				}
+				if len(wp.Gates) == 0 {
+					add("%s verifies nothing — a verification package with no gates asserts a criterion is met without checking anything", label)
+				}
+				if len(wp.DependsOn) != 0 {
+					add("%s verifies existing evidence and declares dependencies — it merges nothing, so nothing it waited for could reach it", label)
+				}
+				if gen == 0 {
+					add("%s verifies existing evidence but is in the original plan — there is nothing for a delivery's first plan to verify, because none of its work has been done yet", label)
+				}
+			} else if len(wp.AuthorizedPaths) == 0 {
 				add("%s authorizes no paths — a package that may change nothing cannot produce anything", label)
 			}
 			clean := make([]string, 0, len(wp.AuthorizedPaths))
@@ -390,6 +506,9 @@ func (p DeliveryPlan) Validate(in Intent) error {
 				add("%s names no required artifact — nothing would prove the package produced its result", label)
 			case err != nil:
 				add("%s artifact %q is not usable: %v", label, wp.Artifact, err)
+			case wp.IsVerification():
+				// Nothing to authorize: the artifact is evidence the verified
+				// commit must already carry, and the check is that it does.
 			default:
 				if !containsPath(clean, artifact) {
 					add("%s must authorize its own artifact %q", label, artifact)
@@ -416,7 +535,45 @@ func (p DeliveryPlan) Validate(in Intent) error {
 		}
 	}
 
+	// SUPERSESSION REACHES BACKWARDS, AND ONLY INTO CORRECTIVE WORK.
+	//
+	// Checked here rather than where a remediation is admitted, because whether
+	// an id is supersedable is a question about the whole composed plan: which
+	// generation it belongs to, and whether that generation came first.
+	basePackage := map[string]bool{}
+	for _, wp := range p.Packages {
+		basePackage[wp.ID] = true
+	}
+	earlier := map[string]bool{}
+	for i, rm := range p.Remediations {
+		seenHere := map[string]bool{}
+		for _, id := range rm.Supersedes {
+			switch {
+			case seenHere[id]:
+				add("remediation %d supersedes %q twice", i+1, id)
+			case basePackage[id]:
+				add("remediation %d supersedes %q, which the ORIGINAL plan authorized — that work is the history everything since was measured against, and a remediation may not withdraw it", i+1, id)
+			case !earlier[id]:
+				add("remediation %d supersedes %q, which no earlier remediation authorized — corrective work can only replace corrective work that already exists", i+1, id)
+			}
+			seenHere[id] = true
+		}
+		for _, wp := range rm.Packages {
+			earlier[wp.ID] = true
+		}
+	}
+
 	all := p.AllPackages()
+	// verifier names the packages that merge nothing. A dependency runs from an
+	// upstream's MERGE bead — waiting for repository state rather than for a
+	// sibling worker's files — and a verification package never closes one, so a
+	// package waiting on it would wait for something that cannot happen.
+	verifier := map[string]bool{}
+	for _, wp := range all {
+		if wp.IsVerification() {
+			verifier[wp.ID] = true
+		}
+	}
 	for _, wp := range all {
 		for _, dep := range wp.DependsOn {
 			if dep == wp.ID {
@@ -425,6 +582,10 @@ func (p DeliveryPlan) Validate(in Intent) error {
 			}
 			if !ids[dep] {
 				add("%s depends on %q, which is not in this plan", wp.ID, dep)
+				continue
+			}
+			if verifier[dep] {
+				add("%s depends on %q, which verifies existing evidence and merges nothing — the merge it would wait for can never happen", wp.ID, dep)
 			}
 		}
 	}

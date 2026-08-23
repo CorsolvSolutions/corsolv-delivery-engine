@@ -185,6 +185,15 @@ const (
 	StageAwait = "await"
 	// StagePublish is per package: gate, commit, push, PR, checks, merge.
 	StagePublish = "publish"
+	// StageVerify is what a verification package gets INSTEAD of await and
+	// publish: it cuts a clean tree at the named merged commit, runs the
+	// declared gates against it and requires the artifact to be really there.
+	//
+	// One stage rather than two because there is no worker to wait for and
+	// nothing to publish. Naming it separately is also what makes the record
+	// legible — a reader of the run plan can see which packages changed the
+	// repository and which only checked it.
+	StageVerify = "verify"
 	// StageProject renders the delivery projection from the run's own evidence.
 	StageProject = "project"
 	// StagePublishProjection installs that projection into the project's
@@ -417,6 +426,26 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	// independent packages stay free to proceed as soon as they are ready. No
 	// new scheduler: this is the existing queue over the existing bead graph.
 	for _, wp := range orderPackages(plan) {
+		// A verification package has no worker to wait for and nothing to
+		// publish, so it compiles to ONE task rather than two. It still waits on
+		// dispatch, because dispatch is where the run's own facts are settled.
+		if wp.IsVerification() {
+			verifyTask := stage(StageVerify+"-"+wp.ID, "verify "+wp.ID+": "+wp.Title,
+				unattended.BandPrimary, []string{StageDispatch}, false,
+				awaitTimeout+driverResultMargin,
+				append([]string{StageVerify, "-package", wp.ID, "-deadline", waitBudget}, project...)...)
+			verifyTask.MaxResumes = driverMaxResumes
+			// `verified`, never `merged`. The completion assessment accepts both,
+			// and the difference is the whole record: this package reconciled a
+			// criterion by checking evidence that was already there, and a reader
+			// who cannot tell that from a merge has been told the wrong thing.
+			verifyTask.DeliveryStatus = "verified"
+			verifyTask.CompletionGate = "declared verification gates passed against the authoritative merged commit + required evidence present at that commit"
+			verifyTask.Phase = wp.Phase
+			work.Tasks = append(work.Tasks, verifyTask)
+			continue
+		}
+
 		upstream := make([]string, 0, len(wp.DependsOn))
 		for _, dep := range wp.DependsOn {
 			upstream = append(upstream, StagePublish+"-"+dep)
@@ -451,6 +480,14 @@ func Compile(in Intent, plan DeliveryPlan, host HostProfile, runID string) (unat
 	all := plan.AllPackages()
 	projectNeeds := make([]string, 0, len(all))
 	for _, wp := range all {
+		// Each package by the stage that actually finishes it. A verification
+		// package named here as `publish-<id>` would be a dependency on a task
+		// the run does not contain, and the projection would be rendered before
+		// the check that repairs the criterion had run.
+		if wp.IsVerification() {
+			projectNeeds = append(projectNeeds, StageVerify+"-"+wp.ID)
+			continue
+		}
 		projectNeeds = append(projectNeeds, StagePublish+"-"+wp.ID)
 	}
 

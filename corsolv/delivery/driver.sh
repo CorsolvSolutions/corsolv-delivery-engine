@@ -162,7 +162,7 @@ done
 # caller error and must read as one; discovering it only after the intent file
 # turned out to be missing would report a wiring bug as an environment problem.
 case "$STAGE" in
-  city-up|dispatch|await|publish|project|publish-projection) ;;
+  city-up|dispatch|await|publish|verify|project|publish-projection) ;;
   *) printf 'driver: unknown stage %s\n' "$STAGE" >&2; exit 2 ;;
 esac
 
@@ -357,8 +357,21 @@ compose_plan() {
     cp -f "$BASE_PLAN" "$PLAN" || die "composing the effective plan from $BASE_PLAN"
     return 0
   fi
+  # AND WHAT A LATER REMEDIATION SUPERSEDED IS NOT PART OF IT.
+  #
+  # A remediation can be authorized from a diagnosis that turns out to be wrong,
+  # and a package that cannot be executed would otherwise hold its criterion
+  # hostage forever — a criterion is met only when every package claiming it
+  # completes. Superseded work stays in its own document, exactly as authorized;
+  # it is simply not work this run is waiting for. Dropping it here, at the one
+  # place every stage reads the plan from, is what makes that true everywhere at
+  # once rather than in each stage that remembered to ask.
   local tmp; tmp="$(mktemp "$PLAN.XXXXXX")"
-  if jq -s '. as $all | $all[0] | .packages = ($all[0].packages + [$all[1:][].packages[]])' \
+  if jq -s '. as $all
+            | ([$all[1:][] | .supersedes // [] | .[]] | unique) as $gone
+            | $all[0]
+            | .packages = ([$all[0].packages[], $all[1:][].packages[]]
+                           | map(select(.id as $i | ($gone | index($i)) == null)))' \
        "$BASE_PLAN" "${rems[@]}" > "$tmp" 2> "$EVIDENCE/compose-plan.txt"; then
     mv -f "$tmp" "$PLAN"
     return 0
@@ -425,6 +438,18 @@ sa_ledger_init "$EVIDENCE/gc-commands.log" 2>/dev/null || true
 GIT_CRED_HELPER="!f() { echo username=x-access-token; echo \"password=\$(\"$GH\" auth token)\"; }; f"
 
 packages() { jqp '.packages[].id'; }
+
+# pkg_verifies_sha <id> — the merged commit a VERIFICATION package checks, or
+# empty for an ordinary mutation package. Its presence is what distinguishes the
+# two everywhere in this driver, so it is read from the plan rather than
+# remembered anywhere.
+pkg_verifies_sha() {
+  jq -r --arg id "$1" '.packages[] | select(.id == $id) | .verifies.mergedSha // empty' < "$PLAN"
+}
+
+# pkg_is_verification <id> — true when this package checks existing evidence
+# rather than producing work.
+pkg_is_verification() { [ -n "$(pkg_verifies_sha "$1")" ]; }
 pkg_field() { jq -r --arg id "$1" --arg f "$2" '.packages[] | select(.id == $id) | .[$f]' < "$PLAN"; }
 pkg_paths_csv() { jq -r --arg id "$1" '[.packages[] | select(.id == $id) | .authorizedPaths[]] | join(",")' < "$PLAN"; }
 pkg_deps() { jq -r --arg id "$1" '.packages[] | select(.id == $id) | .dependsOn[]?' < "$PLAN"; }
@@ -812,6 +837,20 @@ stage_dispatch() {
   # packages that have nothing yet.
   local pkg fresh=''
   for pkg in $(packages); do
+    # A VERIFICATION PACKAGE IS NOT DISPATCHED, BECAUSE THERE IS NOBODY TO
+    # DISPATCH IT TO. It checks evidence already on the authoritative branch: no
+    # work bead, because no work is being asked for; no merge bead, because
+    # nothing will be merged; no worktree here, because its own stage cuts a
+    # detached one at the exact commit it verifies; and no worker, because a
+    # worker's job is to change files and this package may change none.
+    #
+    # Creating them anyway would be the dishonest shape this whole mechanism
+    # exists to avoid — a bead nobody can close by doing anything, waiting for a
+    # publication that has nothing to publish.
+    if pkg_is_verification "$pkg"; then
+      say "$pkg verifies existing evidence; it is not routed to a worker"
+      continue
+    fi
     if [ -n "$(rt_get "bead.$pkg")" ]; then
       recover_worker "$pkg"
     else
@@ -1648,6 +1687,100 @@ merge_pr() {
 }
 
 # ===========================================================================
+# STAGE verify — check evidence that is already on the authoritative branch
+# ===========================================================================
+
+# WHAT THIS STAGE IS FOR, AND WHY IT IS NOT PUBLISH.
+#
+# A criterion reported met can be disproved later, and the repair is usually
+# work. Sometimes it is not: the evidence the criterion now needs is already on
+# the authoritative branch, and what was missing was the checking. Asked to
+# repair such a criterion, the ordinary lifecycle cannot — a worker handed a tree
+# that already contains the evidence produces no diff, and publish correctly
+# refuses that nothing was produced. The only way through would be to manufacture
+# a change nobody needs and merge it so the shape fits, which is a lie told to a
+# state machine.
+#
+# So this stage does the honest thing instead. It creates no bead, starts no
+# worker, cuts no branch, opens no pull request and merges nothing, because it
+# changes nothing. It cuts a DETACHED tree at the exact commit the package names,
+# proves that commit is really on the authoritative branch, proves the evidence
+# is really there, and runs the package's declared gates against it.
+#
+# Each of those three is recorded as its own durable fact, and the projection's
+# completion gate is derived from them the same way a published package's is
+# derived from its own three. A verification that could not prove one of them
+# records what it did prove and leaves the criterion unmet — which is the whole
+# reason the checks are separate facts rather than one boolean.
+stage_verify() {
+  [ -n "$CITY" ] || die 'no city; city-up has not run'
+  [ -n "$PACKAGE" ] || die 'verify needs -package'
+
+  local sha artifact wt
+  sha="$(pkg_verifies_sha "$PACKAGE")"
+  artifact="$(pkg_field "$PACKAGE" artifact)"
+  [ -n "$sha" ] || die "$PACKAGE is not a verification package; it names no merged commit to verify"
+
+  # Already answered. Re-running a stage that has done its work is how every
+  # other stage behaves, and re-running gates against an immutable commit could
+  # only produce the same answer at more cost.
+  if [ -n "$(rt_get "verified.$PACKAGE")" ]; then
+    say "$PACKAGE was already verified at ${sha:0:9}"
+    return 0
+  fi
+
+  # CONTROL 1 — the commit is really on the authoritative branch.
+  #
+  # Asked of the remote, not of the local ref: a sha that exists in the rig
+  # proves only that something once fetched it. What the criterion rests on is
+  # that this commit is part of the branch the project is judged by.
+  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null
+  local head; head="$(git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null)"
+  [ -n "$head" ] || die "cannot read the authoritative branch to verify $PACKAGE against"
+  if ! git -C "$RIG_PATH" merge-base --is-ancestor "$sha" "$head" 2>/dev/null; then
+    say "$PACKAGE names $sha, which is not on origin/$DEFAULT_BRANCH (head ${head:0:9})"
+    die "$PACKAGE verifies a commit that is not on the authoritative branch, so nothing it proved would be about the delivered product"
+  fi
+  rt_set "verifiedCommit.$PACKAGE" "$sha"
+  say "$PACKAGE: ${sha:0:9} is on origin/$DEFAULT_BRANCH"
+
+  # A DETACHED tree, deliberately. There is no branch because there is nothing
+  # to put on one, and a branch would be a thing a later step could try to push.
+  wt="$CITY/.gc/worktrees/$RIG_NAME/verify-$PACKAGE"
+  if [ -d "$wt" ]; then
+    git -C "$RIG_PATH" worktree remove --force "$wt" > "$EVIDENCE/verify-recut-$PACKAGE.txt" 2>&1 || true
+  fi
+  mkdir -p "$(dirname "$wt")"
+  GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_PATH" worktree add -q --detach "$wt" "$sha" \
+    > "$EVIDENCE/verify-worktree-$PACKAGE.txt" 2>&1 \
+    || die_from "$EVIDENCE/verify-worktree-$PACKAGE.txt" "cutting a clean tree at $sha to verify $PACKAGE"
+  rt_set "wt.$PACKAGE" "$wt"
+
+  # CONTROL 2 — the evidence the criterion needs is really there.
+  #
+  # Asked of the COMMIT rather than of the directory. A file on disk could have
+  # arrived any number of ways; what the criterion rests on is that the tree the
+  # project merged carries it.
+  if ! git -C "$RIG_PATH" cat-file -e "$sha:$artifact" 2>/dev/null; then
+    die "$PACKAGE requires $artifact at ${sha:0:9}, and that commit does not carry it"
+  fi
+  rt_set "verifiedEvidence.$PACKAGE" "$artifact"
+  say "$PACKAGE: $artifact is present at ${sha:0:9}"
+
+  # CONTROL 3 — the declared gates pass against that exact tree.
+  prepare_worktree "$wt" "$PACKAGE"
+  if ! run_project_gates "$wt" "$PACKAGE"; then
+    die "$PACKAGE failed its declared verification gates at ${sha:0:9}; the criterion it repairs stays unmet"
+  fi
+  rt_set "verifiedGates.$PACKAGE" "$sha"
+
+  # Only now, and only past all three.
+  rt_set "verified.$PACKAGE" "$sha"
+  say "$PACKAGE verified at ${sha:0:9}: on the branch, evidence present, declared gates passed"
+  return 0
+}
+
+# ===========================================================================
 # STAGE project — render the delivery projection
 # ===========================================================================
 
@@ -1798,11 +1931,13 @@ deliverable_facts() {
       | . as $c
       | ($record[0].acceptances // [] | map(select(.criterionId == $c.id)) | first) as $a
       | ([ $record[0].invalidations // [] | .[] | select(.criterionId == $c.id) ] | last) as $inv
+      | ([ $rems[] | .supersedes // [] | .[] ] | unique) as $gone
       | ([ $rems[]
            | select(any(.repairs[]?; .criterionId == $c.id and ($inv != null and .invalidation == $inv.seq)))
            | .packages[]
            | select(any(.satisfies[]?; . == $c.id))
-           | .id ]) as $repaired
+           | .id
+           | select(. as $i | ($gone | index($i)) == null) ]) as $repaired
       | { id: $c.id,
           statement: $c.statement,
           acceptedBy: ($a.by // ""),
@@ -1816,10 +1951,17 @@ deliverable_facts() {
 }
 
 emit_task_facts() {
-  local id="$1" status prNum mergedSha
+  local id="$1" status prNum mergedSha gateKind=''
   prNum="$(rt_get "pr.$id")"
   mergedSha="$(rt_get "merged.$id")"
   status="$(package_status "$id")"
+  if pkg_is_verification "$id"; then
+    gateKind='verification'
+    # The commit this package VERIFIED is the commit that implements what the
+    # criterion rests on, so it is the implementation sha — the same field, and
+    # the same meaning, reached a different way.
+    mergedSha="$(rt_get "verifiedCommit.$id")"
+  fi
 
   printf '    {\n'
   printf '      "taskId": %s,\n' "$(jq -Rn --arg v "$id" '$v')"
@@ -1838,7 +1980,8 @@ emit_task_facts() {
   printf '      "implementationSha": %s,\n' "$(jq -Rn --arg v "$mergedSha" '$v')"
   printf '      "agentSession": %s,\n' "$(jq -Rn --arg v "worker-$id" '$v')"
   printf '      "worktreePath": %s,\n' "$(jq -Rn --arg v "$(rt_get "wt.$id")" '$v')"
-  printf '      "gateLabel": %s\n' "$(jq -Rn --arg v "$id" '$v')"
+  printf '      "gateLabel": %s,\n' "$(jq -Rn --arg v "$id" '$v')"
+  printf '      "gateKind": %s\n' "$(jq -Rn --arg v "$gateKind" '$v')"
   printf '    }'
 }
 
@@ -1901,12 +2044,47 @@ build_controls() {
     v="$(rt_get "merged.$id")"
     [ -n "$v" ] && printf '%s\t%s\t%s\n' \
       "$id merged through repository governance" "$status" "$v$withheld" >> "$ledger"
+
+    # A VERIFICATION'S THREE, DERIVED THE SAME WAY AND FROM FACTS AS DURABLE.
+    #
+    # It has no pull request and no merge of its own, so the three rows above
+    # are not merely absent from its ledger — they could never be there, and a
+    # gate that demanded them would report every honest verification as unmet.
+    # What it does have is a named commit that was already merged through the
+    # governance those rows describe, and three separate checks against it. Each
+    # is written only past the step that established it, so there is no path to
+    # any of these rows without the thing it claims.
+    v="$(rt_get "verifiedCommit.$id")"
+    [ -n "$v" ] && printf '%s\t%s\t%s\n' \
+      "$id verified commit is on the authoritative branch" "$status" "$v$withheld" >> "$ledger"
+    v="$(rt_get "verifiedEvidence.$id")"
+    [ -n "$v" ] && printf '%s\t%s\t%s\n' \
+      "$id required evidence present at the verified commit" "$status" "$v$withheld" >> "$ledger"
+    v="$(rt_get "verifiedGates.$id")"
+    [ -n "$v" ] && printf '%s\t%s\t%s\n' \
+      "$id declared verification gates passed at the verified commit" "$status" \
+      "the controller ran the package's declared gates against $v$withheld" >> "$ledger"
   done
   say "control ledger: $(( $(wc -l < "$ledger") - 1 )) adjudicated control(s), recorded $status"
 }
 
 package_status() {
   local id="$1"
+  # A verification reports `verified`, never `merged`. Both count toward
+  # completion, and the difference is the record: this package reconciled a
+  # criterion by checking evidence that was already there, and a reader who
+  # cannot tell that from a merge has been told the wrong thing.
+  if [ -n "$(rt_get "verified.$id")" ]; then
+    [ -z "$PROGRESSION_REFUSAL" ] || { printf 'blocked'; return; }
+    printf 'verified'
+    return
+  fi
+  if pkg_is_verification "$id"; then
+    # It is not planned-and-waiting for a worker; it simply has not been checked
+    # yet, and nothing else in this function's vocabulary would be true of it.
+    printf 'planned'
+    return
+  fi
   if [ -n "$(rt_get "merged.$id")" ]; then
     # The same ceiling the run applies to its own projection, applied here for
     # the same reason: a merge is publication, and publication is not
@@ -1992,6 +2170,7 @@ case "$STAGE" in
   dispatch)           stage_dispatch ;;
   await)              stage_await ;;
   publish)            stage_publish ;;
+  verify)             stage_verify ;;
   project)            stage_project ;;
   publish-projection) stage_publish_projection ;;
 esac
