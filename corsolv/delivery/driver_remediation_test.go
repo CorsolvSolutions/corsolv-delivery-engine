@@ -216,6 +216,199 @@ func completedDelivery(t *testing.T) *recoveryEnv {
 	return e
 }
 
+// CORRECTIVE WORK IS BASED ON THE BRANCH AS IT STANDS NOW, NOT ON THE BRANCH
+// THE DELIVERY STARTED FROM.
+//
+// THE DEFECT THIS EXISTS FOR. Dispatch cut a package's tree from `baseSha` —
+// what the default branch was when city-up cloned the rig. While a plan could
+// only be dispatched once that was the merged head, so the two were the same
+// tree and the difference was invisible.
+//
+// Corrective work authorized after a delivery completed has no upstreams, so it
+// takes the branch that cuts immediately — and got the repository as it stood
+// BEFORE any of the delivery's own work merged. On scorm-course-studio run
+// 20260823T174122Z that was 9 files against main's 177: no package.json, no
+// src, and none of the merged evidence the criterion had been disproved
+// against. Both authorized remedial packages then failed for reasons that had
+// nothing to do with the repair they were asked to make —
+// `npm error enoent Could not read package.json`, and a required artifact that
+// could not be produced because the product that produces it was not there.
+//
+// A criterion is invalidated against the evidence of the CURRENT merged branch.
+// The work that repairs it has to be based there too, or remediation is
+// impossible on every delivery that has ever finished.
+func TestRemedialWorkIsCutFromCurrentMergedMainNotTheRunsOriginalBase(t *testing.T) {
+	e := newRecoveryEnv(t)
+
+	// Commit A: the delivery's own starting point, recorded as baseSha.
+	commitA := e.initRig()
+
+	// The delivery runs, and its packages merge. Commit B carries the product
+	// that the original base did not have — this is the package.json whose
+	// absence produced the live ENOENT.
+	const manifest = "{\n  \"name\": \"the-product\",\n  \"scripts\": { \"verify\": \"true\" }\n}\n"
+	commitB := e.advanceMergedMain("package.json", manifest)
+	if commitA == commitB {
+		t.Fatal("the fixture must advance the default branch past the run's base")
+	}
+
+	e.seedRuntime(map[string]string{
+		"dispatched":       "2026-08-21T09:00:00Z",
+		"bead.wp-one":      beadOne,
+		"wt.wp-one":        e.makeWorktree("wp-one"),
+		"merge.wp-one":     "merge-one",
+		"bead.wp-two":      beadTwo,
+		"wt.wp-two":        e.makeWorktree("wp-two"),
+		"merge.wp-two":     "merge-two",
+		"merged.wp-one":    "1111111111111111111111111111111111111111",
+		"merged.wp-two":    "2222222222222222222222222222222222222222",
+		"published.wp-one": "merged",
+		"published.wp-two": "merged",
+		"baseSha":          commitA, // history, and it must stay history
+	})
+	e.setBead(beadOne, "closed")
+	e.setBead(beadTwo, "closed")
+	e.declareAgent("wp-one")
+	e.declareAgent("wp-two")
+
+	// The criterion is disproved against commit B, and corrective work is
+	// authorized to repair it.
+	if err := handoff.SaveRemediation(e.root, remedialPackage(e.project)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("reconciling the city must succeed, got %d:\n%s", code, out)
+	}
+	code, out := e.runStage("dispatch", []string{"GC_STUB_ENFORCE_AGENTS=1"})
+	if code != 0 {
+		t.Fatalf("dispatching corrective work must succeed, got %d:\n%s", code, out)
+	}
+
+	wt := filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "worker-wp-three")
+
+	// THE VERDICT, in the form the live failure took: the file the package's own
+	// gate reads is there to be read.
+	got, err := os.ReadFile(filepath.Join(wt, "package.json"))
+	if err != nil {
+		t.Fatalf("the remedial tree has no package.json — the live ENOENT, reproduced: %v\ntree: %v\n%s",
+			err, dirEntries(t, wt), out)
+	}
+	if string(got) != manifest {
+		t.Errorf("the remedial tree carries a different package.json than merged main:\n%s", got)
+	}
+
+	// And it is based on merged main, not on the run's historical base.
+	head := e.git(wt, "rev-parse", "HEAD")
+	if head != commitB {
+		t.Fatalf("the remedial tree is based on %s, want merged main %s (the run's base was %s)",
+			head[:9], commitB[:9], commitA[:9])
+	}
+
+	// IDEMPOTENT. Preparing again neither re-cuts nor re-beads.
+	e.truncateGCLog()
+	if code, out := e.runStage("dispatch", []string{"GC_STUB_ENFORCE_AGENTS=1"}); code != 0 {
+		t.Fatalf("a second dispatch must succeed, got %d:\n%s", code, out)
+	}
+	if again := e.git(wt, "rev-parse", "HEAD"); again != commitB {
+		t.Errorf("a second dispatch moved the remedial base to %s", again[:9])
+	}
+	if created := callsContaining(e.gcCalls(), "bd create"); len(created) != 0 {
+		t.Errorf("a second dispatch created work again: %v", created)
+	}
+
+	// And the finished packages were left entirely alone.
+	for _, pkg := range []string{"wp-one", "wp-two"} {
+		if got := slingsFor(e.gcCalls(), pkg); got != 0 {
+			t.Errorf("%s was routed again: %d sling(s) — merged work must not be reopened", pkg, got)
+		}
+	}
+}
+
+// AND THE BASE UNDER SOMEONE'S FEET IS NEVER MOVED.
+//
+// Re-cutting is only ever safe because of what it refuses to do. A tree holding
+// commits the default branch does not have is holding WORK, and a tree a live
+// worker is sitting in is being used right now. Either one re-cut is the
+// recovery causing the next failure — the same mistake as handing merged work
+// back to a worker.
+func TestAStaleTreeIsNotRecutWhenItHoldsWorkOrAWorker(t *testing.T) {
+	e := newRecoveryEnv(t)
+	commitA := e.initRig()
+	e.advanceMergedMain("package.json", "{}\n")
+
+	// wp-one is open, on a tree cut from the old base, and its worker has
+	// committed something that is not on the default branch.
+	wt := filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "worker-wp-one")
+	e.git(e.rigPath, "worktree", "add", "-q", "-b", "delivery/test/wp-one", wt, commitA)
+	if err := os.WriteFile(filepath.Join(wt, "in-progress.txt"), []byte("a worker's work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.git(wt, "add", "-A")
+	e.git(wt, "commit", "-q", "-m", "work in progress")
+	carried := e.git(wt, "rev-parse", "HEAD")
+
+	e.seedRuntime(map[string]string{
+		"dispatched":    "2026-08-21T09:00:00Z",
+		"bead.wp-one":   beadOne,
+		"wt.wp-one":     wt,
+		"branch.wp-one": "delivery/test/wp-one",
+		"bead.wp-two":   beadTwo,
+		"baseSha":       commitA,
+	})
+	e.setBead(beadOne, "open")
+	e.setBead(beadTwo, "closed")
+	e.declareAgent("wp-one")
+
+	if code, out := e.runStage("await", []string{"DELIVERY_WORK_DEADLINE=0"}); code == 0 {
+		t.Fatalf("await must not report success with wp-one open:\n%s", out)
+	}
+	if after := e.git(wt, "rev-parse", "HEAD"); after != carried {
+		t.Fatalf("a tree carrying unmerged work was re-cut: %s -> %s", carried[:9], after[:9])
+	}
+	if _, err := os.Stat(filepath.Join(wt, "in-progress.txt")); err != nil {
+		t.Fatalf("the worker's own work was destroyed: %v", err)
+	}
+
+	// And with a LIVE worker, even a tree carrying nothing is left alone.
+	e2 := newRecoveryEnv(t)
+	baseA := e2.initRig()
+	e2.advanceMergedMain("package.json", "{}\n")
+	wt2 := filepath.Join(e2.city, ".gc", "worktrees", recoveryRigName, "worker-wp-one")
+	e2.git(e2.rigPath, "worktree", "add", "-q", "-b", "delivery/test/wp-one", wt2, baseA)
+	e2.seedRuntime(map[string]string{
+		"dispatched":    "2026-08-21T09:00:00Z",
+		"bead.wp-one":   beadOne,
+		"wt.wp-one":     wt2,
+		"branch.wp-one": "delivery/test/wp-one",
+		"bead.wp-two":   beadTwo,
+		"baseSha":       baseA,
+	})
+	e2.setBead(beadOne, "open")
+	e2.setBead(beadTwo, "closed")
+	e2.declareAgent("wp-one")
+	e2.setSessions(liveSession("worker-wp-one"))
+
+	e2.runStage("await", []string{"DELIVERY_WORK_DEADLINE=0"})
+	if after := e2.git(wt2, "rev-parse", "HEAD"); after != baseA {
+		t.Fatalf("a live worker's base was moved underneath it: %s -> %s", baseA[:9], after[:9])
+	}
+}
+
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{"<no such directory>"}
+	}
+	var out []string
+	for _, entry := range entries {
+		out = append(out, entry.Name())
+	}
+	sort.Strings(out)
+	return out
+}
+
 // A CITY IS RECONCILED AGAINST THE EFFECTIVE PLAN, NOT AGAINST THE PLAN IT WAS
 // BUILT FROM.
 //

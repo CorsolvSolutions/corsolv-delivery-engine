@@ -103,12 +103,9 @@ func newSendbackEnv(t *testing.T) *sendbackEnv {
 
 	// An origin the publication can really push to. `git push` runs before the
 	// CI await, so without one the test would never reach the code it is for.
-	origin := filepath.Join(e.root, "origin.git")
-	mustGit(t, e, "", "init", "-q", "--bare", "-b", "main", origin)
-
+	// initRig builds it, because a rig IS a clone: the base a package is cut
+	// from is read from the origin's default branch, not the rig's own.
 	base := e.initRig()
-	mustGit(t, e, e.rigPath, "remote", "add", "origin", origin)
-	mustGit(t, e, e.rigPath, "push", "-q", "origin", "main")
 
 	branch := "delivery/20260814T164300Z/wp-one"
 	wt := filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "worker-wp-one")

@@ -697,6 +697,17 @@ recover_worker() {
     return 0
   fi
 
+  # A fifth case, and the same rule as the fourth: a tree cut from a base the
+  # default branch has moved past is not somewhere this work can be done, so
+  # routing a worker into it would start someone with no project to work on.
+  # ensure_package_worktree re-cuts it and routes it there, exactly as it does
+  # for a package reaching its base for the first time — and routing here as
+  # well would sling the same bead twice.
+  if worktree_base_is_stale "$id" "$wt"; then
+    say "$id: its tree was cut from a base the default branch has moved past; it is re-cut and routed when its stage begins"
+    return 0
+  fi
+
   say "$id: bead $bead is open and no worker holds it; routing it again"
   sa_ledger_note "recovering $id: re-routing open bead $bead with no live worker"
   route_bead "$id" "$bead"
@@ -815,7 +826,32 @@ stage_dispatch() {
     say "dispatching corrective work added since:${fresh}"
   fi
 
-  local base; base="$(rt_get baseSha)"
+  # THE BASE IS READ NOW, NOT REMEMBERED FROM WHEN THE DELIVERY BEGAN.
+  #
+  # `baseSha` is what the default branch was when city-up cloned the rig. On a
+  # first run that IS the merged head, so cutting from either produces the same
+  # tree — which is why the difference stayed invisible for as long as a plan
+  # could only be dispatched once.
+  #
+  # It stops being the same the moment a plan grows. Corrective work authorized
+  # after a delivery completed has no upstreams, so it takes the branch below
+  # that cuts immediately — and cutting it from `baseSha` hands it the repository
+  # as it stood BEFORE any of the delivery's own work merged. On
+  # scorm-course-studio that was 9 files against main's 177: no package.json, no
+  # src, and none of the merged evidence the criterion had been disproved
+  # against. The package's declared gates could not run at all
+  # (`npm error enoent Could not read package.json`) and its required artifact
+  # could not be produced, so two authorized remedial packages failed for a
+  # reason that had nothing to do with the repair they were asked to make.
+  #
+  # A criterion is invalidated against the evidence of the CURRENT merged branch,
+  # so the work that repairs it must be based there too. Reading the head at the
+  # moment of the cut is the rule ensure_package_worktree already states, and it
+  # needs no conditional to tell a first run from a resumed one: on a first run
+  # it resolves to exactly what `baseSha` records. `baseSha` stays recorded as
+  # the historical fact it is, and stops being mistaken for a current one.
+  local base; base="$(merged_head)"
+  [ -n "$base" ] || die 'cannot read the authoritative merged branch to cut work from'
   local id bead mergeBead objective artifact paths wt branch dep
 
   # Pass 1: create every work bead and its controller merge bead, and stamp the
@@ -976,6 +1012,74 @@ install_package_gates() {
 # that waits for it begins — and the bead is re-slung there, because an agent
 # whose work directory did not exist when it was first routed has nowhere to
 # have started.
+# merged_head — the authoritative default branch AS IT STANDS NOW.
+#
+# Asked of the remote every time rather than cached, because the whole point of
+# it is to be current: between one stage and the next this run merges its own
+# work, and a package cut after that must be cut on top of it.
+merged_head() {
+  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null
+  git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null
+}
+
+# worktree_base_is_stale <id> <worktree> — true when this tree was cut from a
+# base the default branch has since moved past, AND re-cutting it would destroy
+# nothing.
+#
+# Every clause is a refusal to touch something that matters:
+#
+#   the bead is closed      finished work was based correctly when it was done,
+#                           and its tree is not this stage's business any more.
+#   a worker is live        a running worker's base is never moved underneath
+#                           it. Liveness is asked of Gas City, not remembered.
+#   the tip is not merged   anything this branch carries that the default branch
+#                           does not is WORK, and work is never discarded. Only
+#                           a branch that has contributed nothing may be re-cut.
+#
+# What is left is the case this exists for: an open package, nobody working it,
+# on a branch that is exactly some older state of the default branch.
+worktree_base_is_stale() {
+  local id="$1" wt="$2" bead tip head
+  bead="$(rt_get "bead.$id")"
+  if [ -n "$bead" ] && bead_is_closed "$bead" 2>/dev/null; then
+    return 1
+  fi
+  if worker_is_live "$id"; then
+    return 1
+  fi
+  tip="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+  head="$(merged_head)"
+  [ -n "$tip" ] && [ -n "$head" ] || return 1
+  [ "$tip" = "$head" ] && return 1
+  git -C "$RIG_PATH" merge-base --is-ancestor "$tip" "$head" 2>/dev/null || return 1
+  return 0
+}
+
+# recut_worktree <id> <worktree> <branch> <bead> — replace an unusable tree with
+# one cut from the merged head, and route the bead at it.
+#
+# It is announced, never silent: what is thrown away is counted and named in the
+# run's own log, because a tree cut from the wrong base can still have had a
+# worker write files into it — and those files were written against a repository
+# that was missing the project.
+recut_worktree() {
+  local id="$1" wt="$2" branch="$3" bead="$4" head loose
+  head="$(merged_head)"
+  [ -n "$head" ] || die "cannot read the authoritative merged branch to re-cut $id from"
+  loose="$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${loose:-0}" -gt 0 ]; then
+    say "$id: discarding $loose uncommitted path(s) written against a base that had no project in it"
+  fi
+  git -C "$RIG_PATH" worktree remove --force "$wt" > "$EVIDENCE/recut-$id.txt" 2>&1 \
+    || die_from "$EVIDENCE/recut-$id.txt" "removing the stale worktree for $id"
+  git -C "$RIG_PATH" branch -D "$branch" >> "$EVIDENCE/recut-$id.txt" 2>&1 || true
+  wt_add "$RIG_PATH" "$wt" "$branch" "$head" || die "re-cutting the worktree for $id"
+  wt_is_registered "$RIG_PATH" "$wt" || die "the re-cut worktree for $id is not registered"
+  prepare_worktree "$wt" "$id"
+  say "re-cut $id from the merged base ${head:0:9} — its worker runs now"
+  route_bead "$id" "$bead"
+}
+
 ensure_package_worktree() {
   local id="$1"
   local wt branch bead mergedBase
@@ -992,12 +1096,20 @@ ensure_package_worktree() {
   # created — otherwise the grant reaches every package except the ones that
   # lost the race for their own directory.
   if [ -d "$wt" ]; then
+    # But a tree that is there is not necessarily a tree the work can be DONE
+    # in. One cut from a base the default branch has moved past is missing the
+    # project itself, and preparing it only installs gates its worker can never
+    # run. That is reconciled here rather than discovered by the gate.
+    if worktree_base_is_stale "$id" "$wt"; then
+      recut_worktree "$id" "$wt" "$branch" "$bead"
+      return 0
+    fi
     prepare_worktree "$wt" "$id"
     return 0
   fi
 
-  git -C "$RIG_PATH" fetch -q origin "$DEFAULT_BRANCH"
-  mergedBase="$(git -C "$RIG_PATH" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
+  mergedBase="$(merged_head)"
+  [ -n "$mergedBase" ] || die "cannot read the authoritative merged branch to cut $id from"
   wt_add "$RIG_PATH" "$wt" "$branch" "$mergedBase" || die "creating the worktree for $id"
   wt_is_registered "$RIG_PATH" "$wt" || die "the worktree for $id is not registered"
   prepare_worktree "$wt" "$id"
