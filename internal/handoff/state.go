@@ -338,7 +338,7 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 		// second one raised after it, which is why the finding's sequence is
 		// what a remediation names.
 		if inv, found := latest[c.ID]; found {
-			repaired := repairedBy(plan.Remediations, c.ID, inv.Seq)
+			repaired := repairedBy(plan, c.ID, inv.Seq)
 			if len(repaired) == 0 || !delivered {
 				delivered = false
 				ev.Invalidated = append(ev.Invalidated, InvalidatedCriterion{
@@ -426,13 +426,34 @@ func Assess(plan DeliveryPlan, in Intent, projectionPath string, accepted []Acce
 // it clear a later finding would mean a criterion could be disproved a second
 // time and go on reporting met, on the strength of work that predates the
 // evidence against it.
-func repairedBy(remediations []Remediation, criterionID string, seq int) []string {
+// SUPERSEDED WORK REPAIRS NOTHING, AND SAYING OTHERWISE SCORES A CRITERION MET
+// ON WORK THAT PREDATES THE EVIDENCE AGAINST IT.
+//
+// This is not hypothetical. Counting a withdrawn package as a repair is enough
+// on its own: the caller reads "something is repairing this finding", stops
+// applying the finding, and falls back to the arithmetic over the packages that
+// CLAIMED the criterion — which are the original plan's, which merged, with
+// their gates met, before the audit that disproved them. scorm-course-studio
+// produced exactly that the first time this was wrong: superseding the two
+// unexecutable remedial packages turned ac-9, ac-10, ac-11 and ac-12 from unmet
+// to met without one line of corrective work being done.
+//
+// So a superseded package is removed here as it is everywhere else. A finding
+// whose only authorized repair has been withdrawn has NO repair, which is what
+// keeps it standing until someone authorizes one that can actually run.
+func repairedBy(plan DeliveryPlan, criterionID string, seq int) []string {
+	gone := plan.Superseded()
 	var out []string
-	for _, rm := range remediations {
+	for _, rm := range plan.Remediations {
 		if !rm.RepairsInvalidation(criterionID, seq) {
 			continue
 		}
-		out = append(out, rm.PackagesFor(criterionID)...)
+		for _, id := range rm.PackagesFor(criterionID) {
+			if gone[id] {
+				continue
+			}
+			out = append(out, id)
+		}
 	}
 	sort.Strings(out)
 	return out

@@ -267,6 +267,78 @@ func TestALaterRemediationSupersedesEarlierCorrectiveWork(t *testing.T) {
 	}
 }
 
+// WITHDRAWING THE ONLY REPAIR DOES NOT REPAIR ANYTHING.
+//
+// THE DEFECT THIS EXISTS FOR, and it was live for about a minute. Superseding a
+// remedial package removed it from the work the delivery waits for, but the
+// finding-versus-count rule still counted it as "something is repairing this".
+// So the caller stopped applying the finding and fell back to the arithmetic
+// over the packages that CLAIMED the criterion — the original plan's, which had
+// merged with their gates met before the audit that disproved them.
+//
+// On scorm-course-studio that turned ac-9, ac-10, ac-11 and ac-12 from unmet to
+// MET the instant the unexecutable corrective work was withdrawn, without one
+// line of repair being done. Which is the exact false completion this engine's
+// controls exist to prevent, produced by the mechanism meant to protect them.
+func TestSupersedingTheOnlyRepairLeavesTheCriterionUnmet(t *testing.T) {
+	in := planIntent()
+
+	// The delivery as it stood: both packages merged, gates met, and ac-1 later
+	// disproved by an audit.
+	projection := writeProjection(t, in.ProjectID, "abc1234",
+		[3]string{"wp-add", "merged", "met"},
+		[3]string{"wp-multiply", "merged", "met"},
+		[3]string{"wp-verify-add", "verified", "met"})
+	inv := []Invalidation{{
+		Seq: 1, CriterionID: "ac-1", By: "audit", Reason: "the contract needed evidence nobody gathered",
+		Evidence: "contracts@abc1234", At: time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC),
+		PreviousState: "met",
+	}}
+
+	// Corrective work authorized for it — and then withdrawn, because it turned
+	// out it could never run.
+	first := verificationRemediation()
+	first.Repairs = []Repair{{CriterionID: "ac-1", Invalidation: 1}}
+	first.Packages = []WorkPackage{{
+		ID: "wp-fix-add", Title: "repair add", Phase: "Build",
+		Objective:       "Rewrite src/add.ts so the contract actually holds.",
+		Artifact:        "src/add.ts",
+		AuthorizedPaths: []string{"src/add.ts"},
+		Gates:           []string{"npm test"},
+		Satisfies:       []string{"ac-1"},
+	}}
+	second := verificationRemediation()
+	second.Seq = 2
+	second.Repairs = []Repair{{CriterionID: "ac-2", Invalidation: 2}}
+	second.Packages[0].Satisfies = []string{"ac-2"}
+	second.Supersedes = []string{"wp-fix-add"}
+
+	p := validPlan()
+	p.Remediations = []Remediation{first, second}
+
+	ev, err := Assess(p, in, projection, nil, inv)
+	if err != nil {
+		t.Fatalf("Assess: %v", err)
+	}
+	for _, met := range ev.AcceptanceMet {
+		if met == "ac-1" {
+			t.Fatalf("ac-1 scored MET after its only repair was withdrawn; met = %v", ev.AcceptanceMet)
+		}
+	}
+	var standing bool
+	for _, i := range ev.Invalidated {
+		if i.CriterionID == "ac-1" {
+			standing = true
+			if len(i.RemedialPackages) != 0 {
+				t.Errorf("a withdrawn package is still reported as repairing ac-1: %v", i.RemedialPackages)
+			}
+		}
+	}
+	if !standing {
+		t.Error("the finding against ac-1 stopped being reported when its repair was withdrawn")
+	}
+}
+
 // It reaches backwards only, and only into corrective work.
 func TestSupersessionMayNotReachTheOriginalPlanOrItself(t *testing.T) {
 	rm := verificationRemediation()
