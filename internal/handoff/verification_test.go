@@ -209,6 +209,89 @@ func TestAVerificationCompilesToOneVerifyTaskAndNoPublication(t *testing.T) {
 	}
 }
 
+// A DELIVERY MAY CHANGE ITS MIND ABOUT CORRECTIVE WORK WITHOUT PRETENDING IT
+// NEVER HELD THE EARLIER ONE.
+//
+// THE DEFECT THIS EXISTS FOR. A criterion is met only when EVERY package
+// claiming it completes. scorm-course-studio authorized two remedial packages to
+// produce evidence that had already been merged, so no worker could produce a
+// diff and publication refused for the right reason every time — and five
+// criteria were left with no route back at all, because the packages holding
+// them could never finish and could never be withdrawn.
+func TestALaterRemediationSupersedesEarlierCorrectiveWork(t *testing.T) {
+	first := verificationRemediation()
+	first.Packages = []WorkPackage{{
+		ID: "wp-fix-add", Title: "repair add", Phase: "Build",
+		Objective:       "Rewrite src/add.ts so the contract actually holds.",
+		Artifact:        "src/add.ts",
+		AuthorizedPaths: []string{"src/add.ts"},
+		Gates:           []string{"npm test"},
+		Satisfies:       []string{"ac-1"},
+	}}
+
+	second := verificationRemediation()
+	second.Seq = 2
+	second.Supersedes = []string{"wp-fix-add"}
+
+	p := validPlan()
+	p.Remediations = []Remediation{first, second}
+	if err := p.Validate(planIntent()); err != nil {
+		t.Fatalf("superseding earlier corrective work must validate, got: %v", err)
+	}
+
+	// The superseded package is not work this delivery waits for...
+	for _, wp := range p.AllPackages() {
+		if wp.ID == "wp-fix-add" {
+			t.Error("superseded corrective work is still counted as work to do")
+		}
+	}
+	if !p.Superseded()["wp-fix-add"] {
+		t.Error("the plan does not report wp-fix-add as superseded")
+	}
+	// ...and the run does not compile a task for it.
+	host := HostProfile{DeliveryRoot: t.TempDir(), Driver: "/engine/driver.sh", Provider: "claude"}
+	_, work, err := Compile(planIntent(), p, host, "run-1")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	for _, task := range work.Tasks {
+		if strings.Contains(task.ID, "wp-fix-add") {
+			t.Errorf("superseded corrective work compiled a %s task", task.ID)
+		}
+	}
+
+	// BUT THE RECORD OF IT IS NOT REWRITTEN. It is still in the remediation that
+	// authorized it, which is what makes the sequence readable afterwards.
+	if len(p.Remediations[0].Packages) != 1 || p.Remediations[0].Packages[0].ID != "wp-fix-add" {
+		t.Error("superseding rewrote the remediation that authorized the work")
+	}
+}
+
+// It reaches backwards only, and only into corrective work.
+func TestSupersessionMayNotReachTheOriginalPlanOrItself(t *testing.T) {
+	rm := verificationRemediation()
+	rm.Supersedes = []string{"wp-add"}
+	err := validateWith(t, rm)
+	if err == nil {
+		t.Fatal("superseding the original plan must be refused")
+	}
+	if !strings.Contains(err.Error(), "history everything since was measured against") {
+		t.Errorf("the refusal must say why merged work cannot be withdrawn, got: %v", err)
+	}
+
+	rm = verificationRemediation()
+	rm.Supersedes = []string{"wp-verify-add"} // its own package
+	if err := validateWith(t, rm); err == nil {
+		t.Fatal("a remediation superseding its own package must be refused")
+	}
+
+	rm = verificationRemediation()
+	rm.Supersedes = []string{"wp-never-authorized"}
+	if err := validateWith(t, rm); err == nil {
+		t.Fatal("superseding work no remediation authorized must be refused")
+	}
+}
+
 // AND ORDINARY CORRECTIVE WORK IS COMPLETELY UNCHANGED. A remediation whose
 // repair really is work still authorizes paths, still names an artifact it will
 // produce, and still runs the worker → branch → PR → merge lifecycle.

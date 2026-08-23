@@ -357,8 +357,21 @@ compose_plan() {
     cp -f "$BASE_PLAN" "$PLAN" || die "composing the effective plan from $BASE_PLAN"
     return 0
   fi
+  # AND WHAT A LATER REMEDIATION SUPERSEDED IS NOT PART OF IT.
+  #
+  # A remediation can be authorized from a diagnosis that turns out to be wrong,
+  # and a package that cannot be executed would otherwise hold its criterion
+  # hostage forever — a criterion is met only when every package claiming it
+  # completes. Superseded work stays in its own document, exactly as authorized;
+  # it is simply not work this run is waiting for. Dropping it here, at the one
+  # place every stage reads the plan from, is what makes that true everywhere at
+  # once rather than in each stage that remembered to ask.
   local tmp; tmp="$(mktemp "$PLAN.XXXXXX")"
-  if jq -s '. as $all | $all[0] | .packages = ($all[0].packages + [$all[1:][].packages[]])' \
+  if jq -s '. as $all
+            | ([$all[1:][] | .supersedes // [] | .[]] | unique) as $gone
+            | $all[0]
+            | .packages = ([$all[0].packages[], $all[1:][].packages[]]
+                           | map(select(.id as $i | ($gone | index($i)) == null)))' \
        "$BASE_PLAN" "${rems[@]}" > "$tmp" 2> "$EVIDENCE/compose-plan.txt"; then
     mv -f "$tmp" "$PLAN"
     return 0
@@ -1918,11 +1931,13 @@ deliverable_facts() {
       | . as $c
       | ($record[0].acceptances // [] | map(select(.criterionId == $c.id)) | first) as $a
       | ([ $record[0].invalidations // [] | .[] | select(.criterionId == $c.id) ] | last) as $inv
+      | ([ $rems[] | .supersedes // [] | .[] ] | unique) as $gone
       | ([ $rems[]
            | select(any(.repairs[]?; .criterionId == $c.id and ($inv != null and .invalidation == $inv.seq)))
            | .packages[]
            | select(any(.satisfies[]?; . == $c.id))
-           | .id ]) as $repaired
+           | .id
+           | select(. as $i | ($gone | index($i)) == null) ]) as $repaired
       | { id: $c.id,
           statement: $c.statement,
           acceptedBy: ($a.by // ""),

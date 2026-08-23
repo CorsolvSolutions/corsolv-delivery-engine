@@ -173,9 +173,31 @@ type DeliveryPlan struct {
 // planned before anything was disproved, so the two questions never collapse
 // into one answer.
 func (p DeliveryPlan) AllPackages() []WorkPackage {
+	gone := p.Superseded()
 	out := append([]WorkPackage(nil), p.Packages...)
 	for _, rm := range p.Remediations {
-		out = append(out, rm.Packages...)
+		for _, wp := range rm.Packages {
+			if gone[wp.ID] {
+				continue
+			}
+			out = append(out, wp)
+		}
+	}
+	return out
+}
+
+// Superseded is every corrective package a later remediation has replaced.
+//
+// They stay in their own remediation documents — the record of what was once
+// authorized is not rewritten — but they are not work this delivery is waiting
+// for, so every question about what must run, what must complete, and what is
+// repairing a criterion is asked without them.
+func (p DeliveryPlan) Superseded() map[string]bool {
+	out := map[string]bool{}
+	for _, rm := range p.Remediations {
+		for _, id := range rm.Supersedes {
+			out[id] = true
+		}
 	}
 	return out
 }
@@ -187,9 +209,20 @@ func (p DeliveryPlan) AllPackages() []WorkPackage {
 // pointless for every other, which is why it is computed here rather than
 // carried on WorkPackage.
 func (p DeliveryPlan) generations() [][]WorkPackage {
+	gone := p.Superseded()
 	gens := [][]WorkPackage{p.Packages}
 	for _, rm := range p.Remediations {
-		gens = append(gens, rm.Packages)
+		live := make([]WorkPackage, 0, len(rm.Packages))
+		for _, wp := range rm.Packages {
+			if gone[wp.ID] {
+				// Superseded work claims nothing, so it collides with nothing —
+				// and holding a replacement to the writer isolation of the
+				// package it replaces would make replacing one impossible.
+				continue
+			}
+			live = append(live, wp)
+		}
+		gens = append(gens, live)
 	}
 	return gens
 }
@@ -499,6 +532,34 @@ func (p DeliveryPlan) Validate(in Intent) error {
 					satisfied[c] = true
 				}
 			}
+		}
+	}
+
+	// SUPERSESSION REACHES BACKWARDS, AND ONLY INTO CORRECTIVE WORK.
+	//
+	// Checked here rather than where a remediation is admitted, because whether
+	// an id is supersedable is a question about the whole composed plan: which
+	// generation it belongs to, and whether that generation came first.
+	basePackage := map[string]bool{}
+	for _, wp := range p.Packages {
+		basePackage[wp.ID] = true
+	}
+	earlier := map[string]bool{}
+	for i, rm := range p.Remediations {
+		seenHere := map[string]bool{}
+		for _, id := range rm.Supersedes {
+			switch {
+			case seenHere[id]:
+				add("remediation %d supersedes %q twice", i+1, id)
+			case basePackage[id]:
+				add("remediation %d supersedes %q, which the ORIGINAL plan authorized — that work is the history everything since was measured against, and a remediation may not withdraw it", i+1, id)
+			case !earlier[id]:
+				add("remediation %d supersedes %q, which no earlier remediation authorized — corrective work can only replace corrective work that already exists", i+1, id)
+			}
+			seenHere[id] = true
+		}
+		for _, wp := range rm.Packages {
+			earlier[wp.ID] = true
 		}
 	}
 
