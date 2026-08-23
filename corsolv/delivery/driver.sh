@@ -409,6 +409,11 @@ RIG_PATH="$(rt_get rigPath)"
 RIG_NAME="$(rt_get rigName)"
 RUN_TAG="$(rt_get runTag)"
 
+# How many worker agents the last call to declare_worker_agents had to add. It
+# is a count for the stage's own report, never a decision: what exists is read
+# from the city, and what must exist is read from the effective plan.
+DECLARED_WORKERS=0
+
 export SA_CITY="$CITY"
 export SA_RIG="$RIG_NAME"
 export GC_WORK_RECORD_ENFORCE=1
@@ -455,6 +460,63 @@ supervisor_must_reconcile() {
   say 'the machine-wide supervisor reconciled this city'
 }
 
+# EVERY PACKAGE IN THE EFFECTIVE PLAN NEEDS A WORKER, INCLUDING THE ONES
+# AUTHORIZED AFTER THE CITY WAS BUILT.
+#
+# The effective plan is the plan plus its remediations, recomposed on every
+# invocation precisely so that no two stages can read different plans. Declaring
+# the workers was not: it happened once, in the branch that builds a new city,
+# below the early return a resumed run takes. So corrective work authorized
+# after the city was built added packages that dispatch would route — to agents
+# that had never been declared. `gc sling` refused with `agent
+# "<rig>/worker-wp-remediate-architecture-artifact" not found in city.toml`, the
+# dispatch stage exhausted its attempts, and two authorized remedial packages
+# could not be executed at all. Dispatch already learned this lesson for beads;
+# this is the same lesson for the agents the beads are routed to.
+#
+# So declaring workers is RECONCILIATION, not construction: asked of the
+# effective plan every time this stage runs, and answered only for what is
+# missing. An agent already declared is left exactly as it is — a worker's
+# declaration is not rewritten underneath a delivery that is part-way through
+# it, which is the same reason dispatch does not re-route a closed bead. The
+# verification below is what makes this a verdict rather than a hope, and it is
+# asked about every package, not only the ones this call added.
+declare_worker_agents() {
+  # One single-capacity, rig-scoped agent per work package. Distinct agents are
+  # the only configuration that yields distinct worktrees: the work_dir template
+  # surface carries no per-slot variable, so an unbounded pool would resolve
+  # every concurrent slot to one directory. They remain pure configuration —
+  # no role name appears in Go.
+  local prompt; prompt="$(sa_pool_worker_prompt)"
+  local id agent wt added=0
+  for id in $(packages); do
+    agent="worker-$id"
+    if [ -f "$CITY/agents/$agent/agent.toml" ]; then
+      continue
+    fi
+    wt="$CITY/.gc/worktrees/$RIG_NAME/$agent"
+    sa_declare_worker_agent "$CITY" "$RIG_NAME" "$RIG_PATH" "$agent" "$wt" "$prompt"
+    # bounded-project is the opt-in that gives a worker Read/Write/Edit and the
+    # project's named gates, and denies it git, gh and the shell family.
+    # Publication authority stays with the controller.
+    printf '\n[option_defaults]\npermission_mode = "bounded-project"\n' >> "$CITY/agents/$agent/agent.toml"
+    added=$(( added + 1 ))
+  done
+
+  # The `|| true` is not suppression: the verdict is the resolved configuration
+  # below, and a config command that failed produces a file the greps refuse.
+  gcx config show > "$EVIDENCE/config-show.txt" 2>&1 || true
+  for id in $(packages); do
+    grep -qE "^name = \"worker-$id\"$" "$EVIDENCE/config-show.txt" \
+      || die "agent worker-$id did not load; see $EVIDENCE/config-show.txt"
+  done
+  grep -q 'bounded-project' "$EVIDENCE/config-show.txt" \
+    || die 'the bounded-project selection did not survive config resolution'
+
+  DECLARED_WORKERS="$added"
+  return 0
+}
+
 stage_city_up() {
   if [ -n "$CITY" ] && [ -f "$CITY/city.toml" ]; then
     say "city already built at $CITY"
@@ -463,6 +525,12 @@ stage_city_up() {
     # and is the one thing this stage promises downstream — that the agents
     # dispatch is about to route work to will actually be started.
     supervisor_must_reconcile
+    # And the agents themselves, asked of the EFFECTIVE plan: a remediation
+    # authorized since this city was built has packages dispatch will route.
+    # SA_CITY and SA_RIG are already exported from the same runtime facts this
+    # branch read $CITY from, so the scope is the resumed run's own.
+    declare_worker_agents
+    say "city reconciled: $DECLARED_WORKERS worker agent(s) added, $(packages | wc -w) declared in total"
     return 0
   fi
 
@@ -528,32 +596,7 @@ TOML
   sa_wait_rig_beads "$CITY" "$RIG_NAME" 240 || die "the rig's bead store never became ready"
   say "rig bead store ready"
 
-  # One single-capacity, rig-scoped agent per work package. Distinct agents are
-  # the only configuration that yields distinct worktrees: the work_dir template
-  # surface carries no per-slot variable, so an unbounded pool would resolve
-  # every concurrent slot to one directory. They remain pure configuration —
-  # no role name appears in Go.
-  local prompt; prompt="$(sa_pool_worker_prompt)"
-  local id agent wt
-  for id in $(packages); do
-    agent="worker-$id"
-    wt="$CITY/.gc/worktrees/$RIG_NAME/$agent"
-    sa_declare_worker_agent "$CITY" "$RIG_NAME" "$RIG_PATH" "$agent" "$wt" "$prompt"
-    # bounded-project is the opt-in that gives a worker Read/Write/Edit and the
-    # project's named gates, and denies it git, gh and the shell family.
-    # Publication authority stays with the controller.
-    printf '\n[option_defaults]\npermission_mode = "bounded-project"\n' >> "$CITY/agents/$agent/agent.toml"
-  done
-
-  # The `|| true` is not suppression: the verdict is the resolved configuration
-  # below, and a config command that failed produces a file the greps refuse.
-  gcx config show > "$EVIDENCE/config-show.txt" 2>&1 || true
-  for id in $(packages); do
-    grep -qE "^name = \"worker-$id\"$" "$EVIDENCE/config-show.txt" \
-      || die "agent worker-$id did not load; see $EVIDENCE/config-show.txt"
-  done
-  grep -q 'bounded-project' "$EVIDENCE/config-show.txt" \
-    || die 'the bounded-project selection did not survive config resolution'
+  declare_worker_agents
 
   rt_set city "$CITY"
   rt_set rigPath "$RIG_PATH"

@@ -52,10 +52,14 @@ const gcStub = `#!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "$GC_STUB_LOG"
 
-# sa_gc prepends the run's scope; the verb is what follows it.
+# sa_gc prepends the run's scope; the verb is what follows it. The city is kept
+# rather than merely skipped: the config-show answer below is rendered from the
+# agents actually declared in it, which is what makes a declaration verifiable.
+STUB_CITY=''
 while [ $# -gt 0 ]; do
   case "${1:-}" in
-    --city|--rig) shift 2 || exit 0 ;;
+    --city) STUB_CITY="${2:-}"; shift 2 || exit 0 ;;
+    --rig) shift 2 || exit 0 ;;
     *) break ;;
   esac
 done
@@ -93,8 +97,45 @@ case "${1:-} ${2:-}" in
       prev="$arg"
     done
     ;;
+  'sling '*)
+    # ROUTING IS REFUSED WHEN THE TARGET AGENT IS NOT DECLARED.
+    #
+    # Real gc answers with a refusal naming the agent and the file it is not in,
+    # and exits non-zero. A stub that always accepted made a whole class of
+    # defect invisible: a package can be planned, beaded and routed while the
+    # agent it is routed to does not exist, which is exactly what happened when
+    # corrective work was authorized after the city was built.
+    #
+    # Opt-in, because a fixture that declares no agents at all is not asserting
+    # anything about them and must not start failing on a question it never
+    # asked.
+    if [ "${GC_STUB_ENFORCE_AGENTS:-0}" = '1' ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          *worker-*)
+            agent="${arg##*/}"
+            if [ ! -f "$STUB_CITY/agents/$agent/agent.toml" ]; then
+              printf 'gc sling: agent "%s" not found in city.toml\n' "$arg" >&2
+              exit 1
+            fi
+            ;;
+        esac
+      done
+    fi
+    ;;
   'rig list')
     printf '%s:\n    Beads: initialized\n' "${GC_STUB_RIG:-rig}"
+    ;;
+  'config show')
+    # The resolved configuration, rendered from what is really on disk. A stub
+    # that simply agreed would make the driver's verification vacuous: the
+    # point of that check is that an agent which was written but does not LOAD
+    # is a failure, so this answers from the agent directories themselves.
+    for d in "$STUB_CITY"/agents/*/; do
+      [ -f "$d/agent.toml" ] || continue
+      printf 'name = "%s"\n' "$(basename "$d")"
+      cat "$d/agent.toml"
+    done
     ;;
   'supervisor reload')
     # The one answer city-up treats as authoritative. A stale machine-wide
@@ -194,6 +235,62 @@ func (e *recoveryEnv) initRig() string {
 		e.t.Fatalf("rev-parse: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// poolWorkerPrompt is the prompt template a declared worker carries. The driver
+// reads it back out of the resolved configuration rather than falling back to
+// an embedded baseline, so a fixture that omitted it would exercise a different
+// path from the one a real city takes.
+const poolWorkerPrompt = "/packs/core/assets/prompts/pool-worker.md"
+
+// declareAgent writes the worker declaration city-up makes for one package, in
+// the shape sa_declare_worker_agent produces. This is the city as a delivery
+// that already dispatched left it.
+func (e *recoveryEnv) declareAgent(pkg string) {
+	e.t.Helper()
+	agent := "worker-" + pkg
+	dir := filepath.Join(e.city, "agents", agent)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	body := "dir = \"" + recoveryRigName + "\"\n" +
+		"scope = \"rig\"\n" +
+		"provider = \"claude\"\n" +
+		"max_active_sessions = 1\n" +
+		"work_dir = \"" + filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, agent) + "\"\n" +
+		"prompt_template = \"" + poolWorkerPrompt + "\"\n" +
+		"\n[option_defaults]\npermission_mode = \"bounded-project\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "agent.toml"), []byte(body), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// agentDecls is every declared worker agent and its exact configuration, so a
+// test can prove both what appeared and what was left alone.
+func (e *recoveryEnv) agentDecls() map[string]string {
+	e.t.Helper()
+	decls := map[string]string{}
+	entries, err := os.ReadDir(filepath.Join(e.city, "agents"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return decls
+		}
+		e.t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(e.city, "agents", entry.Name(), "agent.toml"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			e.t.Fatal(err)
+		}
+		decls[entry.Name()] = string(body)
+	}
+	return decls
 }
 
 func (e *recoveryEnv) setBead(id, status string) {
