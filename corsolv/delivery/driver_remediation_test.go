@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -165,6 +167,193 @@ func TestTheDriverStillRefusesWithoutAValidatedPlan(t *testing.T) {
 	if !strings.Contains(out, "plan.json") {
 		t.Fatalf("the refusal must name the BASE plan rather than the composed one, got:\n%s", out)
 	}
+}
+
+// remedialPackage is the corrective work authorized after a delivery completed.
+func remedialPackage(projectID string) handoff.Remediation {
+	return handoff.Remediation{
+		SchemaVersion: handoff.RemediationSchemaVersion,
+		ProjectID:     projectID,
+		Seq:           1,
+		Repairs:       []handoff.Repair{{CriterionID: "ac-1", Invalidation: 1}},
+		AuthorizedBy:  "Jon Pratten",
+		Packages: []handoff.WorkPackage{{
+			ID: "wp-three", Title: "the repair", Phase: "Build",
+			Objective:       "Rewrite src/one.ts so the contract actually holds.",
+			Artifact:        "src/one.ts",
+			AuthorizedPaths: []string{"src/one.ts"},
+			Gates:           []string{"npm run verify"},
+			Satisfies:       []string{"ac-1"},
+		}},
+	}
+}
+
+// completedDelivery seeds a city exactly as a finished delivery left it: both
+// original packages dispatched, closed, published and merged, and one declared
+// worker agent apiece.
+func completedDelivery(t *testing.T) *recoveryEnv {
+	t.Helper()
+	e := newRecoveryEnv(t)
+	base := e.initRig()
+	e.seedRuntime(map[string]string{
+		"dispatched":       "2026-08-21T09:00:00Z",
+		"bead.wp-one":      beadOne,
+		"wt.wp-one":        e.makeWorktree("wp-one"),
+		"merge.wp-one":     "merge-one",
+		"bead.wp-two":      beadTwo,
+		"wt.wp-two":        e.makeWorktree("wp-two"),
+		"merge.wp-two":     "merge-two",
+		"merged.wp-one":    "1111111111111111111111111111111111111111",
+		"merged.wp-two":    "2222222222222222222222222222222222222222",
+		"published.wp-one": "merged",
+		"published.wp-two": "merged",
+		"baseSha":          base,
+	})
+	e.setBead(beadOne, "closed")
+	e.setBead(beadTwo, "closed")
+	e.declareAgent("wp-one")
+	e.declareAgent("wp-two")
+	return e
+}
+
+// A CITY IS RECONCILED AGAINST THE EFFECTIVE PLAN, NOT AGAINST THE PLAN IT WAS
+// BUILT FROM.
+//
+// THE DEFECT THIS EXISTS FOR. city-up declared one worker agent per package,
+// once, in the branch that builds a new city. A resumed run takes the early
+// return above that branch, so a delivery whose effective plan had GROWN — the
+// only way it can grow is append-only corrective work — kept exactly the agents
+// it started with. Dispatch then routed the remedial package to an agent that
+// was never declared and `gc sling` refused:
+//
+//	gc sling: agent "rig-.../worker-wp-remediate-architecture-artifact"
+//	          not found in city.toml
+//
+// The dispatch stage exhausted its attempts, the run failed 52 seconds in, and
+// two authorized remedial packages could not be executed at all. It is the same
+// lesson TestResumedDispatchCreatesOnlyTheNewlyAddedPackage pinned for beads,
+// one layer down: the agent the bead is routed to.
+//
+// The other half matters just as much. Reconciliation must leave the workers
+// that already exist completely alone — rewriting a declaration underneath a
+// delivery part-way through it is the same failure as handing merged work back
+// to a worker.
+func TestCityUpDeclaresWorkersForRemedialPackagesOnAResumedRun(t *testing.T) {
+	e := completedDelivery(t)
+	original := e.agentDecls()
+	if len(original) != 2 {
+		t.Fatalf("the fixture must start as a completed delivery with two workers, got %v", original)
+	}
+
+	// A resumed run with NOTHING authorized since is a delivery that ran before
+	// this mechanism existed, and it must be untouched.
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("reconciling an unchanged city must succeed, got %d:\n%s", code, out)
+	}
+	if got := e.agentDecls(); !reflect.DeepEqual(got, original) {
+		t.Fatalf("reconciling an unchanged city altered its agents:\n before: %v\n after:  %v", original, got)
+	}
+
+	// Now the corrective work, authorized after the city was built.
+	if err := handoff.SaveRemediation(e.root, remedialPackage(e.project)); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := e.runStage("city-up", nil)
+	if code != 0 {
+		t.Fatalf("reconciling a city against corrective work must succeed, got %d:\n%s", code, out)
+	}
+
+	after := e.agentDecls()
+	decl, ok := after["worker-wp-three"]
+	if !ok {
+		t.Fatalf("the remedial package got no worker agent; the city carries %v\n%s", keysOf(after), out)
+	}
+	// Declared as the real thing, not as a placeholder: the worktree is its own,
+	// the scope is the rig, and the bounded-project opt-in survived.
+	for _, want := range []string{
+		`scope = "rig"`,
+		`dir = "` + recoveryRigName + `"`,
+		`max_active_sessions = 1`,
+		filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "worker-wp-three"),
+		`permission_mode = "bounded-project"`,
+		poolWorkerPrompt,
+	} {
+		if !strings.Contains(decl, want) {
+			t.Errorf("the remedial worker's declaration is missing %q:\n%s", want, decl)
+		}
+	}
+
+	// The workers that already existed are byte-identical.
+	for name, body := range original {
+		if after[name] != body {
+			t.Errorf("reconciliation rewrote an existing worker %s:\n before: %s\n after:  %s", name, body, after[name])
+		}
+	}
+	if len(after) != 3 {
+		t.Fatalf("reconciliation must add exactly the one missing worker, city carries %v", keysOf(after))
+	}
+	if !strings.Contains(out, "1 worker agent(s) added") {
+		t.Errorf("the stage must report what it added, got:\n%s", out)
+	}
+
+	// AND IT IS IDEMPOTENT. A second reconciliation has nothing to do.
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("a second reconciliation must succeed, got %d:\n%s", code, out)
+	}
+	if got := e.agentDecls(); !reflect.DeepEqual(got, after) {
+		t.Fatalf("a second reconciliation changed the city:\n before: %v\n after:  %v", after, got)
+	}
+
+	// THE VERDICT: dispatch now reaches the remedial worker. This is the call
+	// that refused on the live delivery, made against a stub that refuses on
+	// exactly the same condition real gc does.
+	e.truncateGCLog()
+	code, out = e.runStage("dispatch", []string{"GC_STUB_ENFORCE_AGENTS=1"})
+	if code != 0 {
+		t.Fatalf("dispatching corrective work must reach its worker, got %d:\n%s", code, out)
+	}
+	if got := slingsFor(e.gcCalls(), "wp-three"); got != 1 {
+		t.Fatalf("the remedial package must be routed exactly once, got %d\ncalls: %v\n%s",
+			got, e.gcCalls(), out)
+	}
+	for _, pkg := range []string{"wp-one", "wp-two"} {
+		if got := slingsFor(e.gcCalls(), pkg); got != 0 {
+			t.Errorf("%s was routed again: %d sling(s) — merged work must not be reopened", pkg, got)
+		}
+	}
+}
+
+// And the negative control, which is what keeps the test above honest: with the
+// remedial worker absent, dispatch fails with the live delivery's own message.
+// Without this, a stub that quietly accepted every route would let the test
+// pass against the unfixed driver.
+func TestDispatchRefusesWhenTheRemedialWorkerWasNeverDeclared(t *testing.T) {
+	e := completedDelivery(t)
+	if err := handoff.SaveRemediation(e.root, remedialPackage(e.project)); err != nil {
+		t.Fatal(err)
+	}
+	// The city as the defect left it: reconciliation never ran, so the remedial
+	// package has no agent.
+	code, out := e.runStage("dispatch", []string{"GC_STUB_ENFORCE_AGENTS=1"})
+	if code == 0 {
+		t.Fatalf("dispatch must not report success routing to an undeclared agent:\n%s", out)
+	}
+	if !strings.Contains(out, "not found in city.toml") {
+		t.Errorf("the refusal must be the one a real city produces, got:\n%s", out)
+	}
+	if !strings.Contains(out, "worker-wp-three") {
+		t.Errorf("the refusal must name the worker that is missing, got:\n%s", out)
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DISPATCH IS PER PACKAGE, NOT ALL-OR-NOTHING.
