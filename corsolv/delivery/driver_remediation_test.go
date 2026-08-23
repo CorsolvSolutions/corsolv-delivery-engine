@@ -216,6 +216,191 @@ func completedDelivery(t *testing.T) *recoveryEnv {
 	return e
 }
 
+// verificationPackage is corrective work for a criterion whose evidence is
+// already on the authoritative branch: nothing to write, everything to check.
+func verificationPackage(projectID, mergedSha string) handoff.Remediation {
+	return handoff.Remediation{
+		SchemaVersion: handoff.RemediationSchemaVersion,
+		ProjectID:     projectID,
+		Seq:           1,
+		Repairs:       []handoff.Repair{{CriterionID: "ac-1", Invalidation: 1}},
+		AuthorizedBy:  "Jon Pratten",
+		Packages: []handoff.WorkPackage{{
+			ID: "wp-verify-one", Title: "the evidence is checked", Phase: "Build",
+			Objective: "Verify evidence/report.json against the contract at the merged commit that carries it.",
+			Artifact:  "evidence/report.json",
+			Gates:     []string{"npm test"},
+			Satisfies: []string{"ac-1"},
+			Verifies:  &handoff.Verification{MergedSha: mergedSha},
+		}},
+	}
+}
+
+// A CRITERION WHOSE EVIDENCE IS ALREADY MERGED IS REPAIRED BY CHECKING IT, NOT
+// BY MANUFACTURING A CHANGE.
+//
+// THE DEFECT THIS EXISTS FOR. Remediation had exactly one shape: a worker
+// changes files, the controller commits, opens a pull request and merges. That
+// is right whenever the repair is work. It is impossible whenever it is not —
+// and on scorm-course-studio it was not. Two authorized remedial packages named
+// evidence that was already on main (PR #16 and #17 had merged it), so there was
+// no diff for a worker to produce, and publication refused exactly as it should:
+// nothing was produced. The criterion could not be repaired by the only
+// lifecycle available, and the only way to force it through would have been to
+// invent a change nobody needed and merge it so the shape fit.
+//
+// So verification is its own lifecycle. It creates no bead, starts no worker,
+// cuts no branch, opens no pull request and merges nothing — because it changes
+// nothing — and it earns the criterion by proving three separate things about a
+// named commit: that the commit is really on the authoritative branch, that the
+// evidence is really in it, and that the declared gates really pass against it.
+func TestVerificationOnlyRemediationChecksMergedEvidenceAndPublishesNothing(t *testing.T) {
+	e := completedDelivery(t)
+
+	// The corrective evidence, already merged — the state the whole mechanism
+	// exists for.
+	const report = "{\n  \"columns\": 4\n}\n"
+	e.git(e.rigPath, "worktree", "list") // touch the rig before writing into it
+	merged := e.advanceMergedMainAt("evidence/report.json", report)
+
+	if err := handoff.SaveRemediation(e.root, verificationPackage(e.project, merged)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("reconciling the city must succeed, got %d:\n%s", code, out)
+	}
+
+	// DISPATCH ROUTES IT NOWHERE, because there is nobody to route it to.
+	code, out := e.runStage("dispatch", []string{"GC_STUB_ENFORCE_AGENTS=1"})
+	if code != 0 {
+		t.Fatalf("dispatch must succeed with a verification package present, got %d:\n%s", code, out)
+	}
+	calls := e.gcCalls()
+	if found := callsContaining(calls, "bd create the evidence is checked"); len(found) != 0 {
+		t.Errorf("a verification package got a work bead nobody could close by doing anything: %v", found)
+	}
+	if got := slingsFor(calls, "verify-one"); got != 0 {
+		t.Errorf("a verification package was routed to a worker: %d sling(s)", got)
+	}
+
+	// THE VERIFY STAGE.
+	e.truncateGCLog()
+	code, out = e.runStage("verify", []string{"DELIVERY_PACKAGE=ignored"}, "-package", "wp-verify-one")
+	if code != 0 {
+		t.Fatalf("verifying merged evidence must succeed, got %d:\n%s", code, out)
+	}
+
+	// It ran against the exact commit, in a detached tree, and the evidence was
+	// really there.
+	wt := filepath.Join(e.city, ".gc", "worktrees", recoveryRigName, "verify-wp-verify-one")
+	if head := e.git(wt, "rev-parse", "HEAD"); head != merged {
+		t.Errorf("the verification ran at %s, want the commit it named %s", head[:9], merged[:9])
+	}
+	if body, err := os.ReadFile(filepath.Join(wt, "evidence", "report.json")); err != nil || string(body) != report {
+		t.Errorf("the verified tree does not carry the evidence: %v", err)
+	}
+	// Detached, deliberately: there is nothing to put on a branch, and a branch
+	// would be a thing a later step could try to push. `symbolic-ref` failing IS
+	// the assertion here, so it is asked without the fatal wrapper.
+	sym := exec.Command("git", "-C", wt, "symbolic-ref", "--quiet", "--short", "HEAD")
+	sym.Env = e.scrubbedEnv(nil)
+	if branch, err := sym.Output(); err == nil {
+		t.Errorf("the verification cut a branch %q — it has nothing to put on one", strings.TrimSpace(string(branch)))
+	}
+
+	// And the declared gate really ran.
+	if log, err := os.ReadFile(filepath.Join(e.root, "npm-calls.log")); err != nil || !strings.Contains(string(log), "test") {
+		t.Errorf("the declared gate was not run against the verified tree: %v %s", err, log)
+	}
+
+	// All three controls are recorded, each only past the step that earned it.
+	rt := e.runtimeFacts()
+	for key, want := range map[string]string{
+		"verifiedCommit.wp-verify-one":   merged,
+		"verifiedEvidence.wp-verify-one": "evidence/report.json",
+		"verifiedGates.wp-verify-one":    merged,
+		"verified.wp-verify-one":         merged,
+	} {
+		if rt[key] != want {
+			t.Errorf("%s = %q, want %q", key, rt[key], want)
+		}
+	}
+
+	// Nothing was published, because nothing changed.
+	for _, key := range []string{"pr.wp-verify-one", "merged.wp-verify-one", "published.wp-verify-one", "bead.wp-verify-one"} {
+		if rt[key] != "" {
+			t.Errorf("%s = %q — a verification package must publish nothing", key, rt[key])
+		}
+	}
+
+	// IDEMPOTENT.
+	if code, out := e.runStage("verify", nil, "-package", "wp-verify-one"); code != 0 {
+		t.Fatalf("re-verifying must succeed, got %d:\n%s", code, out)
+	}
+}
+
+// THE NEGATIVE CONTROL. A verification that fails leaves the criterion unmet,
+// and records only what it actually established.
+func TestVerificationOnlyRemediationRefusesWhenTheEvidenceDoesNotHoldUp(t *testing.T) {
+	e := completedDelivery(t)
+	merged := e.advanceMergedMainAt("evidence/report.json", "{}\n")
+	if err := handoff.SaveRemediation(e.root, verificationPackage(e.project, merged)); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("city-up: %d\n%s", code, out)
+	}
+
+	// The gate fails, which is the only thing different about this run.
+	code, out := e.runStage("verify", []string{"NPM_STUB_EXIT=1"}, "-package", "wp-verify-one")
+	if code == 0 {
+		t.Fatalf("a verification whose gates fail must not report success:\n%s", out)
+	}
+	rt := e.runtimeFacts()
+	if rt["verified.wp-verify-one"] != "" {
+		t.Errorf("a failed verification recorded itself as verified: %q", rt["verified.wp-verify-one"])
+	}
+	if rt["verifiedGates.wp-verify-one"] != "" {
+		t.Errorf("a failed gate recorded a passing gate control: %q", rt["verifiedGates.wp-verify-one"])
+	}
+	// What it DID establish is still recorded — the commit was on the branch and
+	// the evidence was there. Losing that would make a failed check
+	// indistinguishable from one that never ran.
+	if rt["verifiedCommit.wp-verify-one"] != merged {
+		t.Errorf("the checks that passed before the failure were discarded: %q", rt["verifiedCommit.wp-verify-one"])
+	}
+}
+
+// And a commit that is not on the authoritative branch is refused before
+// anything else is asked, because nothing it proved would be about the
+// delivered product.
+func TestVerificationOnlyRemediationRefusesACommitThatIsNotOnTheBranch(t *testing.T) {
+	e := completedDelivery(t)
+	e.advanceMergedMainAt("evidence/report.json", "{}\n")
+
+	// A real commit, in the repository, never merged.
+	side := e.git(e.rigPath, "commit-tree", "-m", "unmerged",
+		e.git(e.rigPath, "rev-parse", "HEAD^{tree}"))
+	if err := handoff.SaveRemediation(e.root, verificationPackage(e.project, side)); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := e.runStage("city-up", nil); code != 0 {
+		t.Fatalf("city-up: %d\n%s", code, out)
+	}
+
+	code, out := e.runStage("verify", nil, "-package", "wp-verify-one")
+	if code == 0 {
+		t.Fatalf("verifying a commit that is not on the branch must not succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "not on the authoritative branch") {
+		t.Errorf("the refusal must say what is wrong with the commit, got:\n%s", out)
+	}
+	if e.runtimeFacts()["verifiedCommit.wp-verify-one"] != "" {
+		t.Errorf("an unmerged commit was recorded as being on the branch")
+	}
+}
+
 // CORRECTIVE WORK IS BASED ON THE BRANCH AS IT STANDS NOW, NOT ON THE BRANCH
 // THE DELIVERY STARTED FROM.
 //

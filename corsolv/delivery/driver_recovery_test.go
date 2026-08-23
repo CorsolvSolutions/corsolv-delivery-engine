@@ -148,6 +148,17 @@ esac
 exit 0
 `
 
+// npmStub is a project runner the controller can really execute, so a test about
+// gates is about gates rather than about whether a toolchain happens to be
+// installed on the machine running it. It records every invocation and answers
+// with whatever the fixture asked for — a gate that must pass and a gate that
+// must fail are both real executions here.
+const npmStub = `#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${NPM_STUB_LOG:-/dev/null}"
+exit "${NPM_STUB_EXIT:-0}"
+`
+
 type recoveryEnv struct {
 	t          *testing.T
 	root       string
@@ -200,6 +211,9 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(e.binDir, "gc"), []byte(gcStub), 0o755); err != nil { //nolint:gosec // a test stub must be executable
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.binDir, "npm"), []byte(npmStub), 0o755); err != nil { //nolint:gosec // a test stub must be executable
 		t.Fatal(err)
 	}
 	e.setSessions(`{"schema_version":"1","sessions":[]}`)
@@ -260,8 +274,17 @@ func (e *recoveryEnv) initRig() string {
 // another worker's files — so this is what makes the run's recorded `baseSha`
 // history rather than news.
 func (e *recoveryEnv) advanceMergedMain(name, body string) string {
+	return e.advanceMergedMainAt(name, body)
+}
+
+// advanceMergedMainAt is the same, for a path with directories in it.
+func (e *recoveryEnv) advanceMergedMainAt(name, body string) string {
 	e.t.Helper()
-	if err := os.WriteFile(filepath.Join(e.rigPath, name), []byte(body), 0o644); err != nil {
+	full := filepath.Join(e.rigPath, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
 	e.git(e.rigPath, "add", "-A")
@@ -418,18 +441,39 @@ func (e *recoveryEnv) scrubbedEnv(extra []string) []string {
 		"GC_STUB_SESSIONS="+e.sessions,
 		"GC_STUB_SEQ="+filepath.Join(e.root, "bead-seq"),
 		"GC_STUB_RIG="+recoveryRigName,
+		"NPM_STUB_LOG="+filepath.Join(e.root, "npm-calls.log"),
 	)
 	return append(env, extra...)
 }
 
-// runStage invokes the driver exactly as the compiled run does.
-func (e *recoveryEnv) runStage(stage string, extraEnv []string) (int, string) {
+// runStage invokes the driver exactly as the compiled run does. Trailing args
+// are appended verbatim, which is how a per-package stage is addressed.
+func (e *recoveryEnv) runStage(stage string, extraEnv []string, args ...string) (int, string) {
 	e.t.Helper()
-	argv := []string{driverPath(e.t), stage, "-project", e.project, "-state", e.state}
+	argv := append([]string{driverPath(e.t), stage, "-project", e.project, "-state", e.state}, args...)
 	cmd := exec.Command("bash", argv...) //nolint:gosec // the driver under test
 	cmd.Env = e.scrubbedEnv(extraEnv)
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
+}
+
+// runtimeFacts is the run's scratch memory as the driver left it. A missing key
+// reads as empty, so a test can assert that something was NOT recorded as
+// readily as that it was.
+func (e *recoveryEnv) runtimeFacts() map[string]string {
+	e.t.Helper()
+	facts := map[string]string{}
+	raw, err := os.ReadFile(filepath.Join(e.state, "runtime.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return facts
+		}
+		e.t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &facts); err != nil {
+		e.t.Fatalf("runtime.json is not readable: %v\n%s", err, raw)
+	}
+	return facts
 }
 
 // gcCalls is every gc invocation the driver made, in order.

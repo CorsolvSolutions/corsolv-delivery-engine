@@ -83,10 +83,10 @@ esac
 exit 0
 `
 
-// npmStub stands in for the package's declared gates. They are not what these
-// tests are about — a package that failed its own gates never reaches the forge
-// — so they pass, and the failure under test is the repository's check.
-const npmStub = "#!/usr/bin/env bash\nexit 0\n"
+// The npm stub these tests rely on now belongs to the shared recovery fixture,
+// which installs it for every environment. It still passes by default, which is
+// what these tests need: a package that failed its own gates never reaches the
+// forge, so the failure under test here is the repository's check.
 
 // sendbackEnv is a delivery that has run: a real origin, a rig cloned from it,
 // a worktree holding finished work, and a closed work bead. Publication is the
@@ -131,7 +131,6 @@ func newSendbackEnv(t *testing.T) *sendbackEnv {
 	// for. Reading the branch is the honest answer to "what is the PR head".
 	writeStub(t, filepath.Join(e.binDir, "gh"),
 		strings.ReplaceAll(ghFailedCI, "@HEAD@", "$(git -C "+shquote(wt)+" rev-parse HEAD)"))
-	writeStub(t, filepath.Join(e.binDir, "npm"), npmStub)
 
 	e.seedRuntime(map[string]string{
 		"dispatched":    "2026-08-14T16:43:00Z",
