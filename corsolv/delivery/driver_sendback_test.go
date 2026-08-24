@@ -37,11 +37,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/handoff"
 )
 
 // ghFailedCI is a `gh` that answers the two api questions await_required_ci
@@ -182,6 +185,60 @@ func (s *sendbackEnv) runPublish() (int, string) {
 	})
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
+}
+
+// AN AUTHORIZED PATH IS A PERMISSION, NOT A PROMISE.
+//
+// THE DEFECT THIS EXISTS FOR. `authorizedPaths` is every path a package MAY
+// create or change — the ceiling publication scope is adjudicated against — and
+// a plan that authorizes a file the work turns out not to need has simply been
+// permissive. Staging the ceiling verbatim made that fatal: `git add` fails the
+// whole invocation on the first pathspec matching nothing.
+//
+// On scorm-course-studio a package whose gates had ALL passed — typecheck, 754
+// unit tests and the full 27-journey browser suite — died at
+// `fatal: pathspec 'src/runtime/packageEntry.ts' did not match any files`,
+// reported as "staging authorized paths": a message that reads like a scope
+// violation while being its exact opposite.
+func TestAnAuthorizedPathTheWorkDidNotNeedDoesNotStopPublication(t *testing.T) {
+	s := newSendbackEnv(t)
+
+	// The plan allowed a second file. The worker only needed the first.
+	//
+	// Written straight to the document rather than through SavePlan, which
+	// rightly refuses to rewrite a plan a delivery has already been measured
+	// against — this fixture is that delivery.
+	plan := fixturePlan()
+	plan.Packages[0].AuthorizedPaths = []string{"src/one.ts", "src/never-needed.ts"}
+	raw, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handoff.PlanPath(s.root, s.project), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := s.runPublish()
+
+	if strings.Contains(out, "did not match any files") {
+		t.Fatalf("an allowance nobody used failed the publication:\n%s", out)
+	}
+	if strings.Contains(out, "staging wp-one's authorized paths") {
+		t.Fatalf("publication died staging a path the work did not need:\n%s", out)
+	}
+	// It says which allowance went unused, because a plan that keeps authorizing
+	// files nobody writes is worth noticing.
+	if !strings.Contains(out, "src/never-needed.ts") {
+		t.Errorf("the run must say which authorized path went unused, got:\n%s", out)
+	}
+	// And the work itself still reached the forge: this fixture's failure is a
+	// red required check, which is a verdict about CI and not about staging.
+	if code == 0 {
+		t.Fatalf("this fixture's CI fails, so publication must still not succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "required CI") {
+		t.Errorf("the publication must get far enough to report the CI verdict, got:\n%s", out)
+	}
 }
 
 // THE ROUTE BACK. A red required check sends the package to a worker, and says

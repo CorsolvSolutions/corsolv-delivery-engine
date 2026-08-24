@@ -1472,6 +1472,41 @@ those same gates before finishing. ${gateWhy}" \
   local -a pathList=()
   IFS=',' read -r -a pathList <<< "$paths"
 
+  # AN AUTHORIZED PATH IS A PERMISSION, NOT A PROMISE.
+  #
+  # `authorizedPaths` is every path this package MAY create or change — the
+  # ceiling the publication scope is adjudicated against. A plan that authorizes
+  # a file the work turns out not to need has been permissive, which is the
+  # side to err on: the alternative is a plan that has to predict a worker's
+  # file layout exactly or forbid the work it meant to allow.
+  #
+  # Staging the ceiling verbatim made that permissiveness fatal. `git add` fails
+  # the whole invocation on the first pathspec that matches nothing, so a
+  # package whose gates had all passed — typecheck, 754 unit tests and the full
+  # browser suite — died at `fatal: pathspec 'src/runtime/packageEntry.ts' did
+  # not match any files`, reported as "staging authorized paths", which reads
+  # like a scope violation and is the opposite of one.
+  #
+  # So the ceiling is intersected with what is really there. A path that exists
+  # is staged; a path git already tracks is staged too, because that is how a
+  # DELETION is staged and dropping those would silently publish a file the
+  # worker meant to remove. What is left out is only ever an allowance nobody
+  # used. If the intersection is empty the worker produced nothing at all, which
+  # the empty-index check below already states properly.
+  local -a stageList=() unused=()
+  local candidate
+  for candidate in "${pathList[@]}"; do
+    [ -n "$candidate" ] || continue
+    if [ -e "$wt/$candidate" ] || git -C "$wt" ls-files --error-unmatch -- "$candidate" > /dev/null 2>&1; then
+      stageList+=("$candidate")
+    else
+      unused+=("$candidate")
+    fi
+  done
+  if [ "${#unused[@]}" -gt 0 ]; then
+    say "$PACKAGE did not need $(( ${#unused[@]} )) of its authorized path(s):$(printf ' %s' "${unused[@]}")"
+  fi
+
   # A republication with nothing new is a fact about the WORKER, not about git.
   #
   # `git commit` exits non-zero on an empty index, so a publication resumed
@@ -1481,8 +1516,10 @@ those same gates before finishing. ${gateWhy}" \
   # Said plainly here, it is the one thing a person needs to know: the worker
   # was sent back and returned the same tree, so republishing would present the
   # head that already failed.
-  git -C "$wt" add -- "${pathList[@]}" > "$EVIDENCE/stage-$PACKAGE.txt" 2>&1 \
-    || die_from "$EVIDENCE/stage-$PACKAGE.txt" "staging $PACKAGE's authorized paths"
+  if [ "${#stageList[@]}" -gt 0 ]; then
+    git -C "$wt" add -- "${stageList[@]}" > "$EVIDENCE/stage-$PACKAGE.txt" 2>&1 \
+      || die_from "$EVIDENCE/stage-$PACKAGE.txt" "staging $PACKAGE's authorized paths"
+  fi
   if git -C "$wt" diff --cached --quiet && [ -n "$(rt_get "head.$PACKAGE")" ]; then
     stop_human "$PACKAGE was sent back after failing required CI and has returned no change, so republishing would present the same head that already failed; a person needs to decide what this package should do differently"
   fi
@@ -1491,7 +1528,7 @@ those same gates before finishing. ${gateWhy}" \
   if commit="$(controller_commit "$wt" "feat($PACKAGE): $artifact
 
 Published by the controller. The worker produced and verified this change
-under bounded-project and is denied git by policy." "${pathList[@]}")"; then
+under bounded-project and is denied git by policy." "${stageList[@]}")"; then
     say "$PACKAGE committed ${commit:0:9}"
   else
     # THE UNRECOVERABLE STATE THIS EXISTS TO PREVENT. Commit and push are two
@@ -1505,7 +1542,7 @@ under bounded-project and is denied git by policy." "${pathList[@]}")"; then
     # An empty commit is benign only when the tree really is clean AND the
     # branch really holds something the authoritative branch does not. Either
     # half missing is the ordinary failure and still stops publication.
-    commit="$(adopt_committed_work "$wt" "${pathList[@]}")" || die "committing $PACKAGE"
+    commit="$(adopt_committed_work "$wt" "${stageList[@]}")" || die "committing $PACKAGE"
     say "$PACKAGE was already committed as ${commit:0:9} by an attempt that could not push; publishing that"
   fi
 
