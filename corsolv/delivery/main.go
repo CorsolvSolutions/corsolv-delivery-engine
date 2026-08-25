@@ -562,6 +562,8 @@ func cmdPlan(args []string) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	projectID := fs.String("project", "", "the project whose plan to show or install")
 	from := fs.String("from", "", "install the plan in this JSON file")
+	supersede := fs.Bool("supersede-unexecuted", false,
+		"replace a standing plan NO work was ever executed against; the superseded plan is archived beside the new one")
 	hostPath := fs.String("host", defaultHostPath(), "path to the delivery host profile")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -614,12 +616,15 @@ func cmdPlan(args []string) int {
 		return exitOK
 	}
 
-	if hasPlan {
+	if hasPlan && !*supersede {
 		return refuse(fmt.Errorf(
 			"delivery for %q already has a plan of %d work package(s) — a delivery part-way through has "+
 				"merged work against the plan it started with, so it is not replaced. "+
 				"To repair a criterion later evidence disproved, record the finding with "+
-				"`delivery invalidate` and authorize additive work with `delivery remediate`",
+				"`delivery invalidate` and authorize additive work with `delivery remediate`. "+
+				"If NO work was ever executed against this plan — the run failed before dispatch and "+
+				"nothing merged — a corrected plan may replace it with -supersede-unexecuted, which "+
+				"archives the standing plan and refuses if any evidence of execution exists",
 			*projectID, len(existing.Packages)))
 	}
 
@@ -630,6 +635,20 @@ func cmdPlan(args []string) int {
 	plan, err := handoff.StaticPlanner{Raw: raw}.Plan(context.Background(), record.Intent)
 	if err != nil {
 		return refuse(err)
+	}
+	if hasPlan {
+		// -supersede-unexecuted: the guard is evidence, observed now.
+		st, oerr := observe(host, *projectID)
+		if oerr != nil {
+			return refuse(oerr)
+		}
+		if serr := handoff.SupersedeUnexecutedPlan(host.DeliveryRoot, plan, st); serr != nil {
+			return refuse(serr)
+		}
+		fmt.Fprintf(os.Stderr,
+			"superseded the unexecuted plan of %d work package(s) with %d for %s; the superseded plan is archived\n",
+			len(existing.Packages), len(plan.Packages), *projectID)
+		return exitOK
 	}
 	if err := handoff.SavePlan(host.DeliveryRoot, plan); err != nil {
 		return refuse(err)
