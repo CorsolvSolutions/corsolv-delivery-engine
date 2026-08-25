@@ -515,14 +515,29 @@ publication_changed_status() {
 # publication_path_is_attributable <path> <authorised-csv>
 #
 # True when the path is the worker's to answer for and the bead did not name it.
+#
+# An entry authorises itself exactly, and — when the changed path continues
+# past a path separator — everything beneath it as a directory. The boundary
+# is the separator, never the string prefix: "src/add.ts" still does not
+# authorise "src/add.ts.bak". The subtree grant exists because the plan
+# validator has always accepted directory entries, and a package that
+# generates an open-ended set of files (a component system, a feature
+# directory) cannot spell its files out before a worker writes them; a
+# validator that admits "src/ui" beside an adjudicator that then refuses
+# "src/ui/button.tsx" accepts plans it can never publish, which is how
+# scorm-studio-redesign-2 finished two gated packages and published neither.
 publication_path_is_attributable() {
-  local path="$1" authorised="$2"
+  local path="$1" authorised="$2" entry
   grep -qE "$SA_PUBLICATION_INFRA_RE" <<<"$path" && return 1
-  # Exact membership, not prefix: "src/add.ts" must not authorise
-  # "src/add.ts.bak", and an authorised directory is spelled out per file.
-  case ",$authorised," in
-    *",$path,"*) return 1 ;;
-  esac
+  local -a entries
+  IFS=',' read -ra entries <<<"$authorised"
+  for entry in "${entries[@]}"; do
+    [ -n "$entry" ] || continue
+    entry="${entry%/}"
+    case "$path" in
+      "$entry"|"$entry"/*) return 1 ;;
+    esac
+  done
   return 0
 }
 
