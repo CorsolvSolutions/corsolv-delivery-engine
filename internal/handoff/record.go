@@ -74,6 +74,35 @@ type Record struct {
 	// that existed before this field did — a record written without it reads
 	// back identically.
 	Invalidations []Invalidation `json:"invalidations,omitempty"`
+
+	// Remediations journals every remediation the ENGINE authorized: its
+	// sequence, a digest of the document as installed, and who authorized it
+	// when. Append-only, for the strongest reason yet: the remediation files
+	// beside this record are what un-completion is repaired THROUGH, and a
+	// directory listing is not an authorization. A remediation document with
+	// no entry here was never authorized by the engine, whatever its file
+	// name claims — it was planted, and reading it as corrective work would
+	// let anything that can write a file authorize its own repairs with
+	// whatever provenance it liked. LoadRemediations refuses exactly that.
+	//
+	// Absent on every project whose remediations all predate this field; those
+	// documents are adopted into the journal by the next authorization, which
+	// is the first moment an operator attests to the directory's contents.
+	Remediations []RemediationRef `json:"remediations,omitempty"`
+}
+
+// RemediationRef is the record's own memory of one authorization event.
+type RemediationRef struct {
+	// Seq is the remediation's position, matching its file name.
+	Seq int `json:"seq"`
+	// Digest is the SHA-256 of the remediation document exactly as installed.
+	// A document that no longer matches was edited after authorization.
+	Digest string `json:"digest"`
+	// AuthorizedBy and AuthorizedAt duplicate the document's provenance ON
+	// PURPOSE: the copy in the record is the one the document's author cannot
+	// reach, which is what makes disagreement between the two detectable.
+	AuthorizedBy string    `json:"authorizedBy"`
+	AuthorizedAt time.Time `json:"authorizedAt"`
 }
 
 // Acceptance is one person's answer to one criterion only they could give.

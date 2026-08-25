@@ -1,6 +1,8 @@
 package handoff
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -451,11 +453,25 @@ func (rm Remediation) Validate(in Intent) error {
 	return nil
 }
 
-// LoadRemediations reads a project's remediations in sequence order.
+// LoadRemediations reads a project's remediations in sequence order, and
+// verifies every document against the record's journal of what the engine
+// actually authorized.
 //
 // A project with none — every project that existed before this packet — reads
 // as an empty slice and no error. That is the normal state, not an absence to
 // be reported.
+//
+// THE DIRECTORY IS STORAGE, NOT AUTHORITY. AuthorizeRemediation is the only
+// writer of these documents, and it journals each authorization into the
+// record (Record.Remediations) as it saves. A well-formed document the journal
+// does not name was never authorized by the engine — it reached the directory
+// some other way, carrying whatever provenance its author chose to declare —
+// and one whose bytes no longer match the journaled digest was edited after
+// authorization. Both are refused here rather than loaded, because reading
+// either as corrective work would let anything able to write a file repair a
+// finding on its own authority. A record whose journal is empty is
+// grandfathered: every document it holds predates the journal, and the next
+// authorization adopts them into it.
 func LoadRemediations(deliveryRoot, projectID string) ([]Remediation, error) {
 	dir := filepath.Join(deliveryRoot, projectID)
 	entries, err := os.ReadDir(dir)
@@ -467,6 +483,7 @@ func LoadRemediations(deliveryRoot, projectID string) ([]Remediation, error) {
 	}
 
 	var out []Remediation
+	digests := map[int]string{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -494,9 +511,73 @@ func LoadRemediations(deliveryRoot, projectID string) ([]Remediation, error) {
 				ErrRecordConflict, path, rm.ProjectID)
 		}
 		out = append(out, rm)
+		digests[rm.Seq] = remediationDigest(data)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+
+	record, found, err := LoadRecord(deliveryRoot, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if err := verifyRemediationJournal(record, out, digests); err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
+}
+
+// remediationDigest fingerprints a remediation document exactly as installed.
+func remediationDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// verifyRemediationJournal checks loaded remediation documents against the
+// record's journal of authorizations. See LoadRemediations for why: the
+// directory is storage, and the journal is the authority over it.
+func verifyRemediationJournal(record Record, loaded []Remediation, digests map[int]string) error {
+	if len(record.Remediations) == 0 {
+		// Legacy: every document predates the journal. The next authorization
+		// adopts them; until then there is nothing to verify against.
+		return nil
+	}
+	refs := make(map[int]RemediationRef, len(record.Remediations))
+	for _, ref := range record.Remediations {
+		refs[ref.Seq] = ref
+	}
+	var problems []string
+	for _, rm := range loaded {
+		ref, journaled := refs[rm.Seq]
+		if !journaled {
+			problems = append(problems, fmt.Sprintf(
+				"remediation %d exists on disk but the record's journal never authorized it — a remediation is "+
+					"authorized through the engine, and a document the journal does not name is not corrective work",
+				rm.Seq))
+			continue
+		}
+		if digests[rm.Seq] != ref.Digest {
+			problems = append(problems, fmt.Sprintf(
+				"remediation %d no longer matches the digest journaled when it was authorized — the document was "+
+					"altered after authorization, and an authorization does not cover what was written into it later",
+				rm.Seq))
+		}
+		delete(refs, rm.Seq)
+	}
+	missing := make([]int, 0, len(refs))
+	for seq := range refs {
+		missing = append(missing, seq)
+	}
+	sort.Ints(missing)
+	for _, seq := range missing {
+		problems = append(problems, fmt.Sprintf(
+			"the record journals remediation %d but its document is gone — an authorized remediation may already "+
+				"have merged work against it, and is never deleted", seq))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: %s", ErrRecordConflict, strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // SaveRemediation writes one remediation atomically.
@@ -626,6 +707,47 @@ func AuthorizeRemediation(deliveryRoot string, record Record, plan DeliveryPlan,
 
 	if err := SaveRemediation(deliveryRoot, rm); err != nil {
 		return rm, err
+	}
+
+	// Journal the authorization into the record, so LoadRemediations can tell
+	// this document apart from one that merely appeared in the directory. The
+	// digest is taken from the installed file itself: what is journaled is
+	// what will be re-read, not what was intended.
+	//
+	// A journal being written for the first time adopts every document that
+	// predates it — this authorization is the first moment an operator stands
+	// behind the directory's contents, and from here on nothing unjournaled
+	// loads.
+	if len(record.Remediations) == 0 {
+		for _, prior := range existing {
+			data, rerr := os.ReadFile(RemediationPath(deliveryRoot, record.ProjectID, prior.Seq)) //nolint:gosec // a path this process composed
+			if rerr != nil {
+				return rm, fmt.Errorf("remediation %d is authorized and durable, but adopting remediation %d into "+
+					"the record's journal failed: %w", rm.Seq, prior.Seq, rerr)
+			}
+			record.Remediations = append(record.Remediations, RemediationRef{
+				Seq:          prior.Seq,
+				Digest:       remediationDigest(data),
+				AuthorizedBy: prior.AuthorizedBy,
+				AuthorizedAt: prior.AuthorizedAt,
+			})
+		}
+	}
+	installed, err := os.ReadFile(RemediationPath(deliveryRoot, rm.ProjectID, rm.Seq)) //nolint:gosec // a path this process composed
+	if err != nil {
+		return rm, fmt.Errorf("remediation %d is authorized and durable, but re-reading it to journal its digest "+
+			"failed: %w", rm.Seq, err)
+	}
+	record.Remediations = append(record.Remediations, RemediationRef{
+		Seq:          rm.Seq,
+		Digest:       remediationDigest(installed),
+		AuthorizedBy: rm.AuthorizedBy,
+		AuthorizedAt: rm.AuthorizedAt,
+	})
+	record.UpdatedAt = rm.AuthorizedAt
+	if err := SaveRecord(deliveryRoot, record); err != nil {
+		return rm, fmt.Errorf("remediation %d is authorized and durable, but journaling it into the record failed — "+
+			"until the journal names it, LoadRemediations will refuse it as unauthorized: %w", rm.Seq, err)
 	}
 	return rm, nil
 }
