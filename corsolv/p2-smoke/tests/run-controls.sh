@@ -439,15 +439,50 @@ else
        "violations were: $(printf '%s' "$VIOL" | tr '\n' ' ')"
 fi
 
-# Authorisation is exact membership, never a prefix: a near-miss filename must
-# not inherit an authorised file's permission.
+# Authorisation is bounded by the path separator, never the string prefix: a
+# near-miss filename must not inherit an authorised file's permission.
 rm -f "$SCOPE_RIG/package.json" "$SCOPE_RIG/src-unrelated.ts"
 printf 'x\n' > "$SCOPE_RIG/add.ts.bak"
 if grep -qx 'add.ts.bak' <<<"$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts')"; then
-  pass 'authorisation is exact membership, not a filename prefix'
+  pass 'authorisation is separator-bounded, not a filename prefix'
 else
-  fail 'authorisation is exact membership, not a filename prefix' 'add.ts.bak was treated as authorised'
+  fail 'authorisation is separator-bounded, not a filename prefix' 'add.ts.bak was treated as authorised'
 fi
+
+# An authorised DIRECTORY authorises its subtree. The validator has always
+# accepted directory entries, and a package that generates an open-ended set
+# of files cannot spell them out before a worker writes them — a validator
+# that admits "lib" beside an adjudicator that refuses "lib/button.ts"
+# accepts plans it can never publish (scorm-studio-redesign-2 finished two
+# gated packages and published neither).
+rm -f "$SCOPE_RIG/add.ts.bak"
+mkdir -p "$SCOPE_RIG/lib/nested"
+printf 'x\n' > "$SCOPE_RIG/lib/button.ts"
+printf 'x\n' > "$SCOPE_RIG/lib/nested/deep.ts"
+if [ -z "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts,lib')" ]; then
+  pass 'an authorised directory authorises its subtree'
+else
+  fail 'an authorised directory authorises its subtree' \
+       "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts,lib' | tr '\n' ' ')"
+fi
+
+# A trailing slash on the entry means the same thing.
+if [ -z "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts,lib/')" ]; then
+  pass 'a trailing slash on a directory entry changes nothing'
+else
+  fail 'a trailing slash on a directory entry changes nothing' \
+       "$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts,lib/' | tr '\n' ' ')"
+fi
+
+# And the directory grant is still separator-bounded: "lib" does not
+# authorise "library.ts".
+printf 'x\n' > "$SCOPE_RIG/library.ts"
+if grep -qx 'library.ts' <<<"$(publication_scope_violations "$SCOPE_RIG" 'add.ts,add.test.ts,lib')"; then
+  pass 'a directory grant does not leak past the separator'
+else
+  fail 'a directory grant does not leak past the separator' 'library.ts was treated as authorised'
+fi
+rm -rf "$SCOPE_RIG/lib" "$SCOPE_RIG/library.ts"
 
 # Controller/toolchain paths are excluded from attribution rather than
 # authorised — they are not the worker's to author, and treating them as
