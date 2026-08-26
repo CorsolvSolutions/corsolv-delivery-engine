@@ -564,6 +564,8 @@ func cmdPlan(args []string) int {
 	from := fs.String("from", "", "install the plan in this JSON file")
 	supersede := fs.Bool("supersede-unexecuted", false,
 		"replace a standing plan NO work was ever executed against; the superseded plan is archived beside the new one")
+	amend := fs.Bool("amend-unmerged", false,
+		"replace a standing plan while every MERGED package stays byte-identical; only packages with no merge evidence may change")
 	hostPath := fs.String("host", defaultHostPath(), "path to the delivery host profile")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -616,7 +618,7 @@ func cmdPlan(args []string) int {
 		return exitOK
 	}
 
-	if hasPlan && !*supersede {
+	if hasPlan && !*supersede && !*amend {
 		return refuse(fmt.Errorf(
 			"delivery for %q already has a plan of %d work package(s) — a delivery part-way through has "+
 				"merged work against the plan it started with, so it is not replaced. "+
@@ -637,10 +639,19 @@ func cmdPlan(args []string) int {
 		return refuse(err)
 	}
 	if hasPlan {
-		// -supersede-unexecuted: the guard is evidence, observed now.
+		// -supersede-unexecuted / -amend-unmerged: the guard is evidence, observed now.
 		st, oerr := observe(host, *projectID)
 		if oerr != nil {
 			return refuse(oerr)
+		}
+		if *amend {
+			if aerr := handoff.AmendUnmergedPackages(host.DeliveryRoot, existing, plan, st); aerr != nil {
+				return refuse(aerr)
+			}
+			fmt.Fprintf(os.Stderr,
+				"amended the plan for %s: every merged package byte-identical, unmerged packages updated; the prior plan is archived\n",
+				*projectID)
+			return exitOK
 		}
 		if serr := handoff.SupersedeUnexecutedPlan(host.DeliveryRoot, plan, st); serr != nil {
 			return refuse(serr)
