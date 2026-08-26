@@ -339,7 +339,36 @@ func DecodePlanWithRemediations(data []byte, in Intent, remediations []Remediati
 // the plan that package belongs to.
 type pathClaim struct {
 	label string
+	id    string
 	gen   int
+}
+
+// dependencyOrdered answers whether two packages of one generation can never
+// hold a worktree at the same time, because one's work strictly follows the
+// other's MERGE — directly or through a chain. Two such packages sharing a
+// path are sequential writers, like two commits touching one file; the
+// collision rule exists for CONCURRENT writers, and holding ordered packages
+// to it made the final package of a delivery — the one that reconciles what
+// every earlier package built — impossible to authorize at all.
+func dependencyOrdered(byID map[string]WorkPackage, a, b string) bool {
+	reaches := func(from, to string) bool {
+		seen := map[string]bool{}
+		stack := []string{from}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if cur == to {
+				return true
+			}
+			if seen[cur] {
+				continue
+			}
+			seen[cur] = true
+			stack = append(stack, byID[cur].DependsOn...)
+		}
+		return false
+	}
+	return reaches(a, b) || reaches(b, a)
 }
 
 // Validate refuses a plan that cannot be executed against this intent.
@@ -406,6 +435,10 @@ func (p DeliveryPlan) Validate(in Intent) error {
 	satisfied := map[string]bool{}
 
 	for gen, packages := range p.generations() {
+		genByID := map[string]WorkPackage{}
+		for _, wp := range packages {
+			genByID[wp.ID] = wp
+		}
 		for i, wp := range packages {
 			label := planPackageLabel(gen, i)
 			if IDPattern.MatchString(wp.ID) && !ids[wp.ID] {
@@ -492,11 +525,13 @@ func (p DeliveryPlan) Validate(in Intent) error {
 					add("%s authorizes %q, which is under the protected path %q — a run may not change what judges it", label, c, prefix)
 					continue
 				}
-				if claim, taken := owner[c]; taken && claim.gen == gen {
-					add("%s and %s both authorize %q — two workers writing one path is a collision, not a plan", label, claim.label, c)
+				if claim, taken := owner[c]; taken && claim.gen == gen &&
+					!dependencyOrdered(genByID, claim.id, wp.ID) {
+					add("%s and %s both authorize %q with no dependency ordering them — two workers that could hold "+
+						"the path at the same time is a collision, not a plan", label, claim.label, c)
 					continue
 				}
-				owner[c] = pathClaim{label: label, gen: gen}
+				owner[c] = pathClaim{label: label, id: wp.ID, gen: gen}
 				clean = append(clean, c)
 			}
 
