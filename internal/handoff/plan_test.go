@@ -196,14 +196,28 @@ func TestPlanContainment(t *testing.T) {
 	}
 }
 
-// Two workers writing one file is a race the controller cannot adjudicate
-// after the fact, so the plan is refused before either starts.
-func TestOverlappingAuthorisationIsRefused(t *testing.T) {
+// Two workers that could hold one file AT THE SAME TIME is a race the
+// controller cannot adjudicate after the fact, so the plan is refused before
+// either starts. Concurrency is what makes it a race: packages a dependency
+// chain orders can never hold the path together, so they may share it — the
+// later one reconciles what the earlier one built, like two commits touching
+// one file.
+func TestOverlappingAuthorisationIsRefusedOnlyBetweenConcurrentWriters(t *testing.T) {
+	// Ordered: wp-multiply depends on wp-add, so sharing src/add.ts is two
+	// sequential writers, not a collision.
 	p := validPlan()
+	p.Packages[1].AuthorizedPaths = []string{"src/add.ts", "src/multiply.ts", "src/multiply.test.ts"}
+	if err := p.Validate(planIntent()); err != nil {
+		t.Fatalf("dependency-ordered packages may share a path, got: %v", err)
+	}
+
+	// Unordered: drop the dependency and the same overlap is a genuine race.
+	p = validPlan()
+	p.Packages[1].DependsOn = nil
 	p.Packages[1].AuthorizedPaths = []string{"src/add.ts", "src/multiply.ts", "src/multiply.test.ts"}
 	err := p.Validate(planIntent())
 	if err == nil || !strings.Contains(err.Error(), "both authorize") {
-		t.Fatalf("overlapping authorization must be refused, got: %v", err)
+		t.Fatalf("concurrent overlapping authorization must be refused, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "wp-add") || !strings.Contains(err.Error(), "wp-multiply") {
 		t.Fatalf("the refusal must name both packages, got: %v", err)

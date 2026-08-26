@@ -685,7 +685,7 @@ func TestWriterIsolationHoldsWithinAGenerationAndYieldsAcrossThem(t *testing.T) 
 	if !errors.Is(err, ErrPlanInvalid) {
 		t.Fatalf("err = %v, want ErrPlanInvalid", err)
 	}
-	if !strings.Contains(err.Error(), "two workers writing one path is a collision") {
+	if !strings.Contains(err.Error(), "is a collision, not a plan") {
 		t.Fatalf("refusal = %v", err)
 	}
 
