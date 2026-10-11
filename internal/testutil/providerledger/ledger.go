@@ -65,8 +65,11 @@ var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProvi
 // claim was adjudicated individually and none could be closed by remediation
 // bounded to this repository. None of these claims is proved; every one states
 // the condition that retires it. Constructors that have since obtained a real
-// contract proof are dispositioned proved and never reach this value.
-var runtimeContractWaiverExpiry = time.Date(2026, time.September, 14, 0, 0, 0, 0, time.UTC)
+// contract proof are dispositioned proved and never reach this value. The
+// original 2026-09-14 horizon lapsed; the repository owner renewed it on
+// 2026-10-11 without re-adjudicating the claims, so each still rests on its
+// 2026-08-15 adjudication until it is next reviewed.
+var runtimeContractWaiverExpiry = time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
