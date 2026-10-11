@@ -117,7 +117,7 @@ func TestWorkspaceTrustDialogKeys(t *testing.T) {
 		},
 		{
 			name:    "cursor on reject with no trust label sends nothing",
-			content: "Quick safety check: do you trust this folder?\n\n ❯ No, exit\n   Something unrecognised\n",
+			content: "Quick safety check: do you trust this folder?\n\n ❯ No, exit\n   Something unrecognized\n",
 			want:    nil,
 		},
 	}
