@@ -343,7 +343,10 @@ CONTROLLER_EMAIL='support@corsolv.com'
 # controller_commit <worktree> <message> <paths...>
 controller_commit() {
   local wt="$1" msg="$2"; shift 2
-  git -C "$wt" add -- "$@" || return 1
+  # Only the paths given are (re-)added. driver.sh leaves out files it
+  # force-staged because .gitignore ignores them: they are already in the index,
+  # and a plain `git add` of an ignored path fails even then.
+  if [ "$#" -gt 0 ]; then git -C "$wt" add -- "$@" || return 1; fi
   git -C "$wt" -c "user.name=$CONTROLLER_NAME" -c "user.email=$CONTROLLER_EMAIL" \
     commit -q -m "$msg" || return 1
   git -C "$wt" rev-parse HEAD

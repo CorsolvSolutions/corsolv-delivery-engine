@@ -1493,12 +1493,29 @@ those same gates before finishing. ${gateWhy}" \
   # worker meant to remove. What is left out is only ever an allowance nobody
   # used. If the intersection is empty the worker produced nothing at all, which
   # the empty-index check below already states properly.
-  local -a stageList=() unused=()
+  #
+  # An authorized path that .gitignore ignores is the other way `git add` fails
+  # the whole invocation: "The following paths are ignored by one of your
+  # .gitignore files". aws-infrastructure-intelligence's plan named
+  # docs/build/ci.md while the project ignored `build/`, so a package whose
+  # gates had all passed was refused three times as "staging authorized paths"
+  # and held forty-four tasks behind it. A FILE the plan names explicitly is
+  # force-added, and said so: the plan asked for exactly that file. A DIRECTORY
+  # is never force-added, because -f would publish whatever ignored content lies
+  # beneath it — dependencies, build output, a .env — that no scope check saw.
+  local -a stageList=() forceList=() unused=()
   local candidate
   for candidate in "${pathList[@]}"; do
     [ -n "$candidate" ] || continue
     if [ -e "$wt/$candidate" ] || git -C "$wt" ls-files --error-unmatch -- "$candidate" > /dev/null 2>&1; then
-      stageList+=("$candidate")
+      if ! git -C "$wt" ls-files --error-unmatch -- "$candidate" > /dev/null 2>&1 \
+        && git -C "$wt" check-ignore -q --no-index -- "$candidate"; then
+        [ -f "$wt/$candidate" ] \
+          || die "$PACKAGE authorizes $candidate, which .gitignore ignores; an ignored directory is never force-added, so name the files it should publish or change the ignore rule"
+        forceList+=("$candidate")
+      else
+        stageList+=("$candidate")
+      fi
     else
       unused+=("$candidate")
     fi
@@ -1519,6 +1536,11 @@ those same gates before finishing. ${gateWhy}" \
   if [ "${#stageList[@]}" -gt 0 ]; then
     git -C "$wt" add -- "${stageList[@]}" > "$EVIDENCE/stage-$PACKAGE.txt" 2>&1 \
       || die_from "$EVIDENCE/stage-$PACKAGE.txt" "staging $PACKAGE's authorized paths"
+  fi
+  if [ "${#forceList[@]}" -gt 0 ]; then
+    say "$PACKAGE force-staging $(( ${#forceList[@]} )) file(s) its plan names although .gitignore ignores them:$(printf ' %s' "${forceList[@]}")"
+    git -C "$wt" add -f -- "${forceList[@]}" > "$EVIDENCE/stage-force-$PACKAGE.txt" 2>&1 \
+      || die_from "$EVIDENCE/stage-force-$PACKAGE.txt" "force-staging $PACKAGE's explicitly authorized ignored files"
   fi
   if git -C "$wt" diff --cached --quiet && [ -n "$(rt_get "head.$PACKAGE")" ]; then
     stop_human "$PACKAGE was sent back after failing required CI and has returned no change, so republishing would present the same head that already failed; a person needs to decide what this package should do differently"
@@ -1542,7 +1564,7 @@ under bounded-project and is denied git by policy." "${stageList[@]}")"; then
     # An empty commit is benign only when the tree really is clean AND the
     # branch really holds something the authoritative branch does not. Either
     # half missing is the ordinary failure and still stops publication.
-    commit="$(adopt_committed_work "$wt" "${stageList[@]}")" || die "committing $PACKAGE"
+    commit="$(adopt_committed_work "$wt" "${stageList[@]}" "${forceList[@]}")" || die "committing $PACKAGE"
     say "$PACKAGE was already committed as ${commit:0:9} by an attempt that could not push; publishing that"
   fi
 
