@@ -445,8 +445,10 @@ func containsPostUpdateStartupDialog(content string) bool {
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// "Trust project folder?". The continue option is not always pre-selected:
+// Claude Code 2.1.296 lists "No, exit" first with the cursor on it, so a bare
+// Enter kills the session. workspaceTrustDialogKeys picks the trust option by
+// its label and moves the cursor onto it before pressing Enter.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	timeout time.Duration,
@@ -465,10 +467,18 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			if err := sendKeys("Enter"); err != nil {
-				return err
+			keys := workspaceTrustDialogKeys(content)
+			for i, key := range keys {
+				if i > 0 {
+					sleep(ctx, bypassDialogConfirmDelay)
+				}
+				if err := sendKeys(key); err != nil {
+					return err
+				}
 			}
-			sleep(ctx, startupDialogAcceptDelay)
+			if len(keys) > 0 {
+				sleep(ctx, startupDialogAcceptDelay)
+			}
 			return nil
 		}
 
@@ -497,11 +507,11 @@ func acceptWorkspaceTrustDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsWorkspaceTrustDialog,
-		matchKeys:   []string{"Enter"},
-		matchDelay:  startupDialogAcceptDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostTrustStartupDialog,
+		match:        containsWorkspaceTrustDialog,
+		matchKeysFor: workspaceTrustDialogKeys,
+		matchDelay:   startupDialogAcceptDelay,
+		ready:        containsPromptIndicator,
+		readyOrNext:  containsPostTrustStartupDialog,
 	})
 }
 
@@ -511,6 +521,101 @@ func containsWorkspaceTrustDialog(content string) bool {
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "Trust project folder?")
+}
+
+// workspaceTrustAcceptLabels are the labels of the option that trusts the
+// workspace and continues, across agents and versions.
+var workspaceTrustAcceptLabels = []string{
+	"Yes, I trust this folder", // Claude Code 2.x
+	"Yes, proceed",             // Claude Code 1.x
+	"Yes, continue",            // Codex
+	"Trust folder",             // Gemini
+}
+
+// workspaceTrustRejectLabels are the labels of options that refuse trust and
+// exit. Enter must never be pressed while the cursor is on one of them.
+var workspaceTrustRejectLabels = []string{
+	"No, exit",
+	"No, quit",
+	"Do not trust",
+	"Don't trust",
+}
+
+// menuCursorGlyphs are the glyphs agent TUIs draw in front of the highlighted
+// menu option.
+var menuCursorGlyphs = []string{"❯", "›", ">", "→", "●", "▸"}
+
+// workspaceTrustDialogKeys returns the keystrokes that select the trust option
+// of a workspace trust dialog and confirm it. Option order varies by version
+// (Claude Code 2.1.296 lists "No, exit" first and highlights it), so the option
+// is found by its label and the cursor is moved onto it with Up/Down before
+// Enter. When the menu cannot be parsed it falls back to a bare Enter, which
+// accepts the pre-selected option, unless the cursor is visibly on a reject
+// option; then it returns nil so the session is left at the dialog rather than
+// told to exit.
+func workspaceTrustDialogKeys(content string) []string {
+	lines := strings.Split(content, "\n")
+	yes := -1
+	for i := len(lines) - 1; i >= 0 && yes < 0; i-- {
+		for _, label := range workspaceTrustAcceptLabels {
+			if strings.Contains(lines[i], label) {
+				yes = i
+				break
+			}
+		}
+	}
+
+	// Find the cursor within the yes option's menu block: the run of
+	// non-blank lines around it.
+	cursor := -1
+	if yes >= 0 {
+		for i := yes; i >= 0 && strings.TrimSpace(lines[i]) != "" && cursor < 0; i-- {
+			if menuCursorRow(lines[i]) {
+				cursor = i
+			}
+		}
+		for i := yes + 1; i < len(lines) && strings.TrimSpace(lines[i]) != "" && cursor < 0; i++ {
+			if menuCursorRow(lines[i]) {
+				cursor = i
+			}
+		}
+	}
+
+	if yes < 0 || cursor < 0 {
+		for i := len(lines) - 1; i >= 0; i-- {
+			if !menuCursorRow(lines[i]) {
+				continue
+			}
+			for _, label := range workspaceTrustRejectLabels {
+				if strings.Contains(lines[i], label) {
+					return nil
+				}
+			}
+			break
+		}
+		return []string{"Enter"}
+	}
+
+	var keys []string
+	for i := cursor; i < yes; i++ {
+		keys = append(keys, "Down")
+	}
+	for i := cursor; i > yes; i-- {
+		keys = append(keys, "Up")
+	}
+	return append(keys, "Enter")
+}
+
+// menuCursorRow reports whether line is a menu option carrying the selection
+// cursor, e.g. "❯ No, exit" or "› 1. Yes, continue".
+func menuCursorRow(line string) bool {
+	trimmed := stripLeadingBoxBorder(strings.ReplaceAll(line, " ", " "))
+	for _, glyph := range menuCursorGlyphs {
+		if rest, ok := strings.CutPrefix(trimmed, glyph+" "); ok && strings.TrimSpace(rest) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func containsPostTrustStartupDialog(content string) bool {
@@ -1036,7 +1141,10 @@ type streamDialogSpec struct {
 	ready       func(string) bool
 	readyOrNext func(string) bool
 	matchKeys   []string
-	matchDelay  time.Duration
+	// matchKeysFor, when set, chooses the keys from the matched snapshot
+	// instead of using the fixed matchKeys.
+	matchKeysFor func(string) []string
+	matchDelay   time.Duration
 }
 
 type replayableSnapshotStream struct {
@@ -1174,7 +1282,11 @@ func acceptDialogFromStream(
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
 					snapshots.replay(history[idx+1:])
-					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+					keys := spec.matchKeys
+					if spec.matchKeysFor != nil {
+						keys = spec.matchKeysFor(content)
+					}
+					return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
 				}
 				if spec.readyOrNext != nil && spec.readyOrNext(content) {
 					snapshots.replay(history[idx:])
