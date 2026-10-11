@@ -482,7 +482,105 @@ supervisor_must_reconcile() {
      grep -qi 'not running\|unreachable' "$EVIDENCE/supervisor-reload.txt"; then
     stop_human "the machine-wide supervisor cannot be asked to reconcile this city, so its agents will never start: $(tr '\n' ' ' < "$EVIDENCE/supervisor-reload.txt")— restarting a machine-wide supervisor is a decision for its owner, not for this run"
   fi
-  say 'the machine-wide supervisor reconciled this city'
+  # What the supervisor answered is that it reconciled the cities REGISTERED with
+  # it. Whether this city is one of them is a separate question, asked by
+  # city_must_be_supervised, so this does not claim it.
+  say 'the machine-wide supervisor answered a reload of its registered cities'
+}
+
+# A RELOAD RECONCILES ONLY THE CITIES THE SUPERVISOR KNOWS ABOUT.
+#
+# `gc stop <city>` does not merely stop a city: it also UNREGISTERS it from the
+# machine-wide supervisor. On aws-infrastructure-intelligence an operator
+# stopped the city after one run ended, which left `~/.gc/cities.toml` reading
+# `cities = []`, and the next run reused that city. The reused-city branch asked
+# the supervisor to reload, the supervisor answered — correctly — having
+# reconciled every city it knew about, which was none, and the driver logged
+# that it had reconciled this one. The controller stayed stopped, every agent
+# stayed stopped, and the package sat in await for an hour of its ninety-minute
+# deadline with no worker session at all. `gc start <city>` by hand fixed it.
+#
+# So registration is reconciled here, before the reload, and asked of the
+# supervisor's own registry rather than assumed from the city being on disk.
+#
+# The verb is `gc register`, not `gc start`. Both register the city and both
+# start a supervisor only if none is running, but `gc start` also fetches
+# remote packs and will restart a supervisor whose binary has drifted — and
+# restarting a machine-wide process is a decision for its owner, not for this
+# run. `gc register` is idempotent and does exactly the one thing missing. It
+# is NOT passed --yes: a cross-city cycle warning is a question for a person,
+# and with nothing on its stdin the prompt is declined and stated as one.
+city_is_registered() {
+  local json real
+  json="$(SA_CITY='' SA_RIG='' gcx cities --json 2> "$EVIDENCE/cities.err")" || return 2
+  printf '%s\n' "$json" > "$EVIDENCE/cities.json"
+  real="$(cd "$CITY" 2>/dev/null && pwd -P)"
+  jq -e --arg c "$CITY" --arg r "${real:-$CITY}" \
+    '[(.cities // [])[] | .path // empty] | any(. == $c or . == $r)' \
+    <<<"$json" >/dev/null 2>&1
+}
+
+# city_controller_state — the city's controller as `gc status` reports it: the
+# text after `Controller:`, such as `supervisor-managed (PID 3632267)` or
+# `stopped`. A status that cannot be read is reported as that, never as running.
+city_controller_state() {
+  local state
+  if ! SA_RIG='' gcx status > "$EVIDENCE/city-status.txt" 2>&1; then
+    printf 'unknown (gc status failed: %s)' "$(tail -2 "$EVIDENCE/city-status.txt" | tr '\n' ' ')"
+    return 0
+  fi
+  state="$(sed -n 's/^[[:space:]]*Controller:[[:space:]]*//p' "$EVIDENCE/city-status.txt" | head -1)"
+  printf '%s' "${state:-unknown (gc status reported no Controller line)}"
+}
+
+# controller_is_running <state> — true for a controller that will start agents.
+controller_is_running() {
+  case "$1" in
+    supervisor-managed*|running*) return 0 ;;
+  esac
+  return 1
+}
+
+# city_must_be_supervised — the promise city-up makes downstream, checked rather
+# than inferred: this city is registered, the supervisor has reconciled it, and
+# its controller is actually running. A supervisor that answered is not a city
+# that is running, which is the whole of the incident above.
+#
+# A controller that is still not running stops the run for a person. Carrying on
+# to dispatch would route work to agents nobody will start and spend the
+# package's deadline discovering that — and a package gets one resume after a
+# deadline and is held after a second, so a silent wait can cost the chain.
+city_must_be_supervised() {
+  local rc
+  city_is_registered; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 2 ]; then
+      say "the supervisor's registry could not be read ($(tr '\n' ' ' < "$EVIDENCE/cities.err")); registering $CITY, which is idempotent"
+    else
+      say "$CITY is not registered with the machine-wide supervisor (a \`gc stop\` unregisters a city); registering it"
+    fi
+    sa_ledger_note "registering reused city $CITY with the machine-wide supervisor"
+    if ! SA_RIG='' gcx register "$CITY" < /dev/null > "$EVIDENCE/register.txt" 2>&1; then
+      stop_human "the city at $CITY is not registered with the machine-wide supervisor and registering it failed: $(tail -3 "$EVIDENCE/register.txt" | tr '\n' ' ')— run \`gc register $CITY\` (or \`gc start $CITY\`) and resume the run"
+    fi
+  fi
+
+  supervisor_must_reconcile
+
+  # Registration and reconciliation are asynchronous on the supervisor's side,
+  # so the controller is given a short, bounded time to come up.
+  local wait="${DELIVERY_CONTROLLER_START_WAIT:-60}"
+  case "$wait" in ''|*[!0-9]*) wait=60 ;; esac
+  local until=$(( $(date +%s) + wait )) state
+  while true; do
+    state="$(city_controller_state)"
+    controller_is_running "$state" && break
+    if [ "$(date +%s)" -ge "$until" ]; then
+      stop_human "the city at $CITY is registered with the machine-wide supervisor but its controller is $state after reconciling, so no worker will ever start and waiting would only spend the package's deadline; run \`gc start $CITY\`, confirm \`gc status --city $CITY\` shows the controller running, and resume the run"
+    fi
+    sleep 2
+  done
+  say "this city's controller is $state"
 }
 
 # EVERY PACKAGE IN THE EFFECTIVE PLAN NEEDS A WORKER, INCLUDING THE ONES
@@ -548,8 +646,10 @@ stage_city_up() {
     # Still asked, and asked first: a resumed run inherits the city but not the
     # supervisor that was answering when it was built. Reconciling is idempotent
     # and is the one thing this stage promises downstream — that the agents
-    # dispatch is about to route work to will actually be started.
-    supervisor_must_reconcile
+    # dispatch is about to route work to will actually be started. That promise
+    # needs the city REGISTERED as well as the supervisor answering, and is
+    # verified against the controller's own state rather than the reply.
+    city_must_be_supervised
     # And the agents themselves, asked of the EFFECTIVE plan: a remediation
     # authorized since this city was built has packages dispatch will route.
     # SA_CITY and SA_RIG are already exported from the same runtime facts this
@@ -1173,6 +1273,65 @@ awaited_packages() {
   done
 }
 
+# A WAIT WITH NOBODY WORKING IS NOT A WAIT, IT IS A DEADLINE BEING SPENT.
+#
+# A package's deadline bounds how long its WORK may take. It says nothing about
+# whether anyone started that work, and the wait loops below only ever asked
+# whether the bead had closed. So a city whose controller was stopped — the
+# aws-infrastructure-intelligence incident, where a `gc stop` had unregistered
+# the city and nothing restarted it — produced an hour of polling an open bead
+# with no worker session behind it, reported at the end as "not finished". A
+# package gets one resume after a deadline and is held after a second, so that
+# silence nearly cost every package downstream of it.
+#
+# So the wait also asks, every poll, the question worker_is_live already
+# answers: is a session running for this package's worker? A worker that has
+# not appeared within DELIVERY_WORKER_START_GRACE seconds (600 by default) gets
+# one attempt at the repair that fixed the incident by hand — register the city,
+# reconcile it, and verify its controller is running — and a further grace to
+# appear. If it still has not, the stage stops for a person with the reason,
+# rather than waiting out the deadline and reporting the wrong thing.
+#
+# This watches for a worker that never STARTED. A worker that was seen and then
+# went away is recovery's question, asked on the next resume, and is left to it.
+WORKER_START_GRACE="${DELIVERY_WORKER_START_GRACE:-600}"
+case "$WORKER_START_GRACE" in ''|*[!0-9]*) WORKER_START_GRACE=600 ;; esac
+
+# How often the wait loops poll. Fifteen seconds is the production cadence; the
+# knob exists so a test of the watch above does not have to sleep through it.
+AWAIT_POLL="${DELIVERY_AWAIT_POLL:-15}"
+case "$AWAIT_POLL" in ''|*[!0-9]*|0) AWAIT_POLL=15 ;; esac
+
+declare -A WORKER_WATCH_SINCE=() WORKER_WATCH_SEEN=() WORKER_WATCH_REPAIRED=()
+
+# worker_start_watch <package-id> — called once per poll for a package whose
+# work bead is still open. Returns normally while there is nothing to say; stops
+# the stage when the worker has demonstrably never started.
+worker_start_watch() {
+  local id="$1" now; now="$(date +%s)"
+  [ -n "${WORKER_WATCH_SINCE[$id]:-}" ] || WORKER_WATCH_SINCE[$id]="$now"
+  [ -z "${WORKER_WATCH_SEEN[$id]:-}" ] || return 0
+
+  if worker_is_live "$id"; then
+    WORKER_WATCH_SEEN[$id]=1
+    return 0
+  fi
+  local since="${WORKER_WATCH_SINCE[$id]}"
+  [ $(( now - since )) -ge "$WORKER_START_GRACE" ] || return 0
+
+  if [ -z "${WORKER_WATCH_REPAIRED[$id]:-}" ]; then
+    say "$id: no worker session has started within ${WORKER_START_GRACE}s while its work bead is open; re-checking that this city is registered and its controller is running"
+    sa_ledger_note "no worker session for $id within ${WORKER_START_GRACE}s; reconciling the city's registration"
+    WORKER_WATCH_REPAIRED[$id]=1
+    # Stops the stage itself when the controller still will not run.
+    city_must_be_supervised
+    WORKER_WATCH_SINCE[$id]="$(date +%s)"
+    return 0
+  fi
+
+  stop_human "no worker session for $id started within ${WORKER_START_GRACE}s, nor within ${WORKER_START_GRACE}s more after the city's registration was reconciled; the city's controller is $(city_controller_state). The work bead is still open and nobody is working on it, so waiting out the deadline would only spend it — inspect \`gc status --city $CITY\` and \`gc session list --city $CITY\`, start the worker, and resume the run"
+}
+
 stage_await() {
   [ -n "$CITY" ] || die 'no city; city-up has not run'
   cd "$CITY" || die "cannot enter $CITY"
@@ -1226,7 +1385,10 @@ stage_await() {
       not_finished "the work this stage waits for is still open:$remaining"
       return 1
     fi
-    sleep 15
+    for id in $remaining; do
+      worker_start_watch "$id"
+    done
+    sleep "$AWAIT_POLL"
   done
 }
 
@@ -1389,7 +1551,8 @@ stage_publish() {
         not_finished "$PACKAGE has not finished; its work bead $bead is still open"
         return 1
       fi
-      sleep 15
+      worker_start_watch "$PACKAGE"
+      sleep "$AWAIT_POLL"
     done
   fi
 
