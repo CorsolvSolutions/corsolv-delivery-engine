@@ -144,6 +144,43 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "${GC_STUB_SUPERVISOR_REPLY:-reconciled 1 city}"
     exit "${GC_STUB_SUPERVISOR_CODE:-0}"
     ;;
+  'cities '*)
+    # The machine-wide registry, as a file of registered city paths. A fixture
+    # registers its city by default; a test about an unregistered city — which
+    # is what ` + "`gc stop`" + ` leaves behind — empties it.
+    printf '{"cities":['
+    sep=''
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      printf '%s{"name":"%s","path":"%s"}' "$sep" "$(basename "$p")" "$p"
+      sep=','
+    done < "${GC_STUB_REGISTRY:-/dev/null}"
+    printf '],"ok":true}\n'
+    ;;
+  'register '*)
+    target="${2:-$STUB_CITY}"
+    code="${GC_STUB_REGISTER_CODE:-0}"
+    if [ "$code" = '0' ]; then
+      grep -qxF "$target" "$GC_STUB_REGISTRY" 2>/dev/null || printf '%s\n' "$target" >> "$GC_STUB_REGISTRY"
+      printf 'registered %s\n' "$target"
+    else
+      printf 'gc register: %s\n' "${GC_STUB_REGISTER_REPLY:-refused}" >&2
+    fi
+    exit "$code"
+    ;;
+  'status '*)
+    # The controller of a registered city is supervisor-managed once reconciled;
+    # an unregistered one is stopped, which is the incident's state. A test that
+    # needs a controller that will not start whatever happens says so.
+    if [ -n "${GC_STUB_CONTROLLER:-}" ]; then
+      ctl="$GC_STUB_CONTROLLER"
+    elif grep -qxF "$STUB_CITY" "${GC_STUB_REGISTRY:-/dev/null}" 2>/dev/null; then
+      ctl='supervisor-managed (PID 4242)'
+    else
+      ctl='stopped'
+    fi
+    printf '%s  %s\n  Controller: %s\n  Suspended:  no\n' "$(basename "$STUB_CITY")" "$STUB_CITY" "$ctl"
+    ;;
 esac
 exit 0
 `
@@ -217,7 +254,21 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 		t.Fatal(err)
 	}
 	e.setSessions(`{"schema_version":"1","sessions":[]}`)
+	e.setRegistry(e.city)
 	return e
+}
+
+// setRegistry writes the machine-wide supervisor's registry as the stub gc
+// reports it. A fixture's city is registered unless a test says otherwise.
+func (e *recoveryEnv) setRegistry(cities ...string) {
+	e.t.Helper()
+	body := ""
+	for _, c := range cities {
+		body += c + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(e.root, "registry"), []byte(body), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // git runs one git command in the fixture and fails the test if it errors.
@@ -441,6 +492,7 @@ func (e *recoveryEnv) scrubbedEnv(extra []string) []string {
 		"GC_STUB_SESSIONS="+e.sessions,
 		"GC_STUB_SEQ="+filepath.Join(e.root, "bead-seq"),
 		"GC_STUB_RIG="+recoveryRigName,
+		"GC_STUB_REGISTRY="+filepath.Join(e.root, "registry"),
 		"NPM_STUB_LOG="+filepath.Join(e.root, "npm-calls.log"),
 	)
 	return append(env, extra...)
