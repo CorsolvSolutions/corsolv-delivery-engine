@@ -838,6 +838,29 @@ recover_worker() {
   route_bead "$id" "$bead"
 }
 
+# route_unheld_bead <package-id> <bead> — route a package's work bead when the
+# work is still open and nobody is holding it; otherwise do nothing.
+#
+# This is recover_worker's decision for a caller that has ALREADY settled the
+# worktree questions — the tree exists and its base is not stale — so only the
+# two questions that guard against harm are asked again, of the things that
+# know: a closed bead is finished work and is never handed back, and a bead a
+# live worker holds is never slung a second time. `gc sling` is idempotent
+# besides (an already-routed bead is reported "already routed … skipping"), so
+# routing a bead that some earlier stage of this run also routed, before its
+# worker had come up, costs a line in the route log and nothing else.
+route_unheld_bead() {
+  local id="$1" bead="$2"
+  [ -n "$bead" ] || return 0
+  bead_is_closed "$bead" && return 0
+  if worker_is_live "$id"; then
+    return 0
+  fi
+  say "$id: bead $bead is open and no worker holds it; routing it to its worker"
+  sa_ledger_note "routing $id: open bead $bead with no live worker"
+  route_bead "$id" "$bead"
+}
+
 # ===========================================================================
 # STAGE dispatch
 # ===========================================================================
@@ -1244,6 +1267,24 @@ ensure_package_worktree() {
       return 0
     fi
     prepare_worktree "$wt" "$id"
+
+    # A TREE THAT SURVIVED IS NOT A WORKER THAT WAS STARTED.
+    #
+    # Only the branch below — the one that CUTS a missing tree — used to route
+    # the bead, so this branch handed back a prepared tree and nobody to work
+    # in it. On aws-infrastructure-intelligence (2026-10-11/12) a re-run found
+    # the worktrees of wp-rules-engine and wp-aws-access left over from an
+    # earlier run, with bases still current. Their beads were open, carried no
+    # `gc.routed_to`, and had no worker session; the run waited on
+    # await-wp-<pkg>, spending the package's deadline, until an operator slung
+    # each bead by hand. recover_worker would have routed them, but it runs at
+    # dispatch, and a package whose upstreams had merged since reaches its
+    # worktree only here.
+    #
+    # So the existing tree gets the same question the cut tree gets an answer
+    # to: is the work open, and is anybody on it? A closed bead is left alone,
+    # and a live worker is never given the same bead twice.
+    route_unheld_bead "$id" "$bead"
     return 0
   fi
 
@@ -1325,6 +1366,14 @@ worker_start_watch() {
     WORKER_WATCH_REPAIRED[$id]=1
     # Stops the stage itself when the controller still will not run.
     city_must_be_supervised
+    # A running controller starts only the workers whose beads are routed to
+    # them. A bead that was never slung — the surviving-worktree incident that
+    # ensure_package_worktree now prevents — would leave a healthy city with
+    # nothing to start, and this watch would stop the run over a repair it
+    # could have made. The watch only runs while the bead is open, and
+    # route_unheld_bead asks again whether a worker is live, so this never
+    # duplicates work; `gc sling` skips a bead that is already routed.
+    route_unheld_bead "$id" "$(rt_get "bead.$id")"
     WORKER_WATCH_SINCE[$id]="$(date +%s)"
     return 0
   fi
@@ -1526,13 +1575,12 @@ stage_publish() {
   # without one — a single-package plan resumed straight into publish, say —
   # and is a no-op when the work is already done.
   #
-  # Whether the tree already existed decides who is allowed to start the worker.
-  # ensure_package_worktree cuts and routes a package that is reaching its base
-  # for the FIRST time; recover_worker routes one whose tree was already there
-  # and whose worker is gone. Letting both act on the same package would sling
-  # the same bead twice within a second of itself.
-  local hadWorktree='no'
-  [ -d "$wt" ] && hadWorktree='yes'
+  # ensure_package_worktree starts the worker in every case that needs one: it
+  # cuts and routes a package reaching its base for the first time, re-cuts and
+  # routes one whose base went stale, and routes one whose tree survived but
+  # whose bead is open with nobody holding it. This stage used to follow it with
+  # recover_worker for that last case; now that the worktree stage answers it,
+  # calling both would sling the same bead twice within a second of itself.
   ensure_package_worktree "$PACKAGE"
 
   # An open bead here means the work is not done, and the worktree existing says
@@ -1541,7 +1589,6 @@ stage_publish() {
   # an interrupted run whose worktree survived arrived here with an open bead, no
   # worker, and nothing left in the run that would ever start one.
   if ! bead_is_closed "$bead"; then
-    [ "$hadWorktree" = 'yes' ] && recover_worker "$PACKAGE"
     local deadline=$(( $(date +%s) + DEADLINE ))
     while ! bead_is_closed "$bead"; do
       if [ "$(date +%s)" -ge "$deadline" ]; then
