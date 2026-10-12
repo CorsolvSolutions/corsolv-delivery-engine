@@ -1224,10 +1224,51 @@ worktree_base_is_stale() {
 # run's own log, because a tree cut from the wrong base can still have had a
 # worker write files into it — and those files were written against a repository
 # that was missing the project.
+#
+# WORK IS CARRIED FORWARD, NEVER THROWN AWAY.
+#
+# THE INCIDENT THIS EXISTS FOR, on aws-infrastructure-intelligence (2026-10-12).
+# wp-resource-collectors' worker finished and closed its bead with 34 files in
+# its tree — uncommitted, as every worker's output is, because a worker cannot
+# run git and the controller commits at publish. The controller re-ran the
+# package's declared gates, two of its tests failed, and return_to_worker sent
+# it back, which reopened the bead. By the time the publish stage resumed,
+# other packages had merged and `main` had moved, so the tree was a strict
+# ancestor of the merged head with an open bead and nobody on it — stale, by
+# every clause worktree_base_is_stale asks. This function then did what it was
+# written to do: `worktree remove --force`, `branch -D` ("Deleted branch
+# gc-worker-wp-resource-collectors (was 61e2884)"), and a fresh cut. All 34
+# files went with it, and the worker rebuilt the package from nothing. It
+# happened to finish in time; a package whose deadline holds a downstream chain
+# will not always be so lucky.
+#
+# The discard was written for a different tree: one cut "from a base that had no
+# project in it", where whatever had been written was written against nothing.
+# A package SENT BACK is the opposite — a finished tree, gated against a real
+# project, that is merely behind `main` — and "uncommitted" there means "not yet
+# published", not "worthless". worktree_base_is_stale already refuses to re-cut
+# a branch that carries COMMITS the default branch lacks; the working tree is
+# the same work one step earlier in its life, and gets the same respect.
+#
+# So a tree holding any worker output — a modified or deleted tracked file, an
+# untracked file, or a file the plan names that .gitignore would hide — is
+# handed to carry_work_forward, which preserves it before anything is touched
+# and puts it back on the new base. Only a tree with no worker output at all is
+# re-cut the old way, because there is nothing in it to lose.
 recut_worktree() {
-  local id="$1" wt="$2" branch="$3" bead="$4" head loose
+  local id="$1" wt="$2" branch="$3" bead="$4" head tip snapTree loose
   head="$(merged_head)"
   [ -n "$head" ] || die "cannot read the authoritative merged branch to re-cut $id from"
+  tip="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+  [ -n "$tip" ] || die "cannot read the head of $id's worktree to re-cut it"
+
+  snapTree="$(worktree_snapshot_tree "$wt" "$id" 2> "$EVIDENCE/recut-$id.txt")" \
+    || die_from "$EVIDENCE/recut-$id.txt" "reading what $id's stale worktree holds before re-cutting it; nothing was re-cut"
+  if [ "$snapTree" != "$(git -C "$wt" rev-parse "$tip^{tree}")" ]; then
+    carry_work_forward "$id" "$wt" "$branch" "$bead" "$tip" "$head" "$snapTree"
+    return 0
+  fi
+
   loose="$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${loose:-0}" -gt 0 ]; then
     say "$id: discarding $loose uncommitted path(s) written against a base that had no project in it"
@@ -1240,6 +1281,216 @@ recut_worktree() {
   prepare_worktree "$wt" "$id"
   say "re-cut $id from the merged base ${head:0:9} — its worker runs now"
   route_bead "$id" "$bead"
+}
+
+# The paths a tree carries that belong to the city and the controller rather
+# than to the worker: the same runtime noise wt_add keeps out of the tracked
+# tree, and the per-package gate grant prepare_worktree writes under .claude/.
+# A tree Gas City cut for itself may not carry wt_add's local excludes, so they
+# are restated here — otherwise the controller's own grant file would read as
+# worker output and every stale tree would look like one holding work.
+#
+# They are taken back out of the snapshot index AFTER `git add -A` rather than
+# excluded from it by pathspec: an exclude naming a path .gitignore already
+# ignores makes `git add` refuse the whole invocation.
+RECUT_CONTROLLER_PATHS=(
+  .beads/redirect .beads/hooks .beads/formulas
+  .logs .claude .codex .gemini .opencode state.json
+)
+
+# worktree_snapshot_tree <worktree> <id> — print the git tree of everything the
+# worktree holds: HEAD, plus every change in it, tracked or untracked, plus any
+# file this package's plan names that .gitignore would otherwise hide (the
+# files stage_publish force-adds, which `git add -A` alone would leave behind).
+#
+# It is built in a THROWAWAY index, so it never touches the worktree's own
+# index, its files, or anything another worktree shares. `git stash` is the
+# obvious tool and the wrong one: the stash is a single ref shared by every
+# worktree of the rig, so one package's snapshot could be popped into another's.
+worktree_snapshot_tree() {
+  local wt="$1" id="$2" tmp rc=0 candidate
+  local -a pathList=()
+  tmp="$(mktemp -d)" || return 1
+  IFS=',' read -r -a pathList <<< "$(pkg_paths_csv "$id")"
+  (
+    export GIT_INDEX_FILE="$tmp/index"
+    git -C "$wt" read-tree HEAD || exit 1
+    git -C "$wt" add -A -- . || exit 1
+    git -C "$wt" reset -q HEAD -- "${RECUT_CONTROLLER_PATHS[@]}" || exit 1
+    for candidate in "${pathList[@]}"; do
+      [ -n "$candidate" ] && [ -f "$wt/$candidate" ] || continue
+      git -C "$wt" check-ignore -q --no-index -- "$candidate" || continue
+      git -C "$wt" add -f -- "$candidate" || exit 1
+    done
+    git -C "$wt" write-tree
+  ) || rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+# preserve_worktree_work <id> <worktree> <tip> <tree> — record the tree as a
+# controller commit on top of <tip>, under a ref of its own, and print the ref.
+#
+# The ref lives in the rig's shared refs under refs/delivery/preserved/<id>/,
+# outside refs/heads, so no branch operation, `worktree remove` or `branch -D`
+# can take it, and `git gc` keeps what it points at. It is KEPT after the work
+# has been carried forward: it costs nothing, and it is how a person gets the
+# work back if anything after this point goes wrong. A later stage that finds
+# the same tree on the same tip reuses the newest ref instead of minting one
+# per stage.
+preserve_worktree_work() {
+  local id="$1" wt="$2" tip="$3" tree="$4" prefix latest commit ref stamp n=1
+  prefix="refs/delivery/preserved/$id"
+  latest="$(git -C "$RIG_PATH" for-each-ref --sort=-refname --count=1 --format='%(refname)' "$prefix/" 2>/dev/null)"
+  if [ -n "$latest" ] \
+    && [ "$(git -C "$RIG_PATH" rev-parse "$latest^{tree}" 2>/dev/null)" = "$tree" ] \
+    && [ "$(git -C "$RIG_PATH" rev-parse "$latest^" 2>/dev/null)" = "$tip" ]; then
+    printf '%s\n' "$latest"
+    return 0
+  fi
+  commit="$(git -C "$wt" -c "user.name=$CONTROLLER_NAME" -c "user.email=$CONTROLLER_EMAIL" \
+    commit-tree "$tree" -p "$tip" -m "preserved($id): worker output in a stale tree, before re-cutting it
+
+The controller snapshotted this package's uncommitted worker output so that
+re-cutting its tree onto the merged head could not lose it. The worker did not
+make this commit; it exists only to be recovered from.")" || return 1
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  ref="$prefix/$stamp"
+  while git -C "$RIG_PATH" show-ref --verify --quiet "$ref"; do
+    n=$(( n + 1 ))
+    ref="$prefix/$stamp-$n"
+  done
+  git -C "$RIG_PATH" update-ref "$ref" "$commit" "" || return 1
+  printf '%s\n' "$ref"
+}
+
+# restore_tree_from <worktree> <tree> — make a freshly cut worktree's files
+# match <tree> while leaving every difference from HEAD UNCOMMITTED: modified
+# and deleted tracked files unstaged, new files untracked. That is the shape a
+# worker's output always has, and the shape stage_publish stages from — it
+# commits the authorized paths it finds changed, and adopt_committed_work
+# exists only for a commit the controller itself made and could not push. So
+# carried work is never committed here: the controller makes exactly one commit
+# per publication, and it makes it at publish.
+restore_tree_from() {
+  local wt="$1" tree="$2"
+  git -C "$wt" read-tree -m -u HEAD "$tree" || return 1
+  git -C "$wt" reset -q || return 1
+}
+
+# keep_stale_tree <id> <worktree> <bead> <why> — leave a stale tree that holds
+# work exactly where it is, prepare it, and route its bead.
+#
+# A worker sent back can fix its package on the base it already has: stage
+# publish commits on that branch and merges it onto `main` the way it merges
+# every package, so a base that is behind is a later merge, never a loss. The
+# rule this function serves is the same one worktree_base_is_stale states for
+# committed work — when re-basing would cost the work, the work wins.
+keep_stale_tree() {
+  local id="$1" wt="$2" bead="$3" why="$4"
+  say "$id: $why; its tree is left on its own base with every file in place, and its worker fixes it there"
+  sa_ledger_note "kept $id's stale tree in place: $why"
+  prepare_worktree "$wt" "$id"
+  route_unheld_bead "$id" "$bead"
+}
+
+# carry_work_forward <id> <worktree> <branch> <bead> <tip> <head> <tree> — re-cut
+# a stale tree that holds worker output onto the merged head WITHOUT losing it.
+#
+#   1. Preserve. The whole tree is committed by the controller onto a ref of its
+#      own (preserve_worktree_work) before anything is removed. If that fails,
+#      nothing is re-cut.
+#   2. Ask before acting. The carry is a three-way merge — base: the old tip;
+#      ours: the merged head; theirs: the snapshot — computed by
+#      `git merge-tree --write-tree`, which touches no worktree. A conflict (the
+#      default branch changed the same lines the worker did) is found HERE,
+#      while the original tree is still standing, so the fallback is simply not
+#      to re-cut: keep_stale_tree.
+#   3. Re-cut and re-apply. Only on a clean merge is the tree removed and cut
+#      again from the merged head, and the merged result written into it
+#      uncommitted (restore_tree_from). What is in the tree afterwards is
+#      checked against the merge it was meant to hold.
+#   4. If anything in step 3 fails, the original is put back: the tree is cut
+#      again at its OLD tip on its old branch and the snapshot restored into it,
+#      uncommitted, so it is exactly as it was. Only if that fails too does the
+#      run stop for a person — naming the ref the work is safe under.
+carry_work_forward() {
+  local id="$1" wt="$2" branch="$3" bead="$4" tip="$5" head="$6" tree="$7"
+  local ev="$EVIDENCE/recut-$id.txt" ref snap merged rc changed
+  {
+    printf 'package:      %s\n' "$id"
+    printf 'worktree:     %s\n' "$wt"
+    printf 'branch:       %s\n' "$branch"
+    printf 'old base:     %s\n' "$tip"
+    printf 'merged head:  %s\n' "$head"
+  } > "$ev"
+
+  if ! ref="$(preserve_worktree_work "$id" "$wt" "$tip" "$tree" 2>> "$ev")"; then
+    printf 'outcome:      NOT re-cut; the worker output could not be preserved\n' >> "$ev"
+    keep_stale_tree "$id" "$wt" "$bead" \
+      "its stale tree holds worker output that could not be preserved (see recut-$id.txt), so it is not re-cut"
+    return 0
+  fi
+  snap="$(git -C "$RIG_PATH" rev-parse "$ref")"
+  changed="$(git -C "$RIG_PATH" diff --name-status "$tip" "$snap" | wc -l | tr -d ' ')"
+  {
+    printf 'preserved:    %s (%s)\n' "$ref" "$snap"
+    printf 'worker output (%s path(s)):\n' "$changed"
+    git -C "$RIG_PATH" diff --name-status "$tip" "$snap" | sed 's/^/  /'
+  } >> "$ev"
+  say "$id: its stale tree holds $changed path(s) of worker output; preserved as $ref before re-cutting"
+
+  rc=0
+  merged="$(git -C "$RIG_PATH" merge-tree --write-tree --merge-base="$tip" "$head" "$snap" 2>> "$ev")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    {
+      printf 'outcome:      NOT re-cut; re-applying the worker output onto %s does not merge cleanly (merge-tree exit %s)\n' "$head" "$rc"
+      printf '%s\n' "$merged" | sed 's/^/  /'
+    } >> "$ev"
+    keep_stale_tree "$id" "$wt" "$bead" \
+      "its worker output conflicts with what the default branch merged since ${tip:0:9} (see recut-$id.txt; preserved as $ref)"
+    return 0
+  fi
+  merged="$(head -1 <<<"$merged")"
+
+  {
+    printf 'merged tree:  %s\n' "$merged"
+    printf -- '--- re-cut ---\n'
+  } >> "$ev"
+  git -C "$RIG_PATH" worktree remove --force "$wt" >> "$ev" 2>&1 \
+    || die_from "$ev" "removing the stale worktree for $id (its work is preserved as $ref)"
+  git -C "$RIG_PATH" branch -D "$branch" >> "$ev" 2>&1 || true
+
+  if wt_add "$RIG_PATH" "$wt" "$branch" "$head" >> "$ev" 2>&1 \
+    && wt_is_registered "$RIG_PATH" "$wt" \
+    && restore_tree_from "$wt" "$merged" >> "$ev" 2>&1 \
+    && [ "$(worktree_snapshot_tree "$wt" "$id" 2>> "$ev")" = "$merged" ]; then
+    printf 'outcome:      re-cut onto %s with the worker output re-applied, uncommitted\n' "$head" >> "$ev"
+    prepare_worktree "$wt" "$id"
+    say "re-cut $id from the merged base ${head:0:9} and carried its $changed path(s) of worker output forward, uncommitted — its worker runs now"
+    sa_ledger_note "re-cut $id onto ${head:0:9}, carrying its worker output forward (preserved as $ref)"
+    route_bead "$id" "$bead"
+    return 0
+  fi
+
+  # Step 4: the re-apply did not land. Put the original back exactly.
+  printf -- '--- re-apply failed; restoring the original tree at %s ---\n' "$tip" >> "$ev"
+  if [ -e "$wt" ]; then
+    git -C "$RIG_PATH" worktree remove --force "$wt" >> "$ev" 2>&1 || rm -rf "$wt"
+    git -C "$RIG_PATH" worktree prune >> "$ev" 2>&1 || true
+  fi
+  git -C "$RIG_PATH" branch -D "$branch" >> "$ev" 2>&1 || true
+  if wt_add "$RIG_PATH" "$wt" "$branch" "$tip" >> "$ev" 2>&1 \
+    && wt_is_registered "$RIG_PATH" "$wt" \
+    && restore_tree_from "$wt" "$tree" >> "$ev" 2>&1 \
+    && [ "$(worktree_snapshot_tree "$wt" "$id" 2>> "$ev")" = "$tree" ]; then
+    printf 'outcome:      NOT re-cut; the original tree was restored at %s from %s\n' "$tip" "$ref" >> "$ev"
+    keep_stale_tree "$id" "$wt" "$bead" \
+      "re-applying its worker output onto ${head:0:9} failed, so its original tree was restored from $ref"
+    return 0
+  fi
+  printf 'outcome:      FAILED to restore; the work is preserved as %s\n' "$ref" >> "$ev"
+  stop_human "$id: re-cutting its stale tree failed and its original tree could not be restored; nothing is lost — every file the worker wrote is preserved as $ref ($snap, on top of ${tip:0:9}). Restore it with \`git -C $RIG_PATH worktree add $wt $snap\` (or check out its paths into a tree), see recut-$id.txt, and resume the run"
 }
 
 ensure_package_worktree() {
